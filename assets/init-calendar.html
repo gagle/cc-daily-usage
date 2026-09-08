@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cc-daily-usage — laboral days</title>
+    <style>
+      :root {
+        --canvas: #090909;
+        --surface-1: #141414;
+        --surface-2: #1c1c1c;
+        --ink: #ffffff;
+        --ink-muted: #999999;
+        --accent-blue: #0099ff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--canvas);
+        color: var(--ink);
+        font-family: "Inter", system-ui, sans-serif;
+        padding: 20px;
+      }
+      h1 {
+        font-size: 1.4rem;
+        margin: 0 0 15px;
+      }
+      .top-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 15px;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+      label {
+        font-size: 0.85rem;
+        color: var(--ink-muted);
+        display: block;
+        margin-bottom: 5px;
+      }
+      input[type="number"] {
+        background: var(--surface-1);
+        border: 1px solid var(--surface-2);
+        border-radius: 10px;
+        color: var(--ink);
+        padding: 8px 10px;
+        font-size: 1rem;
+        width: 140px;
+      }
+      .readonly-line {
+        font-size: 0.85rem;
+        color: var(--ink-muted);
+      }
+      .year-tabs {
+        display: flex;
+        gap: 10px;
+        margin-bottom: 15px;
+        flex-wrap: wrap;
+      }
+      .year-tab {
+        background: var(--surface-1);
+        border: 1px solid var(--surface-2);
+        border-radius: 100px;
+        color: var(--ink);
+        padding: 6px 15px;
+        cursor: pointer;
+        font-size: 0.85rem;
+      }
+      .year-tab.active {
+        background: var(--ink);
+        color: var(--canvas);
+      }
+      .month-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 15px;
+      }
+      .month-card {
+        background: var(--surface-1);
+        border-radius: 20px;
+        padding: 15px;
+      }
+      .month-card h3 {
+        margin: 0 0 10px;
+        font-size: 0.95rem;
+        color: var(--ink-muted);
+      }
+      .day-grid {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        gap: 4px;
+        user-select: none;
+      }
+      .day-cell {
+        aspect-ratio: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 6px;
+        background: var(--surface-2);
+        font-size: 0.8rem;
+        cursor: pointer;
+      }
+      .day-cell.weekend {
+        opacity: 0.3;
+        cursor: not-allowed;
+      }
+      .day-cell.selected {
+        background: #a1d76a;
+        color: #090909;
+        font-weight: 700;
+      }
+      .day-cell.blank {
+        visibility: hidden;
+      }
+      .button-primary {
+        background: #ffffff;
+        color: #090909;
+        border: none;
+        border-radius: 100px;
+        padding: 10px 15px;
+        font-size: 0.9rem;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      .save-indicator {
+        font-size: 0.8rem;
+        color: var(--ink-muted);
+        margin-left: 10px;
+      }
+      .banner {
+        display: none;
+        background: var(--surface-1);
+        border: 1px solid var(--accent-blue);
+        border-radius: 10px;
+        padding: 10px 15px;
+        margin-bottom: 15px;
+      }
+      @media (min-width: 810px) {
+        .month-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Laboral days &amp; monthly cap</h1>
+    <div id="banner" class="banner">Saved — you can close this tab</div>
+    <div class="top-row">
+      <div>
+        <label for="cap">Monthly cap</label>
+        <input id="cap" type="number" min="0" step="1" />
+      </div>
+      <div class="readonly-line" id="spent-line"></div>
+      <span class="save-indicator" id="save-indicator"></span>
+    </div>
+    <div class="year-tabs" id="year-tabs"></div>
+    <div class="month-grid" id="month-grid"></div>
+    <div class="top-row" style="margin-top: 20px">
+      <button class="button-primary" id="done-button">Done</button>
+    </div>
+    <script>
+      (function () {
+        var STATE = __CC_DAILY_USAGE_STATE__;
+        var TOKEN = __CC_DAILY_USAGE_TOKEN__;
+        var laboralDays = STATE.laboralDays || {};
+        var monthlyCap = STATE.monthlyCap;
+        var monthlySpent = STATE.monthlySpent || 0;
+
+        var thisYear = new Date().getUTCFullYear();
+        var years = [thisYear, thisYear + 1];
+        var selectedYear = thisYear;
+        var MONTH_NAMES = [
+          "January",
+          "February",
+          "March",
+          "April",
+          "May",
+          "June",
+          "July",
+          "August",
+          "September",
+          "October",
+          "November",
+          "December",
+        ];
+
+        document.getElementById("cap").value = monthlyCap;
+        document.getElementById("spent-line").textContent =
+          "Spent so far this month: $" + monthlySpent.toFixed(2) + " (auto-tracked)";
+
+        function isSelected(year, month, day) {
+          var days = (laboralDays[String(year)] || {})[String(month)] || [];
+          return days.indexOf(day) !== -1;
+        }
+
+        function toggleDay(year, month, day, targetState) {
+          var yearKey = String(year),
+            monthKey = String(month);
+          if (!laboralDays[yearKey]) laboralDays[yearKey] = {};
+          var days = laboralDays[yearKey][monthKey] || [];
+          var idx = days.indexOf(day);
+          if (targetState && idx === -1) days.push(day);
+          if (!targetState && idx !== -1) days.splice(idx, 1);
+          days.sort(function (a, b) {
+            return a - b;
+          });
+          laboralDays[yearKey][monthKey] = days;
+        }
+
+        function daysInMonth(year, month) {
+          return new Date(Date.UTC(year, month, 0)).getUTCDate();
+        }
+
+        function weekdayOf(year, month, day) {
+          // 0 = Monday .. 6 = Sunday
+          var jsDay = new Date(Date.UTC(year, month - 1, day)).getUTCDay(); // 0 = Sunday
+          return (jsDay + 6) % 7;
+        }
+
+        var dragTargetState = null;
+
+        function renderMonth(year, month) {
+          var card = document.createElement("div");
+          card.className = "month-card";
+          var heading = document.createElement("h3");
+          heading.textContent = MONTH_NAMES[month - 1] + " " + year;
+          card.appendChild(heading);
+          var grid = document.createElement("div");
+          grid.className = "day-grid";
+
+          var total = daysInMonth(year, month);
+          var leadingBlanks = weekdayOf(year, month, 1);
+          for (var b = 0; b < leadingBlanks; b++) {
+            var blank = document.createElement("div");
+            blank.className = "day-cell blank";
+            grid.appendChild(blank);
+          }
+
+          for (var day = 1; day <= total; day++) {
+            var weekday = weekdayOf(year, month, day);
+            var isWeekend = weekday >= 5;
+            var cell = document.createElement("div");
+            cell.className =
+              "day-cell" +
+              (isWeekend ? " weekend" : "") +
+              (isSelected(year, month, day) ? " selected" : "");
+            cell.textContent = String(day);
+            cell.dataset.year = String(year);
+            cell.dataset.month = String(month);
+            cell.dataset.day = String(day);
+            cell.dataset.weekend = String(isWeekend);
+
+            if (!isWeekend) {
+              cell.addEventListener("mousedown", function (e) {
+                var el = e.currentTarget;
+                dragTargetState = !el.classList.contains("selected");
+                applyState(el, dragTargetState);
+                scheduleSave();
+              });
+              cell.addEventListener("mouseenter", function (e) {
+                if (dragTargetState === null || e.buttons !== 1) return;
+                var el = e.currentTarget;
+                if (el.dataset.weekend === "true") return;
+                applyState(el, dragTargetState);
+                scheduleSave();
+              });
+            }
+            grid.appendChild(cell);
+          }
+
+          card.appendChild(grid);
+          return card;
+        }
+
+        function applyState(cell, targetState) {
+          var year = Number(cell.dataset.year),
+            month = Number(cell.dataset.month),
+            day = Number(cell.dataset.day);
+          toggleDay(year, month, day, targetState);
+          cell.classList.toggle("selected", targetState);
+        }
+
+        window.addEventListener("mouseup", function () {
+          dragTargetState = null;
+        });
+
+        function renderYear(year) {
+          var grid = document.getElementById("month-grid");
+          grid.innerHTML = "";
+          for (var m = 1; m <= 12; m++) {
+            grid.appendChild(renderMonth(year, m));
+          }
+        }
+
+        function renderYearTabs() {
+          var tabs = document.getElementById("year-tabs");
+          tabs.innerHTML = "";
+          years.forEach(function (year) {
+            var tab = document.createElement("div");
+            tab.className = "year-tab" + (year === selectedYear ? " active" : "");
+            tab.textContent = String(year);
+            tab.addEventListener("click", function () {
+              selectedYear = year;
+              renderYearTabs();
+              renderYear(year);
+            });
+            tabs.appendChild(tab);
+          });
+        }
+
+        var saveTimer = null;
+        function scheduleSave() {
+          var indicator = document.getElementById("save-indicator");
+          indicator.textContent = "Saving…";
+          if (saveTimer) clearTimeout(saveTimer);
+          saveTimer = setTimeout(save, 400);
+        }
+
+        function save() {
+          var cap = Number(document.getElementById("cap").value) || 0;
+          monthlyCap = cap;
+          fetch("/save", {
+            method: "POST",
+            headers: { "x-cc-daily-usage-init-auth": TOKEN, "content-type": "application/json" },
+            body: JSON.stringify({ monthlyCap: cap, laboralDays: laboralDays }),
+          })
+            .then(function () {
+              document.getElementById("save-indicator").textContent = "Saved";
+            })
+            .catch(function () {
+              document.getElementById("save-indicator").textContent = "Save failed";
+            });
+        }
+
+        document.getElementById("cap").addEventListener("input", scheduleSave);
+
+        document.getElementById("done-button").addEventListener("click", function () {
+          fetch("/done", { method: "POST", headers: { "x-cc-daily-usage-init-auth": TOKEN } }).then(
+            function () {
+              document.getElementById("banner").style.display = "block";
+            },
+          );
+        });
+
+        setInterval(function () {
+          if (document.visibilityState !== "visible") return;
+          fetch("/heartbeat", { method: "POST", headers: { "x-cc-daily-usage-init-auth": TOKEN } });
+        }, 5000);
+
+        renderYearTabs();
+        renderYear(selectedYear);
+      })();
+    </script>
+  </body>
+</html>
