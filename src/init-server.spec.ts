@@ -3,7 +3,7 @@ import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./config.js", () => ({
-  loadConfig: vi.fn(() => ({ monthlyCap: 200, laboralDays: {} })),
+  loadConfig: vi.fn((_accountKey: string) => ({ monthlyCap: 200, laboralDays: {} })),
   saveConfig: vi.fn(),
 }));
 
@@ -234,7 +234,7 @@ describe("runInit", () => {
       JSON.stringify(payload),
     );
     expect(saveRes.statusCode).toBe(200);
-    expect(saveConfig).toHaveBeenCalledWith(payload);
+    expect(saveConfig).toHaveBeenCalledWith("default", payload);
 
     const heartbeatRes = await rawRequest(run.port, {
       path: "/heartbeat",

@@ -5,6 +5,32 @@ export function getLaboralDays(config: Config, year: number, month: number): Rea
   return config.laboralDays[String(year)]?.[String(month)] ?? [];
 }
 
+/**
+ * Any calendar day with recorded real spend counts toward the theoretical avg-per-day math, whether or not
+ * it was ever explicitly configured as a laboral day — weekend or not. Re-scans all of usage.days every
+ * call (not just newly-frozen days), so this single pass covers both backfilling pre-existing history and
+ * folding in every future day going forward. Returns the same `config` reference when nothing needs adding
+ * — callers use that to skip a redundant saveConfig.
+ */
+export function reconcileLaboralDays(config: Config, usage: UsageState): Config {
+  let laboralDays = config.laboralDays;
+  for (const iso of Object.keys(usage.days)) {
+    const year = iso.slice(0, 4);
+    const month = String(Number(iso.slice(5, 7)));
+    const day = Number(iso.slice(8, 10));
+    const existing = laboralDays[year]?.[month] ?? [];
+    if (existing.includes(day)) continue;
+    laboralDays = {
+      ...laboralDays,
+      [year]: {
+        ...laboralDays[year],
+        [month]: [...existing, day].sort((a, b) => a - b),
+      },
+    };
+  }
+  return laboralDays === config.laboralDays ? config : { ...config, laboralDays };
+}
+
 export function utcDateString(date: Date): string {
   return date.toISOString().slice(0, 10); // "YYYY-MM-DD"
 }
@@ -32,18 +58,20 @@ function computeAvgPerDay(config: Config, monthlySpent: number, remaining: numbe
 }
 
 /**
- * Walks every UTC calendar date strictly after usage.lastUpdated up to (not including) nowUtc's date,
- * freezing each laboral day's final derived amount into usage.days. Also freezes today's avgPerDay/
- * safeMonthTotal exactly once per UTC day (decision 24) — the moment nowUtc's date differs from
- * usage.frozenForDate, using monthlySpent as it stands at that instant, before today's own spend accrues.
- * Idempotent: calling it again the same UTC day is a no-op beyond refreshing lastUpdated's timestamp.
+ * Walks every UTC calendar date from usage.lastUpdated's own day up to (not including) nowUtc's date,
+ * freezing each laboral day's final derived amount into usage.days — including lastUpdated's day itself,
+ * since that day's spend is fully settled by the time nowUtc rolls onto a new date (its own capture already
+ * happened before this call). Also freezes today's avgPerDay/safeMonthTotal exactly once per UTC day
+ * (decision 24) — the moment nowUtc's date differs from usage.frozenForDate, using monthlySpent as it
+ * stands at that instant, before today's own spend accrues. Idempotent: calling it again the same UTC day
+ * is a no-op beyond refreshing lastUpdated's timestamp.
  */
 export function rolloverIfNeeded(usage: UsageState, config: Config, nowUtc: Date): UsageState {
   const lastDate = new Date(usage.lastUpdated);
   const today = utcDateString(nowUtc);
 
   if (utcDateString(lastDate) !== today) {
-    let cursor = addUtcDays(lastDate, 1);
+    let cursor = lastDate;
     while (utcDateString(cursor) < today) {
       const isoCursor = utcDateString(cursor);
       const laboralDays = getLaboralDays(config, cursor.getUTCFullYear(), cursor.getUTCMonth() + 1);
@@ -77,20 +105,37 @@ export function rolloverIfNeeded(usage: UsageState, config: Config, nowUtc: Date
  * A currentCost lower than the prior lastSeenCost means the session reset (e.g. `/clear`), treated as a
  * fresh baseline rather than a negative delta. Concurrently-running sessions never corrupt each other's
  * totals because each session id has its own independent lastSeenCost.
+ *
+ * `accumulate` gates whether the delta is folded into monthlySpent at all: pass `false` while the
+ * currently-resolved account is not a dollar-cap (enterprise) plan, so a mid-session pro/enterprise
+ * switch never mis-attributes cost across plan types. The lastSeenCost baseline still advances every
+ * call regardless, so a later switch back to enterprise only charges the cost accrued after the resume.
  */
 export function captureSessionCost(
   usage: UsageState,
   sessionId: string,
   currentCost: number,
   nowUtc: Date,
+  accumulate: boolean,
 ): UsageState {
   const prior = usage.sessions[sessionId];
   const delta =
     prior && currentCost >= prior.lastSeenCost ? currentCost - prior.lastSeenCost : currentCost;
-  usage.monthlySpent += Math.max(0, delta);
+  if (accumulate) usage.monthlySpent += Math.max(0, delta);
   usage.sessions[sessionId] = { lastSeenCost: currentCost, lastSeenAt: nowUtc.toISOString() };
   pruneStaleSessions(usage, nowUtc);
   return usage;
+}
+
+/**
+ * Maps a Claude Code `organizationType` (from ~/.claude.json's oauthAccount) to the dollar-cap
+ * classification, available at session start before any `rate_limits` hook data exists. Unknown or
+ * absent org types return undefined so the caller can fall back to the rate_limits-based guess/self-heal.
+ */
+export function classifyHasSpendCap(organizationType: string | null): boolean | undefined {
+  if (organizationType === "claude_enterprise") return true;
+  if (organizationType === "claude_pro") return false;
+  return undefined;
 }
 
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
@@ -113,12 +158,6 @@ export function pruneStaleSessions(usage: UsageState, nowUtc: Date): UsageState 
  */
 export function computeToday(usage: UsageState, config: Config, nowUtc: Date): ComputedUsage {
   const today = utcDateString(nowUtc);
-  const laboralDaysThisMonth = getLaboralDays(
-    config,
-    nowUtc.getUTCFullYear(),
-    nowUtc.getUTCMonth() + 1,
-  );
-  const remainingLaboralDays = remainingLaboralDaysCount(laboralDaysThisMonth, nowUtc.getUTCDate());
 
   const avgPerDay = usage.frozenAvgPerDay;
   const safeMonthTotal = usage.frozenSafeMonthTotal;
@@ -134,8 +173,41 @@ export function computeToday(usage: UsageState, config: Config, nowUtc: Date): C
     todayUsage,
     todayUsedPct,
     monthUsedPct: config.monthlyCap === 0 ? 0 : usage.monthlySpent / config.monthlyCap,
-    remainingLaboralDays,
   };
+}
+
+/**
+ * Anthropic's own cumulative `extra_usage.used_credits` (see anthropic-usage.ts) is more trustworthy than
+ * our own session cost-delta summation — it's the server-side ledger, ours can drift. Called once per
+ * `--statusline` invocation, after a fresh extraUsage fetch: if a snapshot from a PRIOR UTC day exists, the
+ * delta between it and today's cumulative total is that prior day's true spend — overwrite
+ * `usage.days[priorDate]` (and `monthlySpent`) with it when it disagrees with the self-tracked figure.
+ * Purely additive: a no-op on the very first call (no prior snapshot yet) and never touches today's own
+ * still-accruing figure. Mutates `usage` in place, matching rolloverIfNeeded/captureSessionCost.
+ */
+export function reconcileFromExtraUsageSnapshot(
+  usage: UsageState,
+  extraUsage: { usedCredits: number } | null,
+  nowUtc: Date,
+): UsageState {
+  if (extraUsage === null) return usage;
+  const today = utcDateString(nowUtc);
+  const prior = usage.extraUsageSnapshot;
+
+  if (prior && prior.date !== today) {
+    const trueAmount = Math.max(0, extraUsage.usedCredits - prior.usedCredits);
+    const selfTracked = usage.days[prior.date];
+    if (selfTracked !== undefined && Math.abs(selfTracked - trueAmount) > 0.005) {
+      usage.monthlySpent += trueAmount - selfTracked;
+      usage.days[prior.date] = trueAmount;
+    }
+  }
+
+  if (!prior || prior.date !== today) {
+    usage.extraUsageSnapshot = { date: today, usedCredits: extraUsage.usedCredits };
+  }
+
+  return usage;
 }
 
 export function colorForPct(pct: number): string {
@@ -144,15 +216,4 @@ export function colorForPct(pct: number): string {
   if (pct >= 0.5) return "#FFEB84";
   if (pct >= 0.25) return "#A1D76A";
   return "#63BE7B";
-}
-
-/** Report-only: the zero-spent theoretical avg, NOT the live/frozen avgPerDay above. */
-export function theoreticalAvgFromDayOne(
-  config: Config,
-  year: number,
-  month: number,
-): number | null {
-  const totalDays = getLaboralDays(config, year, month).length;
-  if (totalDays === 0) return null;
-  return Math.ceil((config.monthlyCap / totalDays) * 100) / 100;
 }

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, saveConfig } from "./config.js";
 import {
   BodyTooLargeError,
+  constantTimeEquals,
   isAllowedHost,
   openSystemExternal,
   readRequestBody,
@@ -27,6 +28,7 @@ export interface InitServerOptions {
   readonly heartbeatGapMs?: number;
   readonly initialConfig?: Config;
   readonly usageMonthlySpent?: number;
+  readonly accountKey?: string;
 }
 
 export type InitOutcome = "done" | "heartbeat-gap" | "idle-timeout";
@@ -77,7 +79,8 @@ export async function runInit(options: InitServerOptions = {}): Promise<InitResu
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   const heartbeatGapMs = options.heartbeatGapMs ?? DEFAULT_HEARTBEAT_GAP_MS;
   const token = randomBytes(32).toString("base64url");
-  let currentConfig = options.initialConfig ?? loadConfig();
+  const accountKey = options.accountKey ?? "default";
+  let currentConfig = options.initialConfig ?? loadConfig(accountKey);
   const monthlySpent = options.usageMonthlySpent ?? 0;
 
   return new Promise((resolve) => {
@@ -146,7 +149,7 @@ export async function runInit(options: InitServerOptions = {}): Promise<InitResu
           (url.pathname === "/save" || url.pathname === "/heartbeat" || url.pathname === "/done")
         ) {
           const authValue = firstHeaderValue(request.headers[AUTH_HEADER]);
-          if (!authValue || authValue !== token) {
+          if (!authValue || !constantTimeEquals(authValue, token)) {
             sendJson(response, 401, { error: "Unauthorized" });
             return;
           }
@@ -177,7 +180,7 @@ export async function runInit(options: InitServerOptions = {}): Promise<InitResu
               return;
             }
             currentConfig = { monthlyCap: parsed.monthlyCap, laboralDays: parsed.laboralDays };
-            saveConfig(currentConfig);
+            saveConfig(accountKey, currentConfig);
             sendJson(response, 200, { ok: true });
             armIdleTimeout();
             armHeartbeatGap();

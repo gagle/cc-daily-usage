@@ -69,25 +69,43 @@ describe("installStatusline", () => {
     expect(existsSync(path.join(fakeHome, ".claude", "statusline.sh"))).toBe(false);
   });
 
-  it("re-running against an already-managed script is a silent no-op: no backup, no prompt", async () => {
+  it("re-running against an already-managed script is a silent no-op: no backup, no prompt, same version", async () => {
     const { installStatusline } = await freshModule();
     const confirm = vi.fn().mockResolvedValue(true);
-    await installStatusline(confirm);
+    const first = await installStatusline(confirm);
     confirm.mockClear();
     const result = await installStatusline(confirm);
     expect(result.installed).toBe(true);
     expect(result.backupPath).toBeNull();
     expect(confirm).not.toHaveBeenCalled();
+    expect(result.fromVersion).toBe(first.toVersion);
+    expect(result.toVersion).toBe(first.toVersion);
   });
 
   it("upgrades silently in place when the managed script content changed but the marker is still present", async () => {
     const { installStatusline } = await freshModule();
     const statuslinePath = path.join(fakeHome, ".claude", "statusline.sh");
-    writeFileSync(statuslinePath, "# cc-daily-usage:managed v1\necho old-version");
+    writeFileSync(statuslinePath, "# cc-daily-usage:managed vdeadbeef\necho old-version");
     const confirm = vi.fn();
     const result = await installStatusline(confirm);
     expect(result.installed).toBe(true);
     expect(confirm).not.toHaveBeenCalled();
     expect(readFileSync(statuslinePath, "utf8")).not.toContain("old-version");
+    expect(result.fromVersion).toBe("deadbeef");
+    expect(result.toVersion).not.toBe("deadbeef");
+  });
+
+  it("a fresh install has no fromVersion, only a toVersion", async () => {
+    const { installStatusline } = await freshModule();
+    const result = await installStatusline(vi.fn().mockResolvedValue(true));
+    expect(result.fromVersion).toBeNull();
+    expect(result.toVersion).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it("a decline has neither fromVersion nor toVersion", async () => {
+    const { installStatusline } = await freshModule();
+    const result = await installStatusline(vi.fn().mockResolvedValue(false));
+    expect(result.fromVersion).toBeNull();
+    expect(result.toVersion).toBeNull();
   });
 });

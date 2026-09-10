@@ -80,7 +80,7 @@ describe("installCaptureOnly", () => {
   it("is a silent no-op when the full managed marker is already present", async () => {
     const { installCaptureOnly } = await freshModule();
     const statuslinePath = path.join(fakeHome, ".claude", "statusline.sh");
-    writeFileSync(statuslinePath, "# cc-daily-usage:managed v1\necho hi");
+    writeFileSync(statuslinePath, "# cc-daily-usage:managed vdeadbeef\necho hi");
     const confirm = vi.fn();
     const result = await installCaptureOnly(confirm);
     expect(result.installed).toBe(true);

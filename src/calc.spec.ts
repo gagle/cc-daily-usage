@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   captureSessionCost,
+  classifyHasSpendCap,
   colorForPct,
   computeToday,
   getLaboralDays,
   pruneStaleSessions,
+  reconcileFromExtraUsageSnapshot,
+  reconcileLaboralDays,
   rolloverIfNeeded,
-  theoreticalAvgFromDayOne,
   utcDateString,
 } from "./calc.js";
 import type { Config, UsageState } from "./interfaces/config.interface.js";
@@ -63,8 +65,21 @@ describe("rolloverIfNeeded", () => {
     const usage = makeUsage({ lastUpdated: "2026-09-01T12:00:00.000Z", monthlySpent: 40 });
     const now = new Date("2026-09-05T00:00:00.000Z");
     const result = rolloverIfNeeded(usage, makeConfig(), now);
-    // gap covers 09-02, 09-03, 09-04; laboral days among those: 2,3,4 (all laboral per fixture config)
-    expect(result.days).toEqual({ "2026-09-02": 40, "2026-09-03": 0, "2026-09-04": 0 });
+    // walk covers 09-01 (lastUpdated's own day) through 09-04; all laboral per fixture config. The $40 was
+    // fully spent by 09-01 (nothing captured during the gap), so it's attributed there, not to 09-02.
+    expect(result.days).toEqual({
+      "2026-09-01": 40,
+      "2026-09-02": 0,
+      "2026-09-03": 0,
+      "2026-09-04": 0,
+    });
+  });
+
+  it("freezes lastUpdated's own day on the very next day's rollover — no gap needed", () => {
+    const usage = makeUsage({ lastUpdated: "2026-09-01T18:00:00.000Z", monthlySpent: 21.98 });
+    const now = new Date("2026-09-02T09:00:00.000Z");
+    const result = rolloverIfNeeded(usage, makeConfig(), now);
+    expect(result.days).toEqual({ "2026-09-01": 21.98 });
   });
 
   it("skips a day already frozen in usage.days", () => {
@@ -113,7 +128,7 @@ describe("captureSessionCost", () => {
   it("captures the full cost as the delta for a brand-new session", () => {
     const usage = makeUsage();
     const now = new Date("2026-09-01T00:00:00.000Z");
-    captureSessionCost(usage, "session-a", 5, now);
+    captureSessionCost(usage, "session-a", 5, now, true);
     expect(usage.monthlySpent).toBe(5);
     expect(usage.sessions["session-a"]).toEqual({ lastSeenCost: 5, lastSeenAt: now.toISOString() });
   });
@@ -122,7 +137,7 @@ describe("captureSessionCost", () => {
     const usage = makeUsage({
       sessions: { "session-a": { lastSeenCost: 5, lastSeenAt: "2026-09-01T00:00:00.000Z" } },
     });
-    captureSessionCost(usage, "session-a", 8, new Date("2026-09-01T01:00:00.000Z"));
+    captureSessionCost(usage, "session-a", 8, new Date("2026-09-01T01:00:00.000Z"), true);
     expect(usage.monthlySpent).toBe(3);
   });
 
@@ -130,17 +145,49 @@ describe("captureSessionCost", () => {
     const usage = makeUsage({
       sessions: { "session-a": { lastSeenCost: 10, lastSeenAt: "2026-09-01T00:00:00.000Z" } },
     });
-    captureSessionCost(usage, "session-a", 2, new Date("2026-09-01T01:00:00.000Z"));
+    captureSessionCost(usage, "session-a", 2, new Date("2026-09-01T01:00:00.000Z"), true);
     expect(usage.monthlySpent).toBe(2);
   });
 
   it("keeps two concurrent sessions independent", () => {
     const usage = makeUsage();
     const now = new Date("2026-09-01T00:00:00.000Z");
-    captureSessionCost(usage, "session-a", 5, now);
-    captureSessionCost(usage, "session-b", 1, now);
-    captureSessionCost(usage, "session-a", 6, now);
+    captureSessionCost(usage, "session-a", 5, now, true);
+    captureSessionCost(usage, "session-b", 1, now, true);
+    captureSessionCost(usage, "session-a", 6, now, true);
     expect(usage.monthlySpent).toBe(5 + 1 + 1);
+  });
+
+  it("advances lastSeenCost but skips accumulation when accumulate is false", () => {
+    const usage = makeUsage();
+    const now = new Date("2026-09-01T00:00:00.000Z");
+    captureSessionCost(usage, "session-a", 5, now, false);
+    expect(usage.monthlySpent).toBe(0);
+    expect(usage.sessions["session-a"]).toEqual({ lastSeenCost: 5, lastSeenAt: now.toISOString() });
+  });
+
+  it("charges only the post-resume delta after a non-accumulating span", () => {
+    const usage = makeUsage();
+    const t1 = new Date("2026-09-01T00:00:00.000Z");
+    const t2 = new Date("2026-09-01T01:00:00.000Z");
+    captureSessionCost(usage, "session-a", 5, t1, false); // pro-classified span: not charged
+    captureSessionCost(usage, "session-a", 9, t2, true); // back to enterprise: only the +4 delta
+    expect(usage.monthlySpent).toBe(4);
+  });
+});
+
+describe("classifyHasSpendCap", () => {
+  it("classifies claude_enterprise as a dollar cap", () => {
+    expect(classifyHasSpendCap("claude_enterprise")).toBe(true);
+  });
+
+  it("classifies claude_pro as a window cap (no dollar tracking)", () => {
+    expect(classifyHasSpendCap("claude_pro")).toBe(false);
+  });
+
+  it("leaves unknown or null org types unresolved", () => {
+    expect(classifyHasSpendCap("claude_max")).toBeUndefined();
+    expect(classifyHasSpendCap(null)).toBeUndefined();
   });
 });
 
@@ -221,12 +268,113 @@ describe("colorForPct", () => {
   });
 });
 
-describe("theoreticalAvgFromDayOne", () => {
-  it("computes the zero-spent theoretical average", () => {
-    expect(theoreticalAvgFromDayOne(makeConfig(), 2026, 9)).toBeCloseTo(650 / 8, 2);
+describe("reconcileFromExtraUsageSnapshot", () => {
+  it("is a no-op when extraUsage is null", () => {
+    const usage = makeUsage({ extraUsageSnapshot: { date: "2026-09-09", usedCredits: 100 } });
+    const before = structuredClone(usage);
+    reconcileFromExtraUsageSnapshot(usage, null, new Date("2026-09-10T00:00:00.000Z"));
+    expect(usage).toEqual(before);
   });
 
-  it("returns null when the month has no laboral days configured", () => {
-    expect(theoreticalAvgFromDayOne(makeConfig(), 2026, 10)).toBeNull();
+  it("just records the first snapshot when there's no prior one yet", () => {
+    const usage = makeUsage();
+    reconcileFromExtraUsageSnapshot(
+      usage,
+      { usedCredits: 162.94 },
+      new Date("2026-09-10T00:00:00.000Z"),
+    );
+    expect(usage.extraUsageSnapshot).toEqual({ date: "2026-09-10", usedCredits: 162.94 });
+  });
+
+  it("corrects a prior day's frozen amount from the delta when it disagrees with the self-tracked figure", () => {
+    const usage = makeUsage({
+      monthlySpent: 100,
+      days: { "2026-09-09": 30 }, // self-tracked
+      extraUsageSnapshot: { date: "2026-09-09", usedCredits: 133 }, // cumulative as of day 9
+    });
+    // Cumulative as of day 10: true day-9 spend was 133 -> 138 = $5, not the self-tracked $30
+    reconcileFromExtraUsageSnapshot(
+      usage,
+      { usedCredits: 138 },
+      new Date("2026-09-10T00:00:00.000Z"),
+    );
+    expect(usage.days["2026-09-09"]).toBe(5);
+    expect(usage.monthlySpent).toBe(75); // 100 - 30 + 5
+    expect(usage.extraUsageSnapshot).toEqual({ date: "2026-09-10", usedCredits: 138 });
+  });
+
+  it("leaves an already-agreeing day untouched", () => {
+    const usage = makeUsage({
+      monthlySpent: 100,
+      days: { "2026-09-09": 30 },
+      extraUsageSnapshot: { date: "2026-09-09", usedCredits: 133 },
+    });
+    reconcileFromExtraUsageSnapshot(
+      usage,
+      { usedCredits: 163 }, // delta is exactly 30, matches self-tracked
+      new Date("2026-09-10T00:00:00.000Z"),
+    );
+    expect(usage.days["2026-09-09"]).toBe(30);
+    expect(usage.monthlySpent).toBe(100);
+  });
+
+  it("does nothing to the prior day when it was never frozen locally", () => {
+    const usage = makeUsage({
+      extraUsageSnapshot: { date: "2026-09-09", usedCredits: 133 },
+    });
+    reconcileFromExtraUsageSnapshot(
+      usage,
+      { usedCredits: 138 },
+      new Date("2026-09-10T00:00:00.000Z"),
+    );
+    expect(usage.days["2026-09-09"]).toBeUndefined();
+  });
+
+  it("doesn't reconcile again within the same UTC day as the snapshot", () => {
+    const usage = makeUsage({
+      days: { "2026-09-10": 30 },
+      extraUsageSnapshot: { date: "2026-09-10", usedCredits: 133 },
+    });
+    reconcileFromExtraUsageSnapshot(
+      usage,
+      { usedCredits: 140 },
+      new Date("2026-09-10T12:00:00.000Z"),
+    );
+    expect(usage.days["2026-09-10"]).toBe(30);
+    expect(usage.extraUsageSnapshot).toEqual({ date: "2026-09-10", usedCredits: 133 });
+  });
+});
+
+describe("reconcileLaboralDays", () => {
+  it("returns the same config reference when every spent day is already laboral", () => {
+    const config = makeConfig();
+    const usage = makeUsage({ days: { "2026-09-01": 20 } });
+    expect(reconcileLaboralDays(config, usage)).toBe(config);
+  });
+
+  it("adds a weekend (or any non-configured) day that has recorded spend", () => {
+    const config = makeConfig(); // 2026-09-06 (a Sunday) isn't in the fixture's laboral days
+    const usage = makeUsage({ days: { "2026-09-06": 12.5 } });
+    const result = reconcileLaboralDays(config, usage);
+    expect(result).not.toBe(config);
+    expect(result.laboralDays["2026"]?.["9"]).toEqual([1, 2, 3, 4, 6, 7, 8, 9, 10]);
+  });
+
+  it("merges into an existing month array without duplicating an already-present day", () => {
+    const config = makeConfig();
+    const usage = makeUsage({ days: { "2026-09-01": 20, "2026-09-06": 12.5 } });
+    const result = reconcileLaboralDays(config, usage);
+    expect(result.laboralDays["2026"]?.["9"]).toEqual([1, 2, 3, 4, 6, 7, 8, 9, 10]);
+  });
+
+  it("leaves other months/years untouched and adds a new month key when needed", () => {
+    const config = makeConfig({
+      laboralDays: { "2026": { "9": [1] }, "2027": { "1": [5] } },
+    });
+    const usage = makeUsage({ days: { "2026-10-15": 3 } });
+    const result = reconcileLaboralDays(config, usage);
+    expect(result.laboralDays["2026"]?.["9"]).toEqual([1]);
+    expect(result.laboralDays["2027"]).toEqual({ "1": [5] });
+    expect(result.laboralDays["2026"]?.["10"]).toEqual([15]);
   });
 });

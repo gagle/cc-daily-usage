@@ -81,6 +81,7 @@
         background: var(--surface-1);
         border-radius: 20px;
         padding: 15px;
+        width: 400px;
       }
       .month-card h3 {
         margin: 0 0 10px;
@@ -100,7 +101,7 @@
         justify-content: center;
         border-radius: 6px;
         background: var(--surface-2);
-        font-size: 0.8rem;
+        font-size: 0.7rem;
         cursor: pointer;
       }
       .day-cell.weekend {
@@ -290,7 +291,10 @@
         function renderYear(year) {
           var grid = document.getElementById("month-grid");
           grid.innerHTML = "";
-          for (var m = 1; m <= 12; m++) {
+          // Laboral days only matter from today onward — the current year starts at the current month;
+          // the next-year tab still renders in full since none of it is in the past yet.
+          var startMonth = year === thisYear ? new Date().getUTCMonth() + 1 : 1;
+          for (var m = startMonth; m <= 12; m++) {
             grid.appendChild(renderMonth(year, m));
           }
         }

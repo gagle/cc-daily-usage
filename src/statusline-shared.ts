@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -7,8 +8,31 @@ export const CLAUDE_DIR = path.join(homedir(), ".claude");
 export const STATUSLINE_FILE = path.join(CLAUDE_DIR, "statusline.sh");
 export const SETTINGS_FILE = path.join(CLAUDE_DIR, "settings.json");
 
-export const MANAGED_MARKER_REGEX = /# cc-daily-usage:managed v\d+/;
+// Captures the version so installStatusline can tell "same version, no-op" apart from "different
+// version, upgrade" — see computeShippedVersion/stampVersion/extractVersion below.
+export const MANAGED_MARKER_REGEX = /# cc-daily-usage:managed v([0-9a-f]{8})/;
 export const CAPTURE_MARKER_REGEX = /# cc-daily-usage:capture v\d+/;
+
+const VERSION_PLACEHOLDER = "__CC_DAILY_USAGE_VERSION__";
+
+/**
+ * The shipped script's "version" is a short hash of its own template — computed from the raw template
+ * (placeholder still in place, before stamping), so it's stable and reproducible for a given file content
+ * without the chicken-and-egg of a marker hashing itself. Changes the instant the script's content changes,
+ * whether that's a new release or a local dev edit — no manual version bump, no build step, no reliance on
+ * npm/tar file mtimes.
+ */
+export function computeShippedVersion(template: string): string {
+  return createHash("sha256").update(template).digest("hex").slice(0, 8);
+}
+
+export function stampVersion(template: string, version: string): string {
+  return template.replaceAll(VERSION_PLACEHOLDER, version);
+}
+
+export function extractVersion(content: string): string | null {
+  return MANAGED_MARKER_REGEX.exec(content)?.[1] ?? null;
+}
 
 export type ConfirmFn = (question: string) => Promise<boolean>;
 

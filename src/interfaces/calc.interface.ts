@@ -7,7 +7,6 @@ export interface ComputedUsage {
   readonly todayUsage: number; // monthlySpent - sum(days strictly before today) — live
   readonly todayUsedPct: number | null; // todayUsage / avgPerDay — live numerator, frozen denominator
   readonly monthUsedPct: number; // monthlySpent / monthlyCap — live
-  readonly remainingLaboralDays: number; // laboral days in the current month >= today, inclusive — live count
 }
 
 export interface StatuslineJson {

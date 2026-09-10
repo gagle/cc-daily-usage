@@ -17,7 +17,7 @@ describe("cc-daily-usage CLI (built)", () => {
   it("prints the usage block for --help", async () => {
     const { stdout } = await execFileAsync("node", [BIN_PATH, "--help"]);
     expect(stdout).toContain("cc-daily-usage <operation>");
-    expect(stdout).toContain("report");
+    expect(stdout).toContain("dashboard");
     expect(stdout).toContain("init");
     expect(stdout).toContain("statusline");
   });
@@ -30,7 +30,7 @@ describe("cc-daily-usage CLI (built)", () => {
   });
 
   it("exits non-zero with a clear message for an unknown flag", async () => {
-    await expect(execFileAsync("node", [BIN_PATH, "report", "--nope"])).rejects.toMatchObject({
+    await expect(execFileAsync("node", [BIN_PATH, "init", "--nope"])).rejects.toMatchObject({
       code: 1,
       stderr: expect.stringContaining("Unknown argument: --nope"),
     });

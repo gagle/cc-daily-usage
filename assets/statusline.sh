@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code status line — reads session JSON from stdin, prints one ANSI line.
-# cc-daily-usage:managed v1
+# cc-daily-usage:managed v__CC_DAILY_USAGE_VERSION__
 # cc-daily-usage:capture v1
 #
 # Installed by `cc-daily-usage statusline`. Re-running that command is idempotent — it detects the marker
@@ -30,6 +30,30 @@ eval "$(echo "$input" | jq -r '
 
 if [ -z "${repo:-}" ]; then
   repo=$(basename "${project_dir:-}")
+fi
+
+# cc-daily-usage: fetched up front (not where its segments render further down) so the cached_rl5h/cached_rl7d
+# fallback below is available before the native ⏱ block runs. `2>/dev/null || echo ""` means a machine
+# without cc-daily-usage on PATH yet, or before config.json exists, silently degrades to no fallback/segments.
+statusline_json=$(echo "$input" | cc-daily-usage --statusline 2>/dev/null || echo "")
+
+if [ -n "$statusline_json" ]; then
+  eval "$(echo "$statusline_json" | jq -r '
+    def s($v): ($v // "") | tostring | @sh;
+    [
+      "today_usage=\(s(.todayUsage // 0))",
+      "avg_per_day=\(s(.avgPerDay))",
+      "today_pct=\(s(.todayUsedPct))",
+      "month_spent=\(s(.monthlySpent // 0))",
+      "month_cap=\(s(.monthlyCap))",
+      "month_pct=\(s(.monthUsedPct // 0))",
+      "extra_used=\(s(.extraUsage.usedCredits))",
+      "extra_limit=\(s(.extraUsage.monthlyLimit))",
+      "extra_pct=\(s((.extraUsage.utilizationPct // 0) / 100))",
+      "cached_rl5h=\(s(.rateLimitsCache.fiveHourPct))",
+      "cached_rl7d=\(s(.rateLimitsCache.sevenDayPct))"
+    ] | join("\n")
+  ')"
 fi
 
 branch=$(git -C "${cwd:-.}" --no-optional-locks rev-parse --abbrev-ref HEAD 2>/dev/null || true)
@@ -97,6 +121,9 @@ if [ -n "${effort:-}" ]; then
   line="${line} ${sep} \033[38;2;150;150;250m💪 ${effort}\033[0m"
 fi
 
+[ -z "${rl5h:-}" ] && rl5h="${cached_rl5h:-}"
+[ -z "${rl7d:-}" ] && rl7d="${cached_rl7d:-}"
+
 if [ -n "${rl5h:-}" ] || [ -n "${rl7d:-}" ]; then
   rl_parts=""
   if [ -n "${rl5h:-}" ]; then
@@ -111,25 +138,9 @@ if [ -n "${rl5h:-}" ] || [ -n "${rl7d:-}" ]; then
   line="${line} ${sep} \033[38;2;100;180;255m⏱ ${rl_parts}\033[0m"
 fi
 
-# cc-daily-usage: daily/monthly spend segments (§18 auto-capture + §9.2 segment order). A SEPARATE jq pass
-# over cc-daily-usage's own JSON output, not a second pass over $input — the extraction above is untouched.
-# `2>/dev/null || echo ""` means a machine without cc-daily-usage on PATH yet, or before config.json exists,
-# silently degrades to exactly today's statusline above — never a broken/crashing script.
-statusline_json=$(echo "$input" | cc-daily-usage --statusline 2>/dev/null || echo "")
-
+# cc-daily-usage: daily/monthly spend segments (§18 auto-capture + §9.2 segment order). Fields already
+# extracted up top (see the ⏱ fallback above) — this just renders them, guarded on the same $statusline_json.
 if [ -n "$statusline_json" ]; then
-  eval "$(echo "$statusline_json" | jq -r '
-    def s($v): ($v // "") | tostring | @sh;
-    [
-      "today_usage=\(s(.todayUsage // 0))",
-      "avg_per_day=\(s(.avgPerDay))",
-      "today_pct=\(s(.todayUsedPct))",
-      "month_spent=\(s(.monthlySpent // 0))",
-      "month_cap=\(s(.monthlyCap // 0))",
-      "month_pct=\(s(.monthUsedPct // 0))"
-    ] | join("\n")
-  ')"
-
   # colorForPct's 5-bucket thresholds (src/calc.ts), ported inline: highest threshold first, first match wins.
   cc_color() {
     local frac="$1"
@@ -148,9 +159,23 @@ if [ -n "$statusline_json" ]; then
     line="${line} ${sep} \033[38;2;${today_color}m\$$(printf '%.2f' "$today_usage")/\$$(printf '%.2f' "$avg_per_day") (${today_pct_display}%)\033[0m"
   fi
 
-  month_color=$(cc_color "$month_pct")
-  month_pct_display=$(awk "BEGIN{printf \"%.0f\", $month_pct*100}")
-  line="${line} ${sep} \033[38;2;${month_color}m\$$(printf '%.2f' "$month_spent")/\$$(printf '%.2f' "$month_cap") (${month_pct_display}%)\033[0m"
+  # month_cap comes through empty once the account is known to have no dollar cap (config.hasSpendCap ===
+  # false, see cli.ts) — skip this fabricated $/$ segment entirely and let the ⏱ 5h/7d segment above (real
+  # data straight from Claude Code's own hook payload) be the only usage indicator.
+  if [ -n "${month_cap:-}" ]; then
+    month_color=$(cc_color "$month_pct")
+    month_pct_display=$(awk "BEGIN{printf \"%.0f\", $month_pct*100}")
+    line="${line} ${sep} \033[38;2;${month_color}m\$$(printf '%.2f' "$month_spent")/\$$(printf '%.2f' "$month_cap") (${month_pct_display}%)\033[0m"
+  fi
+
+  # Anthropic's own live "Usage credits" ledger (extra_usage via /api/oauth/usage, see src/anthropic-usage.ts)
+  # — independent of the self-tracked segment above, shown only when the account has it enabled. Not gated on
+  # subscription/rate-limit-window type: it can appear alongside the ⏱ segment on Pro/Max accounts too.
+  if [ -n "${extra_used:-}" ] && [ -n "${extra_limit:-}" ]; then
+    extra_color=$(cc_color "$extra_pct")
+    extra_pct_display=$(awk "BEGIN{printf \"%.0f\", $extra_pct*100}")
+    line="${line} ${sep} \033[38;2;${extra_color}m🎫 \$$(printf '%.2f' "$extra_used")/\$$(printf '%.2f' "$extra_limit") (${extra_pct_display}%)\033[0m"
+  fi
 fi
 
 printf '%b' "$line"
