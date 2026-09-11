@@ -3,3 +3,5 @@ coverage
 node_modules
 *.tsbuildinfo
 .claude/settings.local.json
+.tokensave
+.zvec-grep
