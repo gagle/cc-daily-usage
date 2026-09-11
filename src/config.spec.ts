@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -66,6 +66,23 @@ describe("config.ts", () => {
     };
     saveUsage("acct", usage);
     expect(loadUsage("acct")).toEqual(usage);
+  });
+
+  it("fills in monthlyCap/laboralDays from DEFAULT_CONFIG when a stored config omits them, without rewriting the file", async () => {
+    const { loadConfig, ACCOUNTS_DIR } = await freshConfigModule();
+    const dir = path.join(ACCOUNTS_DIR, "acct");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ planType: "claude_pro", hasSpendCap: false }));
+    const config = loadConfig("acct");
+    expect(config.monthlyCap).toBe(200);
+    expect(config.laboralDays).toEqual({});
+    expect(config.hasSpendCap).toBe(false);
+    // In-memory fill only — the on-disk file is untouched.
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      planType: "claude_pro",
+      hasSpendCap: false,
+    });
   });
 
   it("keeps two accounts' config/usage fully independent", async () => {

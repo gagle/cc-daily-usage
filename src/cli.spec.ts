@@ -419,6 +419,36 @@ describe("runCli", () => {
     expect(printed).not.toHaveProperty("todayUsedPct");
   });
 
+  it("hidden --statusline mode: skips rolloverIfNeeded/reconcileLaboralDays entirely on a confirmed no-spend-cap account", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 650,
+      laboralDays: {},
+      planType: "claude_pro",
+      hasSpendCap: false,
+    });
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 80.94,
+      lastUpdated: "2026-09-01T00:00:00.000Z", // a prior UTC day — would normally trigger rollover
+      days: {},
+      sessions: {},
+      frozenForDate: null,
+      frozenAvgPerDay: null,
+      frozenSafeMonthTotal: null,
+    });
+    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
+    const { runCli } = await freshCli();
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    expect(saveConfigMock).not.toHaveBeenCalled();
+    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as {
+      frozenForDate: string | null;
+      frozenAvgPerDay: number | null;
+    };
+    expect(savedUsage.frozenForDate).toBeNull();
+    expect(savedUsage.frozenAvgPerDay).toBeNull();
+  });
+
   it("hidden --statusline mode: a spend-cap account still prints todayUsage/avgPerDay/todayUsedPct alongside monthlySpent", async () => {
     loadConfigMock.mockReturnValue({
       monthlyCap: 650,

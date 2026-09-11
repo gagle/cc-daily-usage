@@ -97,14 +97,20 @@ async function runStatuslineHidden(): Promise<number> {
   const extraUsage = token ? await getCachedExtraUsage(usage, token.token, now) : null;
   reconcileFromExtraUsageSnapshot(usage, extraUsage, now);
 
-  rolloverIfNeeded(usage, loadedConfig, now);
+  // A confirmed no-spend-cap account (Pro/Max) has nothing meaningful for either of these to compute —
+  // skip both so config.json's laboralDays/monthlyCap and usage.json's frozen* fields stop growing/changing
+  // on every turn for a feature this account provably doesn't use (mirrors the captureSessionCost gate below).
+  if (loadedConfig.hasSpendCap !== false) {
+    rolloverIfNeeded(usage, loadedConfig, now);
+  }
   // Only a confirmed dollar-cap (enterprise) account accumulates cost into monthlySpent — a mid-session
   // pro/enterprise switch (see classifyHasSpendCap above) must never fold a pro-classified interval's
   // cost into the enterprise total, or vice versa. The lastSeenCost baseline still advances either way.
   captureSessionCost(usage, sessionId, currentCost, now, loadedConfig.hasSpendCap === true);
   saveUsage(key, usage);
 
-  const config = reconcileLaboralDays(loadedConfig, usage);
+  const config =
+    loadedConfig.hasSpendCap === false ? loadedConfig : reconcileLaboralDays(loadedConfig, usage);
   if (config !== loadedConfig) saveConfig(key, config);
 
   const computed = computeToday(usage, config, now);

@@ -61,7 +61,13 @@ export function loadConfig(accountKey: string): Config {
     saveConfig(accountKey, DEFAULT_CONFIG);
     return DEFAULT_CONFIG;
   }
-  return JSON.parse(readFileSync(file, "utf8")) as Config;
+  // Merged under DEFAULT_CONFIG rather than returned raw: a hasSpendCap:false account's monthlyCap/
+  // laboralDays are meaningless and may be absent from the file entirely (see cli.ts's hasSpendCap gate) —
+  // every caller still gets a complete Config in memory, so an unguarded read (e.g. dashboard-tui.ts's
+  // rolloverIfNeeded call) fills in the empty default instead of crashing on undefined. Never rewrites the
+  // file — purely an in-memory fill.
+  const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<Config>;
+  return { ...DEFAULT_CONFIG, ...parsed };
 }
 
 export function saveConfig(accountKey: string, config: Config): void {
