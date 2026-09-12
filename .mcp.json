@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "uvx",
+      "args": ["code-review-graph", "serve", "--repo", "."],
+      "type": "stdio",
+      "env": {
+        "CRG_PARSE_EXECUTOR": "thread"
+      }
+    }
+  }
+}

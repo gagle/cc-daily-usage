@@ -31,6 +31,8 @@ export interface ExtraUsageCacheEntry {
 export interface RateLimitsCache {
   readonly fiveHourPct: number | null;
   readonly sevenDayPct: number | null;
+  readonly fiveHourResetsAt: number | null; // Unix epoch seconds
+  readonly sevenDayResetsAt: number | null; // Unix epoch seconds
 }
 
 export interface UsageState {

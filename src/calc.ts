@@ -5,32 +5,6 @@ export function getLaboralDays(config: Config, year: number, month: number): Rea
   return config.laboralDays[String(year)]?.[String(month)] ?? [];
 }
 
-/**
- * Any calendar day with recorded real spend counts toward the theoretical avg-per-day math, whether or not
- * it was ever explicitly configured as a laboral day — weekend or not. Re-scans all of usage.days every
- * call (not just newly-frozen days), so this single pass covers both backfilling pre-existing history and
- * folding in every future day going forward. Returns the same `config` reference when nothing needs adding
- * — callers use that to skip a redundant saveConfig.
- */
-export function reconcileLaboralDays(config: Config, usage: UsageState): Config {
-  let laboralDays = config.laboralDays;
-  for (const iso of Object.keys(usage.days)) {
-    const year = iso.slice(0, 4);
-    const month = String(Number(iso.slice(5, 7)));
-    const day = Number(iso.slice(8, 10));
-    const existing = laboralDays[year]?.[month] ?? [];
-    if (existing.includes(day)) continue;
-    laboralDays = {
-      ...laboralDays,
-      [year]: {
-        ...laboralDays[year],
-        [month]: [...existing, day].sort((a, b) => a - b),
-      },
-    };
-  }
-  return laboralDays === config.laboralDays ? config : { ...config, laboralDays };
-}
-
 export function utcDateString(date: Date): string {
   return date.toISOString().slice(0, 10); // "YYYY-MM-DD"
 }
@@ -41,9 +15,12 @@ function addUtcDays(date: Date, days: number): Date {
   return next;
 }
 
-function sumDaysBefore(usage: UsageState, isoDate: string): number {
+// Scoped to isoDate's own calendar month: monthlySpent resets to 0 at each month boundary (see
+// rolloverIfNeeded below), so summing across a month boundary would double-count/underflow.
+function sumDaysBeforeInMonth(usage: UsageState, isoDate: string): number {
+  const monthPrefix = isoDate.slice(0, 7); // "YYYY-MM"
   return Object.entries(usage.days)
-    .filter(([day]) => day < isoDate)
+    .filter(([day]) => day.startsWith(monthPrefix) && day < isoDate)
     .reduce((total, [, amount]) => total + amount, 0);
 }
 
@@ -59,12 +36,16 @@ function computeAvgPerDay(config: Config, monthlySpent: number, remaining: numbe
 
 /**
  * Walks every UTC calendar date from usage.lastUpdated's own day up to (not including) nowUtc's date,
- * freezing each laboral day's final derived amount into usage.days — including lastUpdated's day itself,
- * since that day's spend is fully settled by the time nowUtc rolls onto a new date (its own capture already
- * happened before this call). Also freezes today's avgPerDay/safeMonthTotal exactly once per UTC day
- * (decision 24) — the moment nowUtc's date differs from usage.frozenForDate, using monthlySpent as it
- * stands at that instant, before today's own spend accrues. Idempotent: calling it again the same UTC day
- * is a no-op beyond refreshing lastUpdated's timestamp.
+ * freezing each day's final derived amount into usage.days — including lastUpdated's day itself, since that
+ * day's spend is fully settled by the time nowUtc rolls onto a new date (its own capture already happened
+ * before this call). Every day gets frozen, laboral or not — laboral-day membership only ever affects the
+ * avgPerDay pace math (getLaboralDays/remainingLaboralDaysCount below), never which days get real spend
+ * recorded. Also resets monthlySpent to 0 the moment the walk crosses into a new calendar month — Claude
+ * Code's own usage windows reset monthly, so ours must too; the outgoing month's last day is frozen first
+ * (using its pre-reset total), so nothing is lost. Also freezes today's avgPerDay/safeMonthTotal exactly
+ * once per UTC day (decision 24) — the moment nowUtc's date differs from usage.frozenForDate, using
+ * monthlySpent as it stands at that instant, before today's own spend accrues. Idempotent: calling it again
+ * the same UTC day is a no-op beyond refreshing lastUpdated's timestamp.
  */
 export function rolloverIfNeeded(usage: UsageState, config: Config, nowUtc: Date): UsageState {
   const lastDate = new Date(usage.lastUpdated);
@@ -74,11 +55,17 @@ export function rolloverIfNeeded(usage: UsageState, config: Config, nowUtc: Date
     let cursor = lastDate;
     while (utcDateString(cursor) < today) {
       const isoCursor = utcDateString(cursor);
-      const laboralDays = getLaboralDays(config, cursor.getUTCFullYear(), cursor.getUTCMonth() + 1);
-      if (laboralDays.includes(cursor.getUTCDate()) && usage.days[isoCursor] === undefined) {
-        usage.days[isoCursor] = Math.max(0, usage.monthlySpent - sumDaysBefore(usage, isoCursor));
+      if (usage.days[isoCursor] === undefined) {
+        usage.days[isoCursor] = Math.max(
+          0,
+          usage.monthlySpent - sumDaysBeforeInMonth(usage, isoCursor),
+        );
       }
-      cursor = addUtcDays(cursor, 1);
+      const next = addUtcDays(cursor, 1);
+      if (next.getUTCMonth() !== cursor.getUTCMonth()) {
+        usage.monthlySpent = 0;
+      }
+      cursor = next;
     }
   }
 
@@ -161,7 +148,7 @@ export function computeToday(usage: UsageState, config: Config, nowUtc: Date): C
 
   const avgPerDay = usage.frozenAvgPerDay;
   const safeMonthTotal = usage.frozenSafeMonthTotal;
-  const todayUsage = Math.max(0, usage.monthlySpent - sumDaysBefore(usage, today));
+  const todayUsage = Math.max(0, usage.monthlySpent - sumDaysBeforeInMonth(usage, today));
   const todayUsedPct = avgPerDay === null || avgPerDay === 0 ? null : todayUsage / avgPerDay;
 
   return {

@@ -12,8 +12,13 @@ import {
   STATUSLINE_FILE,
 } from "./statusline-shared.js";
 
-const CAPTURE_MARKER = "# cc-daily-usage:capture v1";
-const CAPTURE_LINE = `echo "$input" | cc-daily-usage --statusline >/dev/null 2>&1`;
+const CAPTURE_MARKER = "// cc-daily-usage:capture v1";
+// Dynamic import, not a static one: this line gets spliced into an arbitrary foreign script (see
+// injectCaptureLine below) whose own imports we can't know or control — self-contained, assumes only that
+// an `input` variable holding the raw stdin is already in scope (the same assumption the old bash version
+// made about `input=$(cat)`, which every cc-daily-usage-aware statusline script follows).
+const CAPTURE_LINE =
+  '(await import("node:child_process")).spawnSync("cc-daily-usage --statusline", { input, shell: true, stdio: ["pipe", "ignore", "ignore"] });';
 
 function injectCaptureLine(existingScript: string): string {
   const lines = existingScript.split("\n");
@@ -24,11 +29,13 @@ function injectCaptureLine(existingScript: string): string {
 
 function minimalScriptWithCapture(): string {
   return [
-    "#!/usr/bin/env bash",
-    "input=$(cat)",
+    "#!/usr/bin/env node",
     CAPTURE_MARKER,
+    "const chunks = [];",
+    "for await (const chunk of process.stdin) chunks.push(chunk);",
+    'const input = Buffer.concat(chunks).toString("utf8");',
     CAPTURE_LINE,
-    'echo "$input"',
+    "process.stdout.write(input);",
     "",
   ].join("\n");
 }
@@ -40,7 +47,7 @@ export interface CaptureInstallResult {
 
 /**
  * The declined-fallback path from §7.6/decision 22: injects only the one-line usage-capture call into
- * whatever ~/.claude/statusline.sh already exists (or a minimal passthrough script if none does), so
+ * whatever ~/.claude/statusline.mjs already exists (or a minimal passthrough script if none does), so
  * `usage.json.monthlySpent` keeps accumulating even without the visible daily/monthly segments. Never
  * touches settings.json — this path adds no segment for it to point at.
  */

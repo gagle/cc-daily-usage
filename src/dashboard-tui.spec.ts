@@ -9,11 +9,13 @@ import type { Config, UsageState } from "./interfaces/config.interface.js";
 const loadConfigMock = vi.fn();
 const loadUsageMock = vi.fn();
 const saveConfigMock = vi.fn();
+const saveUsageMock = vi.fn();
 
 vi.mock("./config.js", () => ({
   loadConfig: (k: unknown) => loadConfigMock(k) as unknown,
   loadUsage: (k: unknown) => loadUsageMock(k) as unknown,
   saveConfig: (k: unknown, c: unknown) => saveConfigMock(k, c),
+  saveUsage: (k: unknown, u: unknown) => saveUsageMock(k, u),
 }));
 
 const resolveActiveAccountSyncMock = vi.fn((): Account | null => null);
@@ -133,16 +135,13 @@ describe("computeSnapshot", () => {
     expect(snapshot.computed.monthlySpent).toBe(80.94);
   });
 
-  it("persists a reconciled config when a spent day isn't marked laboral", async () => {
+  it("never promotes a spent non-laboral day into config.laboralDays", async () => {
     loadConfigMock.mockReturnValue(makeConfig({ laboralDays: { "2026": { "9": [1] } } }));
     loadUsageMock.mockReturnValue(makeUsage({ days: { "2026-09-01": 20, "2026-09-06": 12.5 } }));
     const { computeSnapshot } = await freshDashboard();
     const snapshot = computeSnapshot();
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ laboralDays: { "2026": { "9": [1, 6] } } }),
-    );
-    expect(snapshot.config.laboralDays["2026"]?.["9"]).toEqual([1, 6]);
+    expect(saveConfigMock).not.toHaveBeenCalled();
+    expect(snapshot.config.laboralDays["2026"]?.["9"]).toEqual([1]);
   });
 
   it("threads the resolved account into the returned snapshot and reads that account's own config/usage", async () => {
@@ -414,5 +413,184 @@ describe("DashboardApp", () => {
     const callsBefore = loadConfigMock.mock.calls.length;
     vi.advanceTimersByTime(2000);
     expect(loadConfigMock.mock.calls.length).toBeGreaterThan(callsBefore);
+  });
+
+  describe("day-edit mode (u / S)", () => {
+    it("enters day-edit mode with the draft pre-seeded to the current month's pool", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      // day 3 (today, fixed system time) has no usage.days entry yet — seeded from the live todayUsage
+      // (monthlySpent 80.94 minus days 1+2's 20+15 = 45.94), so the draft already sums to the pool.
+      expect(lastFrame()).toContain("Editing September 2026 day 3");
+      expect(lastFrame()).toContain("allocated $80.94 of $80.94");
+    });
+
+    it("typing digits then Enter commits the value into the draft for the cursored day", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write("5");
+      stdin.write("0");
+      await flush();
+      expect(lastFrame()).toContain("day 3: $50_");
+      stdin.write(KEY.enter);
+      await flush();
+      expect(lastFrame()).toContain("day 3: $_");
+      expect(lastFrame()).toContain("allocated $85.00 of $80.94"); // 20 + 15 + 50
+    });
+
+    it("arrow-key navigation auto-commits the in-progress buffer before moving", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write("5");
+      await flush();
+      stdin.write(KEY.left); // day 3 -> day 2, committing $5 to day 3 first
+      await flush();
+      expect(lastFrame()).toContain("Editing September 2026 day 2");
+      expect(lastFrame()).toContain("allocated $40.00 of $80.94"); // 20 + 15 + 5
+    });
+
+    it("right/up/down all move the cursor while in edit mode", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write(KEY.right); // day 3 -> day 4
+      await flush();
+      expect(lastFrame()).toContain("Editing September 2026 day 4");
+      stdin.write(KEY.down); // day 4 -> day 11
+      await flush();
+      expect(lastFrame()).toContain("Editing September 2026 day 11");
+      stdin.write(KEY.up); // day 11 -> day 4
+      await flush();
+      expect(lastFrame()).toContain("Editing September 2026 day 4");
+    });
+
+    it("ignores an unhandled key while in edit mode", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write("x");
+      await flush();
+      expect(lastFrame()).toContain("Editing September 2026 day 3");
+      expect(lastFrame()).toContain("allocated $80.94 of $80.94");
+    });
+
+    it("backspace edits the in-progress buffer", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write("5");
+      stdin.write("9");
+      await flush();
+      stdin.write(KEY.backspace);
+      await flush();
+      expect(lastFrame()).toContain("day 3: $5_");
+    });
+
+    it("S with a mismatched sum shows a warning and does not save", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write("1");
+      stdin.write("0");
+      await flush();
+      stdin.write("S");
+      await flush();
+      expect(saveUsageMock).not.toHaveBeenCalled();
+      expect(lastFrame()).toContain("not saved");
+      expect(lastFrame()).toContain("Editing September 2026"); // stays in edit mode
+    });
+
+    it("S with a matching sum saves and exits edit mode", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write("S");
+      await flush();
+      expect(saveUsageMock).toHaveBeenCalledWith(
+        "default",
+        expect.objectContaining({
+          days: { "2026-09-01": 20, "2026-09-02": 15, "2026-09-03": 45.94 },
+        }),
+      );
+      expect(lastFrame()).not.toContain("Editing September 2026");
+    });
+
+    it("Esc cancels day-edit mode without saving", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write("9");
+      await flush();
+      stdin.write(KEY.escape);
+      await flush();
+      expect(saveUsageMock).not.toHaveBeenCalled();
+      expect(lastFrame()).not.toContain("Editing September 2026");
+    });
+
+    it("silently drops a non-numeric buffer instead of corrupting the draft", async () => {
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write(".");
+      await flush();
+      stdin.write(KEY.enter);
+      await flush();
+      // "." alone parses to NaN — dropped, draft stays at its original seeded total.
+      expect(lastFrame()).toContain("allocated $80.94 of $80.94");
+    });
+
+    it("only clears the saved month's own days, leaving other months' recorded spend untouched", async () => {
+      usageStore = makeUsage({
+        days: { "2026-08-10": 99, "2026-09-01": 20, "2026-09-02": 15 },
+      });
+      const { DashboardApp } = await freshDashboard();
+      const { stdin } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      stdin.write("S");
+      await flush();
+      expect(saveUsageMock).toHaveBeenCalledWith(
+        "default",
+        expect.objectContaining({
+          days: { "2026-08-10": 99, "2026-09-01": 20, "2026-09-02": 15, "2026-09-03": 45.94 },
+        }),
+      );
+    });
+
+    it("uses the sum of existing days (not monthlySpent) as the pool for a past, non-current month", async () => {
+      usageStore = makeUsage({
+        days: { "2026-08-15": 30, "2026-08-20": 10, "2026-09-01": 20, "2026-09-02": 15 },
+      });
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write(KEY.tab); // September -> August (the only other month shown)
+      await flush();
+      stdin.write("u");
+      await flush();
+      expect(lastFrame()).toContain("Editing August 2026");
+      expect(lastFrame()).toContain("allocated $40.00 of $40.00");
+    });
+
+    it("does nothing when hasSpendCap is false — no dollar tracking to edit", async () => {
+      configStore = makeConfig({ hasSpendCap: false });
+      const { DashboardApp } = await freshDashboard();
+      const { stdin, lastFrame } = render(React.createElement(DashboardApp));
+      stdin.write("u");
+      await flush();
+      expect(lastFrame()).not.toContain("Editing");
+    });
   });
 });

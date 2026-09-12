@@ -26,3 +26,13 @@ cc-daily-usage dashboard    # open the terminal dashboard
 Spend is captured automatically from Claude Code's own hooks — nothing to
 log by hand. Everything lives in `~/.config/cc-daily-usage/`. Logged into
 multiple Claude accounts? Each one gets its own tracking, automatically.
+
+## Development
+
+```sh
+pnpm install && pnpm build && pnpm test
+```
+
+No real credentials needed — the whole test suite runs offline. See
+`docs/testing-and-verification.md` for the full verification command and
+coverage policy.

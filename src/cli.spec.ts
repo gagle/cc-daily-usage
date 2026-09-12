@@ -250,27 +250,6 @@ describe("runCli", () => {
     expect(code).toBe(0);
   });
 
-  it("hidden --statusline mode: persists a reconciled config when a spent day isn't marked laboral", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 80.94,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: { "2026-09-06": 12.5 }, // a Sunday, not in the fixture's laboralDays
-      sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ laboralDays: { "2026": { "9": [1, 2, 3, 6] } } }),
-    );
-  });
-
   it("hidden --statusline mode: includes extraUsage in the printed JSON when the live fetch has data", async () => {
     resolveOAuthAccessTokenMock.mockReturnValue({ token: "t", expiresAt: null });
     getCachedExtraUsageMock.mockResolvedValue({
@@ -354,6 +333,37 @@ describe("runCli", () => {
       email: "a@b.com",
       accountUuid: "u1",
       organizationType: "claude_pro",
+    });
+    stubStdin(
+      JSON.stringify({
+        session_id: "s1",
+        cost: { total_cost_usd: 5 },
+        rate_limits: { five_hour: { used_percentage: 10 } },
+      }),
+    );
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    expect(saveConfigMock).toHaveBeenCalledWith(
+      "default",
+      expect.objectContaining({ hasSpendCap: false }),
+    );
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed).not.toHaveProperty("monthlySpent");
+  });
+
+  it("hidden --statusline mode: self-heals to false on rate_limits alone when organizationType is unrecognized (no mismatch to piggyback on)", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 650,
+      laboralDays: {},
+      planType: null,
+      hasSpendCap: true, // wrong guess made on an earlier call whose payload lacked rate_limits
+    });
+    resolveActiveAccountMock.mockResolvedValue({
+      email: "a@b.com",
+      accountUuid: "u1",
+      organizationType: null, // classifyHasSpendCap(null) -> undefined, so `mismatch` is false here
     });
     stubStdin(
       JSON.stringify({
@@ -516,10 +526,58 @@ describe("runCli", () => {
     expect(code).toBe(0);
     expect(saveUsageMock).toHaveBeenCalledWith(
       "default",
-      expect.objectContaining({ rateLimitsCache: { fiveHourPct: 46, sevenDayPct: 31 } }),
+      expect.objectContaining({
+        rateLimitsCache: {
+          fiveHourPct: 46,
+          sevenDayPct: 31,
+          fiveHourResetsAt: null,
+          sevenDayResetsAt: null,
+        },
+      }),
     );
     const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({ fiveHourPct: 46, sevenDayPct: 31 });
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 46,
+      sevenDayPct: 31,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+    });
+  });
+
+  it("hidden --statusline mode: caches rate_limits resets_at alongside the percentage, per-field fallback", async () => {
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 80.94,
+      lastUpdated: "2026-09-03T00:00:00.000Z",
+      days: {},
+      sessions: {},
+      frozenForDate: null,
+      frozenAvgPerDay: null,
+      frozenSafeMonthTotal: null,
+      rateLimitsCache: {
+        fiveHourPct: 46,
+        sevenDayPct: 31,
+        fiveHourResetsAt: 1000,
+        sevenDayResetsAt: 2000,
+      },
+    });
+    stubStdin(
+      JSON.stringify({
+        session_id: "s1",
+        cost: { total_cost_usd: 5 },
+        rate_limits: { five_hour: { used_percentage: 60, resets_at: 1500 } }, // seven_day absent this call
+      }),
+    );
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 60,
+      sevenDayPct: 31,
+      fiveHourResetsAt: 1500,
+      sevenDayResetsAt: 2000,
+    });
   });
 
   it("hidden --statusline mode: rateLimitsCache falls back per-field when only one side refreshes", async () => {
@@ -531,7 +589,12 @@ describe("runCli", () => {
       frozenForDate: null,
       frozenAvgPerDay: null,
       frozenSafeMonthTotal: null,
-      rateLimitsCache: { fiveHourPct: 46, sevenDayPct: 31 },
+      rateLimitsCache: {
+        fiveHourPct: 46,
+        sevenDayPct: 31,
+        fiveHourResetsAt: null,
+        sevenDayResetsAt: null,
+      },
     });
     stubStdin(
       JSON.stringify({
@@ -545,7 +608,12 @@ describe("runCli", () => {
     const code = await runCli(["--statusline"]);
     expect(code).toBe(0);
     const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({ fiveHourPct: 60, sevenDayPct: 31 });
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 60,
+      sevenDayPct: 31,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+    });
   });
 
   it("hidden --statusline mode: rateLimitsCache falls back per-field when the other side refreshes", async () => {
@@ -557,7 +625,12 @@ describe("runCli", () => {
       frozenForDate: null,
       frozenAvgPerDay: null,
       frozenSafeMonthTotal: null,
-      rateLimitsCache: { fiveHourPct: 46, sevenDayPct: 31 },
+      rateLimitsCache: {
+        fiveHourPct: 46,
+        sevenDayPct: 31,
+        fiveHourResetsAt: null,
+        sevenDayResetsAt: null,
+      },
     });
     stubStdin(
       JSON.stringify({
@@ -571,7 +644,12 @@ describe("runCli", () => {
     const code = await runCli(["--statusline"]);
     expect(code).toBe(0);
     const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({ fiveHourPct: 46, sevenDayPct: 70 });
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 46,
+      sevenDayPct: 70,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+    });
   });
 
   it("hidden --statusline mode: rateLimitsCache field is null with no percentage and no prior cache", async () => {
@@ -587,7 +665,12 @@ describe("runCli", () => {
     const code = await runCli(["--statusline"]);
     expect(code).toBe(0);
     const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({ fiveHourPct: null, sevenDayPct: null });
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: null,
+      sevenDayPct: null,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+    });
   });
 
   it("hidden --statusline mode: echoes a prior rateLimitsCache when this call's payload has no rate_limits", async () => {
@@ -599,7 +682,12 @@ describe("runCli", () => {
       frozenForDate: null,
       frozenAvgPerDay: null,
       frozenSafeMonthTotal: null,
-      rateLimitsCache: { fiveHourPct: 46, sevenDayPct: 31 },
+      rateLimitsCache: {
+        fiveHourPct: 46,
+        sevenDayPct: 31,
+        fiveHourResetsAt: null,
+        sevenDayResetsAt: null,
+      },
     });
     stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
     const { runCli } = await freshCli();
@@ -607,7 +695,12 @@ describe("runCli", () => {
     const code = await runCli(["--statusline"]);
     expect(code).toBe(0);
     const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({ fiveHourPct: 46, sevenDayPct: 31 });
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 46,
+      sevenDayPct: 31,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+    });
   });
 
   it("hidden --statusline mode: rateLimitsCache is null when never seen", async () => {

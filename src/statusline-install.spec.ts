@@ -52,8 +52,8 @@ describe("installStatusline", () => {
 
   it("prompts to replace a foreign script and does so on yes", async () => {
     const { installStatusline } = await freshModule();
-    const statuslinePath = path.join(fakeHome, ".claude", "statusline.sh");
-    writeFileSync(statuslinePath, "#!/usr/bin/env bash\necho hand-written");
+    const statuslinePath = path.join(fakeHome, ".claude", "statusline.mjs");
+    writeFileSync(statuslinePath, "#!/usr/bin/env node\nconsole.log('hand-written')");
     const confirm = vi.fn().mockResolvedValue(true);
     const result = await installStatusline(confirm);
     expect(result.installed).toBe(true);
@@ -66,7 +66,7 @@ describe("installStatusline", () => {
     const result = await installStatusline(vi.fn().mockResolvedValue(false));
     expect(result.installed).toBe(false);
     expect(result.backupPath).toBeNull();
-    expect(existsSync(path.join(fakeHome, ".claude", "statusline.sh"))).toBe(false);
+    expect(existsSync(path.join(fakeHome, ".claude", "statusline.mjs"))).toBe(false);
   });
 
   it("re-running against an already-managed script is a silent no-op: no backup, no prompt, same version", async () => {
@@ -84,8 +84,8 @@ describe("installStatusline", () => {
 
   it("upgrades silently in place when the managed script content changed but the marker is still present", async () => {
     const { installStatusline } = await freshModule();
-    const statuslinePath = path.join(fakeHome, ".claude", "statusline.sh");
-    writeFileSync(statuslinePath, "# cc-daily-usage:managed vdeadbeef\necho old-version");
+    const statuslinePath = path.join(fakeHome, ".claude", "statusline.mjs");
+    writeFileSync(statuslinePath, "// cc-daily-usage:managed vdeadbeef\nconsole.log('old-version')");
     const confirm = vi.fn();
     const result = await installStatusline(confirm);
     expect(result.installed).toBe(true);

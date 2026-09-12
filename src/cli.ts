@@ -5,7 +5,6 @@ import {
   classifyHasSpendCap,
   computeToday,
   reconcileFromExtraUsageSnapshot,
-  reconcileLaboralDays,
   rolloverIfNeeded,
 } from "./calc.js";
 import { loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
@@ -18,7 +17,7 @@ const USAGE = `cc-daily-usage <operation> [flags]
 
 Operations:
   init              Open an interactive calendar picker to author laboralDays + monthlyCap
-  statusline        Install/update the live usage statusline in ~/.claude/statusline.sh
+  statusline        Install/update the live usage statusline in ~/.claude/statusline.mjs
   dashboard         Open a live terminal dashboard: stats, calendar, laboral-day editing
 
 Flags:
@@ -37,7 +36,7 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-/** Hidden internal mode — called by assets/statusline.sh (or the capture-only injected line) on every render.
+/** Hidden internal mode — called by assets/statusline.mjs (or the capture-only injected line) on every render.
  * Account resolution (see account.ts) runs fresh on every call — this is the "every interaction" hook — so a
  * mid-session account switch (even a different terminal's own CLAUDE_CODE_OAUTH_TOKEN override) is picked up
  * on the very next render, each scoped to its own accounts/<key>/ config+usage. */
@@ -76,11 +75,14 @@ async function runStatuslineHidden(): Promise<number> {
   }
 
   // Claude Code doesn't attach `rate_limits` to the very first --statusline call of a session (it needs a
-  // turn to know current window usage) — assets/statusline.sh's native ⏱ segment would render blank for
+  // turn to know current window usage) — assets/statusline.mjs's native ⏱ segment would render blank for
   // that render. Cache the last-seen five_hour/seven_day percentages here so the JSON below always carries
   // *something* to fall back to; per-field, so a payload that only refreshes one side doesn't blank the other.
   const rawRateLimits = hookPayload.rate_limits as
-    | { five_hour?: { used_percentage?: number }; seven_day?: { used_percentage?: number } }
+    | {
+        five_hour?: { used_percentage?: number; resets_at?: number };
+        seven_day?: { used_percentage?: number; resets_at?: number };
+      }
     | undefined;
   if (rawRateLimits) {
     usage.rateLimitsCache = {
@@ -88,6 +90,13 @@ async function runStatuslineHidden(): Promise<number> {
         rawRateLimits.five_hour?.used_percentage ?? usage.rateLimitsCache?.fiveHourPct ?? null,
       sevenDayPct:
         rawRateLimits.seven_day?.used_percentage ?? usage.rateLimitsCache?.sevenDayPct ?? null,
+      // Unix epoch seconds the window resets — Claude Code drops the window from the payload once this
+      // passes, so the cached value is what lets assets/statusline.mjs keep showing "resets at X" while
+      // the window is still over 100%, even on a render where Claude Code omitted it.
+      fiveHourResetsAt:
+        rawRateLimits.five_hour?.resets_at ?? usage.rateLimitsCache?.fiveHourResetsAt ?? null,
+      sevenDayResetsAt:
+        rawRateLimits.seven_day?.resets_at ?? usage.rateLimitsCache?.sevenDayResetsAt ?? null,
     };
   }
 
@@ -109,17 +118,13 @@ async function runStatuslineHidden(): Promise<number> {
   captureSessionCost(usage, sessionId, currentCost, now, loadedConfig.hasSpendCap === true);
   saveUsage(key, usage);
 
-  const config =
-    loadedConfig.hasSpendCap === false ? loadedConfig : reconcileLaboralDays(loadedConfig, usage);
-  if (config !== loadedConfig) saveConfig(key, config);
-
-  const computed = computeToday(usage, config, now);
+  const computed = computeToday(usage, loadedConfig, now);
   console.log(
     JSON.stringify({
       // Both dollar segments (today's and the month's) are fabricated self-tracked estimates, meaningless
-      // once this account is known to have no dollar cap — omit both so assets/statusline.sh's guards skip
+      // once this account is known to have no dollar cap — omit both so assets/statusline.mjs's guards skip
       // rendering, leaving Claude Code's own native ⏱ 5h/7d rate-limit segment as the sole usage indicator.
-      ...(config.hasSpendCap === false
+      ...(loadedConfig.hasSpendCap === false
         ? {}
         : {
             todayUsage: computed.todayUsage,
@@ -128,6 +133,10 @@ async function runStatuslineHidden(): Promise<number> {
             monthlySpent: computed.monthlySpent,
             monthlyCap: computed.monthlyCap,
             monthUsedPct: computed.monthUsedPct,
+            // True the very first time a dollar-cap account is seen, before `init` has ever picked laboral
+            // days — assets/statusline.mjs shows a short "run init" nudge instead of the (meaningless-until-
+            // configured) today/month segments above.
+            needsInit: Object.keys(loadedConfig.laboralDays).length === 0,
           }),
       extraUsage,
       rateLimitsCache: usage.rateLimitsCache ?? null,

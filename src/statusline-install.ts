@@ -37,14 +37,13 @@ export async function installStatusline(
 ): Promise<StatuslineInstallResult> {
   ensureClaudeDir();
   const existing = readIfExists(STATUSLINE_FILE);
-  const template = readFileSync(path.join(assetsDir(), "statusline.sh"), "utf8");
+  const template = readFileSync(path.join(assetsDir(), "statusline.mjs"), "utf8");
   const shippedVersion = computeShippedVersion(template);
   const shipped = stampVersion(template, shippedVersion);
 
   if (existing && hasMarker(existing, MANAGED_MARKER_REGEX)) {
     const installedVersion = extractVersion(existing);
-    if (installedVersion !== shippedVersion)
-      writeFileSync(STATUSLINE_FILE, shipped, { mode: 0o755 });
+    if (installedVersion !== shippedVersion) writeFileSync(STATUSLINE_FILE, shipped);
     ensureSettingsStatusLine();
     return {
       installed: true,
@@ -62,7 +61,7 @@ export async function installStatusline(
   if (!proceed) return { installed: false, backupPath: null, fromVersion: null, toVersion: null };
 
   const backupPath = backupFile(SETTINGS_FILE);
-  writeFileSync(STATUSLINE_FILE, shipped, { mode: 0o755 });
+  writeFileSync(STATUSLINE_FILE, shipped);
   ensureSettingsStatusLine();
   return { installed: true, backupPath, fromVersion: null, toVersion: shippedVersion };
 }

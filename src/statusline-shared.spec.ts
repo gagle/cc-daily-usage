@@ -39,8 +39,8 @@ describe("statusline-shared", () => {
 
   it("hasMarker matches the managed and capture markers independently", async () => {
     const { hasMarker, MANAGED_MARKER_REGEX, CAPTURE_MARKER_REGEX } = await freshModule();
-    expect(hasMarker("# cc-daily-usage:managed vdeadbeef", MANAGED_MARKER_REGEX)).toBe(true);
-    expect(hasMarker("# cc-daily-usage:capture v1", CAPTURE_MARKER_REGEX)).toBe(true);
+    expect(hasMarker("// cc-daily-usage:managed vdeadbeef", MANAGED_MARKER_REGEX)).toBe(true);
+    expect(hasMarker("// cc-daily-usage:capture v1", CAPTURE_MARKER_REGEX)).toBe(true);
     expect(hasMarker("plain script", MANAGED_MARKER_REGEX)).toBe(false);
   });
 
@@ -61,7 +61,7 @@ describe("statusline-shared", () => {
 
   it("extractVersion reads the version out of a managed marker, or null when absent", async () => {
     const { extractVersion } = await freshModule();
-    expect(extractVersion("# cc-daily-usage:managed vabc12345\necho hi")).toBe("abc12345");
+    expect(extractVersion("// cc-daily-usage:managed vabc12345\necho hi")).toBe("abc12345");
     expect(extractVersion("echo hi")).toBeNull();
   });
 
@@ -78,7 +78,10 @@ describe("statusline-shared", () => {
     const { ensureSettingsStatusLine, SETTINGS_FILE, STATUSLINE_FILE } = await freshModule();
     ensureSettingsStatusLine();
     const settings = JSON.parse(readFileSync(SETTINGS_FILE, "utf8")) as Record<string, unknown>;
-    expect(settings.statusLine).toEqual({ type: "command", command: STATUSLINE_FILE });
+    expect(settings.statusLine).toEqual({
+      type: "command",
+      command: `node ${JSON.stringify(STATUSLINE_FILE)}`,
+    });
   });
 
   it("ensureSettingsStatusLine merges without touching other existing keys", async () => {

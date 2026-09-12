@@ -3,8 +3,8 @@ import React, { useEffect, useState } from "react";
 
 import type { Account } from "./account.js";
 import { accountKey, readOverageCreditGrantCache, resolveActiveAccountSync } from "./account.js";
-import { colorForPct, computeToday, reconcileLaboralDays, rolloverIfNeeded } from "./calc.js";
-import { loadConfig, loadUsage, saveConfig } from "./config.js";
+import { colorForPct, computeToday, rolloverIfNeeded } from "./calc.js";
+import { loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
 import type { ComputedUsage } from "./interfaces/calc.interface.js";
 import type { Config, UsageState } from "./interfaces/config.interface.js";
 
@@ -84,20 +84,23 @@ export interface DashboardSnapshot {
 }
 
 /** Read → rollover (in-memory only, matching the former usage-tui's "never persist on read" decision — the
- * statusline hook is what actually persists usage.json) → reconcile laboral days (persisted, since toggling/
- * auto-adding days must stick) → compute. Account resolution is sync-only here (no per-session token-override
- * profile fetch — see account.ts) since this feeds Ink's synchronous useState initializer. */
+ * statusline hook is what actually persists usage.json) → compute. Account resolution is sync-only here (no
+ * per-session token-override profile fetch — see account.ts) since this feeds Ink's synchronous useState
+ * initializer. */
 export function computeSnapshot(): DashboardSnapshot {
   const account = resolveActiveAccountSync();
   const key = accountKey(account);
-  const loadedConfig = loadConfig(key);
+  const config = loadConfig(key);
   const usage = loadUsage(key);
   const now = new Date();
-  rolloverIfNeeded(usage, loadedConfig, now);
-  const config = reconcileLaboralDays(loadedConfig, usage);
-  if (config !== loadedConfig) saveConfig(key, config);
+  rolloverIfNeeded(usage, config, now);
   const computed = computeToday(usage, config, now);
   return { config, usage, computed, account };
+}
+
+/** "YYYY-MM" prefix for a MonthKey — used to scope a month's own usage.days entries out of the rest. */
+function monthPrefixOf(m: MonthKey): string {
+  return `${String(m.year)}-${String(m.month).padStart(2, "0")}`;
 }
 
 export interface Cursor {
@@ -108,6 +111,20 @@ export interface Cursor {
 
 function clampDay(day: number, year: number, month: number): number {
   return Math.max(1, Math.min(daysInMonth(year, month), day));
+}
+
+/** Manual calendar day-edit session (plan item: let the user directly type historical per-day $ amounts).
+ * `draft` starts as a copy of the edited month's existing usage.days (plus, for the current in-progress
+ * month, a synthetic today entry) and only ever grows/overwrites from there — never loses an untouched day. */
+interface DayEditSession {
+  readonly month: MonthKey;
+  readonly draft: Readonly<Record<string, number>>;
+  readonly buffer: string;
+  readonly warning: string | null;
+}
+
+function sumValues(values: Readonly<Record<string, number>>): number {
+  return Object.values(values).reduce((total, amount) => total + amount, 0);
 }
 
 const POLL_MS = 2000;
@@ -157,9 +174,36 @@ function renderWarningBanner(config: Config, now: Date): React.ReactElement | nu
   );
 }
 
+function renderDayEditBanner(
+  dayEdit: DayEditSession | null,
+  cursor: Cursor,
+  poolForMonth: (month: MonthKey) => number,
+  draftWithBufferCommitted: (session: DayEditSession) => Readonly<Record<string, number>>,
+): React.ReactElement | null {
+  if (dayEdit === null) return null;
+  // dayEdit.month.month always comes from cursor.month (always 1-12) — same always-in-range indexing as
+  // renderWarningBanner's monthName.
+  /* v8 ignore next */
+  const monthName = MONTH_NAMES[dayEdit.month.month - 1] ?? "?";
+  const draft = draftWithBufferCommitted(dayEdit);
+  return React.createElement(
+    Box,
+    { flexDirection: "column" },
+    React.createElement(
+      Text,
+      { color: "cyan" },
+      `Editing ${monthName} ${String(dayEdit.month.year)} day ${String(cursor.day)}: $${dayEdit.buffer}_  ` +
+        `(allocated ${money(sumValues(draft))} of ${money(poolForMonth(dayEdit.month))}, Enter commits, S saves, Esc cancels)`,
+    ),
+    dayEdit.warning !== null
+      ? React.createElement(Text, { color: "black", backgroundColor: "red" }, ` ${dayEdit.warning} `)
+      : null,
+  );
+}
+
 /** Dashboard/calendar-only nudge (see plan item 7) — reads Claude Code's own already-fetched overage-credit-
  * grant cache (account.ts's readOverageCreditGrantCache), no new network call. Deliberately not surfaced in
- * assets/statusline.sh. */
+ * assets/statusline.mjs. */
 function renderCreditGrantBanner(account: Account | null): React.ReactElement | null {
   const grant = readOverageCreditGrantCache(account?.accountUuid ?? null);
   if (!grant || !grant.eligible || grant.granted || grant.amount_minor_units === null) return null;
@@ -283,9 +327,11 @@ export function DashboardApp(): React.ReactElement {
     return { year: now.getUTCFullYear(), month: now.getUTCMonth() + 1, day: now.getUTCDate() };
   });
   const [capEdit, setCapEdit] = useState<string | null>(null);
+  const [dayEdit, setDayEdit] = useState<DayEditSession | null>(null);
 
   const months = monthsToShow(snapshot.config, snapshot.usage, new Date());
   const today = new Date().toISOString().slice(0, 10);
+  const currentMonthPrefix = today.slice(0, 7);
 
   // saveConfig writes synchronously (writeFileSync), so calling this right after a save re-reads the file
   // we just wrote — no need to thread the new config through by hand.
@@ -332,7 +378,117 @@ export function DashboardApp(): React.ReactElement {
     setCursor({ ...target, day: clampDay(cursor.day, target.year, target.month) });
   }
 
+  /** The fixed total a month's manually-entered days must sum to exactly. The current in-progress month's
+   * pool is the live monthlySpent (still accruing from real usage); a closed month has no live scalar left
+   * (monthlySpent resets every calendar-month boundary — see rolloverIfNeeded) so its pool is just whatever
+   * its own recorded days already sum to. */
+  function poolForMonth(month: MonthKey): number {
+    if (monthPrefixOf(month) === currentMonthPrefix) return snapshot.usage.monthlySpent;
+    const prefix = monthPrefixOf(month);
+    return sumValues(
+      Object.fromEntries(
+        Object.entries(snapshot.usage.days).filter(([iso]) => iso.startsWith(prefix)),
+      ),
+    );
+  }
+
+  function enterDayEdit(): void {
+    const month: MonthKey = { year: cursor.year, month: cursor.month };
+    const prefix = monthPrefixOf(month);
+    const draft: Record<string, number> = {};
+    for (const [iso, amount] of Object.entries(snapshot.usage.days)) {
+      if (iso.startsWith(prefix)) draft[iso] = amount;
+    }
+    // The live in-progress month's "today" isn't frozen into usage.days yet — seed it from the live figure
+    // so the draft already sums to the pool exactly, a valid starting point to redistribute from.
+    if (prefix === currentMonthPrefix && draft[today] === undefined) {
+      draft[today] = snapshot.computed.todayUsage;
+    }
+    setDayEdit({ month, draft, buffer: "", warning: null });
+  }
+
+  /** Folds any in-progress typed buffer into a draft, at the currently-cursored day — used both by Enter
+   * and by arrow-key navigation (which auto-commits before moving, spreadsheet-style). A non-numeric or
+   * empty buffer is silently dropped rather than corrupting the draft. */
+  function draftWithBufferCommitted(session: DayEditSession): Readonly<Record<string, number>> {
+    if (session.buffer === "") return session.draft;
+    const parsed = Number(session.buffer);
+    if (!Number.isFinite(parsed) || parsed < 0) return session.draft;
+    const iso = isoDate(cursor.year, cursor.month, cursor.day);
+    return { ...session.draft, [iso]: parsed };
+  }
+
+  function saveDayEdit(session: DayEditSession): void {
+    const draft = draftWithBufferCommitted(session);
+    const pool = poolForMonth(session.month);
+    const total = sumValues(draft);
+    if (Math.abs(total - pool) > 0.005) {
+      setDayEdit({
+        ...session,
+        buffer: "",
+        warning: `Adds up to ${money(total)}, needs to equal ${money(pool)} — not saved`,
+      });
+      return;
+    }
+    const prefix = monthPrefixOf(session.month);
+    const otherMonths = Object.fromEntries(
+      Object.entries(snapshot.usage.days).filter(([iso]) => !iso.startsWith(prefix)),
+    );
+    const usage = { ...snapshot.usage, days: { ...otherMonths, ...draft } };
+    saveUsage(accountKey(snapshot.account), usage);
+    setDayEdit(null);
+    refresh();
+  }
+
+  /** Applies `fn` to the live dayEdit session. The null branch can't actually occur — every call site is
+   * inside the `dayEdit !== null` guard below — but setDayEdit's updater always receives the true latest
+   * state (see the functional-update comment above), which is typed as possibly-null. */
+  function updateDayEdit(fn: (session: DayEditSession) => DayEditSession): void {
+    setDayEdit((prev) => {
+      /* v8 ignore next */
+      if (prev === null) return null;
+      return fn(prev);
+    });
+  }
+
   useInput((input, key) => {
+    if (dayEdit !== null) {
+      if (key.escape) {
+        setDayEdit(null);
+        return;
+      }
+      if (input === "S") {
+        saveDayEdit(dayEdit);
+        return;
+      }
+      // Functional updates throughout below — a burst of keystrokes (fast typing, held arrow keys) can
+      // fire several of these before Ink re-renders once; reading the outer `dayEdit` closure directly
+      // would let a later event silently clobber an earlier one instead of stacking on top of it.
+      if (key.return) {
+        updateDayEdit((prev) => ({
+          ...prev,
+          draft: draftWithBufferCommitted(prev),
+          buffer: "",
+          warning: null,
+        }));
+        return;
+      }
+      if (key.backspace || key.delete) {
+        updateDayEdit((prev) => ({ ...prev, buffer: prev.buffer.slice(0, -1) }));
+        return;
+      }
+      if (/^[0-9.]$/.test(input)) {
+        updateDayEdit((prev) => ({ ...prev, buffer: prev.buffer + input, warning: null }));
+        return;
+      }
+      if (key.leftArrow || key.rightArrow || key.upArrow || key.downArrow) {
+        const delta = key.leftArrow ? -1 : key.rightArrow ? 1 : key.upArrow ? -7 : 7;
+        updateDayEdit((prev) => ({ ...prev, draft: draftWithBufferCommitted(prev), buffer: "" }));
+        setCursor((c) => ({ ...c, day: clampDay(c.day + delta, c.year, c.month) }));
+      }
+      return;
+    }
+
     if (capEdit !== null) {
       if (key.escape) setCapEdit(null);
       else if (key.return) {
@@ -356,6 +512,10 @@ export function DashboardApp(): React.ReactElement {
       setCapEdit(String(snapshot.config.monthlyCap));
       return;
     }
+    if (input === "u" && snapshot.config.hasSpendCap !== false) {
+      enterDayEdit();
+      return;
+    }
     if (key.tab && key.shift) {
       switchMonth(-1);
       return;
@@ -374,6 +534,13 @@ export function DashboardApp(): React.ReactElement {
     if (key.downArrow) setCursor((c) => ({ ...c, day: clampDay(c.day + 7, c.year, c.month) }));
   });
 
+  // While editing, the focused month's cells reflect the in-progress draft (plus any not-yet-committed
+  // typed buffer) rather than the saved usage.days — pure display overlay, nothing is written until `S`.
+  const usageForCalendar: UsageState =
+    dayEdit === null
+      ? snapshot.usage
+      : { ...snapshot.usage, days: { ...snapshot.usage.days, ...draftWithBufferCommitted(dayEdit) } };
+
   return React.createElement(
     Box,
     // No fixed width here — letting Ink size against the real terminal (stdout.columns) is what makes
@@ -390,13 +557,14 @@ export function DashboardApp(): React.ReactElement {
           `Monthly cap: $${capEdit}_ (Enter to save, Esc to cancel)`,
         )
       : null,
+    renderDayEditBanner(dayEdit, cursor, poolForMonth, draftWithBufferCommitted),
     snapshot.config.hasSpendCap === false
       ? null
       : React.createElement(
           Box,
           { flexDirection: "row", flexWrap: "wrap" },
           ...months.map((m) =>
-            renderMonthCard(m.year, m.month, snapshot.config, snapshot.usage, cursor, today),
+            renderMonthCard(m.year, m.month, snapshot.config, usageForCalendar, cursor, today),
           ),
         ),
     renderFooterBar(snapshot.config, snapshot.computed),
@@ -405,7 +573,7 @@ export function DashboardApp(): React.ReactElement {
       { dimColor: true },
       snapshot.config.hasSpendCap === false
         ? "q quit"
-        : "←→ day  ↑↓ week  Tab month  Space/Enter toggle laboral  c cap  q quit",
+        : "←→ day  ↑↓ week  Tab month  Space/Enter toggle laboral  c cap  u edit days  S save  q quit",
     ),
   );
 }

@@ -8,7 +8,6 @@ import {
   getLaboralDays,
   pruneStaleSessions,
   reconcileFromExtraUsageSnapshot,
-  reconcileLaboralDays,
   rolloverIfNeeded,
   utcDateString,
 } from "./calc.js";
@@ -61,18 +60,47 @@ describe("rolloverIfNeeded", () => {
     expect(result.lastUpdated).toBe(now.toISOString());
   });
 
-  it("freezes every missed laboral day in a multi-day gap, skipping non-laboral days", () => {
+  it("freezes every missed day in a multi-day gap, laboral or not", () => {
     const usage = makeUsage({ lastUpdated: "2026-09-01T12:00:00.000Z", monthlySpent: 40 });
     const now = new Date("2026-09-05T00:00:00.000Z");
     const result = rolloverIfNeeded(usage, makeConfig(), now);
-    // walk covers 09-01 (lastUpdated's own day) through 09-04; all laboral per fixture config. The $40 was
-    // fully spent by 09-01 (nothing captured during the gap), so it's attributed there, not to 09-02.
+    // walk covers 09-01 (lastUpdated's own day) through 09-04. The $40 was fully spent by 09-01 (nothing
+    // captured during the gap), so it's attributed there, not to 09-02.
     expect(result.days).toEqual({
       "2026-09-01": 40,
       "2026-09-02": 0,
       "2026-09-03": 0,
       "2026-09-04": 0,
     });
+  });
+
+  it("freezes a non-laboral day with its own real spend, without promoting it to laboral", () => {
+    // 2026-09-06 is a Sunday, not in the fixture config's laboral days.
+    const usage = makeUsage({ lastUpdated: "2026-09-06T00:00:00.000Z", monthlySpent: 12.5 });
+    const now = new Date("2026-09-07T00:00:00.000Z");
+    const result = rolloverIfNeeded(usage, makeConfig(), now);
+    expect(result.days).toEqual({ "2026-09-06": 12.5 });
+  });
+
+  it("resets monthlySpent to 0 the moment the walk crosses a calendar-month boundary", () => {
+    const usage = makeUsage({ lastUpdated: "2026-08-30T00:00:00.000Z", monthlySpent: 100 });
+    const now = new Date("2026-09-02T00:00:00.000Z");
+    const result = rolloverIfNeeded(usage, makeConfig(), now);
+    // 08-30 and 08-31 still belong to August — frozen from the pre-reset $100 total (nothing else recorded
+    // that month), then the reset fires crossing into September, so 09-01 starts fresh at $0.
+    expect(result.days).toEqual({
+      "2026-08-30": 100,
+      "2026-08-31": 0,
+      "2026-09-01": 0,
+    });
+    expect(result.monthlySpent).toBe(0);
+  });
+
+  it("keeps accumulating within the same month without resetting", () => {
+    const usage = makeUsage({ lastUpdated: "2026-09-01T00:00:00.000Z", monthlySpent: 40 });
+    const now = new Date("2026-09-03T00:00:00.000Z");
+    const result = rolloverIfNeeded(usage, makeConfig(), now);
+    expect(result.monthlySpent).toBe(40);
   });
 
   it("freezes lastUpdated's own day on the very next day's rollover — no gap needed", () => {
@@ -345,36 +373,3 @@ describe("reconcileFromExtraUsageSnapshot", () => {
   });
 });
 
-describe("reconcileLaboralDays", () => {
-  it("returns the same config reference when every spent day is already laboral", () => {
-    const config = makeConfig();
-    const usage = makeUsage({ days: { "2026-09-01": 20 } });
-    expect(reconcileLaboralDays(config, usage)).toBe(config);
-  });
-
-  it("adds a weekend (or any non-configured) day that has recorded spend", () => {
-    const config = makeConfig(); // 2026-09-06 (a Sunday) isn't in the fixture's laboral days
-    const usage = makeUsage({ days: { "2026-09-06": 12.5 } });
-    const result = reconcileLaboralDays(config, usage);
-    expect(result).not.toBe(config);
-    expect(result.laboralDays["2026"]?.["9"]).toEqual([1, 2, 3, 4, 6, 7, 8, 9, 10]);
-  });
-
-  it("merges into an existing month array without duplicating an already-present day", () => {
-    const config = makeConfig();
-    const usage = makeUsage({ days: { "2026-09-01": 20, "2026-09-06": 12.5 } });
-    const result = reconcileLaboralDays(config, usage);
-    expect(result.laboralDays["2026"]?.["9"]).toEqual([1, 2, 3, 4, 6, 7, 8, 9, 10]);
-  });
-
-  it("leaves other months/years untouched and adds a new month key when needed", () => {
-    const config = makeConfig({
-      laboralDays: { "2026": { "9": [1] }, "2027": { "1": [5] } },
-    });
-    const usage = makeUsage({ days: { "2026-10-15": 3 } });
-    const result = reconcileLaboralDays(config, usage);
-    expect(result.laboralDays["2026"]?.["9"]).toEqual([1]);
-    expect(result.laboralDays["2027"]).toEqual({ "1": [5] });
-    expect(result.laboralDays["2026"]?.["10"]).toEqual([15]);
-  });
-});

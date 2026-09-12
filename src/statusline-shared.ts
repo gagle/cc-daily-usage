@@ -5,13 +5,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const CLAUDE_DIR = path.join(homedir(), ".claude");
-export const STATUSLINE_FILE = path.join(CLAUDE_DIR, "statusline.sh");
+export const STATUSLINE_FILE = path.join(CLAUDE_DIR, "statusline.mjs");
 export const SETTINGS_FILE = path.join(CLAUDE_DIR, "settings.json");
 
 // Captures the version so installStatusline can tell "same version, no-op" apart from "different
-// version, upgrade" — see computeShippedVersion/stampVersion/extractVersion below.
-export const MANAGED_MARKER_REGEX = /# cc-daily-usage:managed v([0-9a-f]{8})/;
-export const CAPTURE_MARKER_REGEX = /# cc-daily-usage:capture v\d+/;
+// version, upgrade" — see computeShippedVersion/stampVersion/extractVersion below. `//`, not `#`: the
+// managed file is JS (ESM), where `#` is only valid on a line-1 shebang.
+export const MANAGED_MARKER_REGEX = /\/\/ cc-daily-usage:managed v([0-9a-f]{8})/;
+export const CAPTURE_MARKER_REGEX = /\/\/ cc-daily-usage:capture v\d+/;
 
 const VERSION_PLACEHOLDER = "__CC_DAILY_USAGE_VERSION__";
 
@@ -86,10 +87,12 @@ export function readJsonFile(filePath: string): Record<string, unknown> {
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 }
 
-/** Merges (never overwrites other keys) a `statusLine` block pointing at our managed script. */
+/** Merges (never overwrites other keys) a `statusLine` block pointing at our managed script. An explicit
+ * `node` prefix, not a bare path relying on a shebang + exec bit: Windows resolves neither. `node` itself
+ * is guaranteed on PATH — it's what runs Claude Code / cc-daily-usage in the first place. */
 export function ensureSettingsStatusLine(): void {
   ensureClaudeDir();
   const settings = readJsonFile(SETTINGS_FILE);
-  settings.statusLine = { type: "command", command: STATUSLINE_FILE };
+  settings.statusLine = { type: "command", command: `node ${JSON.stringify(STATUSLINE_FILE)}` };
   writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }

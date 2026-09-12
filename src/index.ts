@@ -19,7 +19,6 @@ export {
   getLaboralDays,
   pruneStaleSessions,
   reconcileFromExtraUsageSnapshot,
-  reconcileLaboralDays,
   rolloverIfNeeded,
   utcDateString,
 } from "./calc.js";

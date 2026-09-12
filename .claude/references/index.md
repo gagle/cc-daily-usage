@@ -1,0 +1,5 @@
+- [Architecture](../../docs/architecture.md) — module map, data flow, multi-account model, hasSpendCap branching
+- [Calculations](../../docs/calculations.md) — every formula in calc.ts (rollover, avgPerDay, captureSessionCost, reconcile)
+- [Data model](../../docs/data-model.md) — Config/UsageState/interfaces, on-disk layout, managed-file markers
+- [Use cases](../../docs/use-cases.md) — CLI operations, dashboard keybindings, statusline segment rendering
+- [Testing & verification](../../docs/testing-and-verification.md) — coverage policy, verification commands, CI
