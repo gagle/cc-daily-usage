@@ -15,10 +15,14 @@ export {
 export {
   captureSessionCost,
   colorForPct,
+  computeRealAvgPerDay,
   computeToday,
   getLaboralDays,
+  isLaboralDay,
+  paceLabel,
   pruneStaleSessions,
   reconcileFromExtraUsageSnapshot,
+  refreshFrozenPaceIfNonLaboral,
   rolloverIfNeeded,
   utcDateString,
 } from "./calc.js";

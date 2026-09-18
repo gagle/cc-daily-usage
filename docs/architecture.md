@@ -39,11 +39,11 @@ extra-usage credit reconciliation.
   day-start keeps it a stable target to spend against, at the cost of not
   reflecting same-day catch-up until midnight UTC. See `docs/calculations.md`.
 - **`hasSpendCap` starts `undefined` and self-heals, instead of requiring
-  explicit config.** `organizationType` from `~/.claude.json` isn't always
-  present or trustworthy at first run; waiting for the first hook payload
-  that actually carries Claude Code's own `rate_limits` field (a hard
-  signal a Pro/Max plan has no dollar cap) avoids misclassifying an account
-  from a stale or missing OAuth field.
+  explicit config.** It gates this tool's fabricated dollar monthlyCap
+  budget only. Seat-window `rate_limits` (5h/7d) are separate — Team and
+  Enterprise seats have them too. `organizationType` wins when known;
+  `rate_limits` may demote an _unrecognized_ org's dollar guess to false,
+  never a known enterprise/team classification.
 
 ## Module map
 
@@ -53,7 +53,7 @@ anthropic-usage.ts     Anthropic API calls (oauth profile, extra-usage credits, 
 calc.ts                pure math, mutates its UsageState argument in place
 config.ts              per-account JSON persistence, legacy single-account migration
 cli.ts                 operation dispatch + hidden `--statusline` hook path
-dashboard-tui.ts       Ink TUI app (calendar, cap edit, day edit)
+calendar-tui.ts       Ink TUI app (calendar, cap edit, day edit)
 statusline-shared.ts   installer utilities shared by both install paths below
 statusline-install.ts        idempotent full install of assets/statusline.mjs
 statusline-capture-install.ts  fallback capture-only install (no full statusline)
@@ -82,7 +82,7 @@ Claude Code hook (stdin JSON)
   <- statusline.mjs renders the ANSI line (bar, cost, rate limits, cc-daily-usage segments)
 ```
 
-`dashboard-tui.ts` polls the same `config.json`/`usage.json` files independently every
+`calendar-tui.ts` polls the same `config.json`/`usage.json` files independently every
 2000ms — it does not talk to `cli.ts` or the hook path at all, just the filesystem.
 
 **`init` operation:**
@@ -123,21 +123,17 @@ Never assume `"default"` — always resolve the key via `accountKey()`.
 
 `classifyHasSpendCap(organizationType)` (from `~/.claude.json`'s `oauthAccount.organizationType`):
 
-| `organizationType`      | `hasSpendCap`            |
-| ----------------------- | ------------------------ |
-| `claude_enterprise`     | `true`                   |
-| `claude_pro`            | `false`                  |
-| anything else / unknown | `undefined` (unresolved) |
+| `organizationType`                 | `hasSpendCap` (dollar self-budget) |
+| ---------------------------------- | ---------------------------------- |
+| `claude_enterprise`, `claude_team` | `true`                             |
+| `claude_pro`, `claude_max`         | `false`                            |
+| anything else / unknown            | `undefined` (unresolved)           |
 
-This self-heals: once any statusline hook payload carries Claude Code's own
-`rate_limits` field (a subscription plan with 5h/7d request windows, not a
-dollar-metered account), `hasSpendCap` is permanently set `false` for that account —
-even if the initial `organizationType` guess said otherwise.
-
-`hasSpendCap` gates whether `rolloverIfNeeded()`/`captureSessionCost()` run at all.
-Pro/Max accounts (`hasSpendCap === false`) skip all dollar-cap math entirely and rely
-solely on Claude Code's own `rate_limits` 5h/7d window display in the statusline —
-see `docs/calculations.md` for what runs when it's `true`.
+Seat windows (`rate_limits` 5h/7d) still arrive on the hook for subscription seats,
+but the **statusline display** splits by `hasSpendCap`: Pro/Max show `⏱` (+ `🎫`
+when usage credits exist); enterprise shows `$` self-budget only (no `⏱`, no `🎫`).
+`$today` is omitted on non-laboral days; off-day spend still updates `monthlySpent`
+and refreshes frozen pace — see `docs/calculations.md`.
 
 ## Security model
 

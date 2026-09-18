@@ -101,8 +101,17 @@ describe("statusline-shared", () => {
   it("assetsDir prefers a same-level assets/ sibling when present (flattened prepare-dist layout)", async () => {
     // Simulate the flattened publish layout by giving import.meta.url's own directory a real sibling
     // assets/ — dirname(this test file) is src/, so a same-level src/assets/ must exist for the check.
+    // Copy the real statusline template in too: other specs can race this window under vitest file
+    // parallelism and would otherwise ENOENT when assetsDir() flips to the empty sibling.
     const sameLevelAssets = path.join(path.dirname(fileURLToPath(import.meta.url)), "assets");
+    const realTemplate = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "assets",
+      "statusline.mjs",
+    );
     mkdirSync(sameLevelAssets, { recursive: true });
+    writeFileSync(path.join(sameLevelAssets, "statusline.mjs"), readFileSync(realTemplate));
     try {
       const { assetsDir } = await freshModule();
       expect(assetsDir()).toBe(sameLevelAssets);

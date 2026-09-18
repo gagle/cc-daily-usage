@@ -3,7 +3,7 @@ import React, { useEffect, useState } from "react";
 
 import type { Account } from "./account.js";
 import { accountKey, readOverageCreditGrantCache, resolveActiveAccountSync } from "./account.js";
-import { colorForPct, computeToday, rolloverIfNeeded } from "./calc.js";
+import { colorForPct, computeToday, isLaboralDay, rolloverIfNeeded } from "./calc.js";
 import { loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
 import type { ComputedUsage } from "./interfaces/calc.interface.js";
 import type { Config, UsageState } from "./interfaces/config.interface.js";
@@ -51,7 +51,8 @@ export interface MonthKey {
 }
 
 /** Every year/month with configured laboral days or recorded spend, plus always the current month — so
- * there's always a grid to toggle days into existence on, even from a totally empty config. */
+ * there's always a grid to toggle days into existence on, even from a totally empty config. Kept for
+ * tests / callers; the live calendar focuses one month and uses yearsAvailable for year switching. */
 export function monthsToShow(
   config: Config,
   usage: UsageState,
@@ -76,7 +77,33 @@ export function monthsToShow(
     .sort((a, b) => a.year - b.year || a.month - b.month);
 }
 
-export interface DashboardSnapshot {
+/** Sorted unique years that have laboral config, recorded spend, or are the current UTC year. */
+export function yearsAvailable(
+  config: Config,
+  usage: UsageState,
+  now: Date,
+): ReadonlyArray<number> {
+  const years = new Set<number>();
+  for (const year of Object.keys(config.laboralDays)) years.add(Number(year));
+  for (const iso of Object.keys(usage.days)) years.add(Number(iso.slice(0, 4)));
+  years.add(now.getUTCFullYear());
+  return Array.from(years)
+    .filter((year) => Number.isFinite(year))
+    .sort((a, b) => a - b);
+}
+
+/** Move the cursor by whole calendar days (UTC), crossing month/year boundaries. */
+export function moveCursor(cursor: Cursor, deltaDays: number): Cursor {
+  const date = new Date(Date.UTC(cursor.year, cursor.month - 1, cursor.day));
+  date.setUTCDate(date.getUTCDate() + deltaDays);
+  return {
+    year: date.getUTCFullYear(),
+    month: date.getUTCMonth() + 1,
+    day: date.getUTCDate(),
+  };
+}
+
+export interface CalendarSnapshot {
   readonly config: Config;
   readonly usage: UsageState;
   readonly computed: ComputedUsage;
@@ -87,7 +114,7 @@ export interface DashboardSnapshot {
  * statusline hook is what actually persists usage.json) → compute. Account resolution is sync-only here (no
  * per-session token-override profile fetch — see account.ts) since this feeds Ink's synchronous useState
  * initializer. */
-export function computeSnapshot(): DashboardSnapshot {
+export function computeSnapshot(): CalendarSnapshot {
   const account = resolveActiveAccountSync();
   const key = accountKey(account);
   const config = loadConfig(key);
@@ -129,20 +156,39 @@ function sumValues(values: Readonly<Record<string, number>>): number {
 
 const POLL_MS = 2000;
 
-function renderStatsHeader(config: Config, computed: ComputedUsage): React.ReactElement {
-  const showToday =
-    config.hasSpendCap !== false && computed.avgPerDay !== null && computed.todayUsedPct !== null;
+function renderStatsHeader(
+  config: Config,
+  computed: ComputedUsage,
+  cursor: Cursor,
+  now: Date,
+): React.ReactElement {
+  const showTodayPace =
+    config.hasSpendCap !== false &&
+    isLaboralDay(config, now) &&
+    computed.avgPerDay !== null &&
+    computed.todayUsedPct !== null &&
+    computed.paceLabel !== null;
+  const showTodayUsageOnly = config.hasSpendCap !== false && !isLaboralDay(config, now);
+  // cursor.month is always 1-12.
+  /* v8 ignore next */
+  const monthName = MONTH_NAMES[cursor.month - 1] ?? "?";
   return React.createElement(
     Box,
     { flexDirection: "column", marginBottom: 1 },
-    React.createElement(Text, { bold: true, color: "yellow" }, "💰 cc-daily-usage dashboard"),
-    showToday
+    React.createElement(
+      Text,
+      { bold: true },
+      `Year ${String(cursor.year)}  ([/] or S-←/→ year)   ${monthName}  (←→/Tab month)`,
+    ),
+    showTodayPace
       ? React.createElement(
           Text,
           { color: colorForPct(computed.todayUsedPct) },
-          `Today:      ${money(computed.todayUsage)} / ${money(computed.avgPerDay)}  (${pctLabel(computed.todayUsedPct)})`,
+          `Today:      ${money(computed.todayUsage)} / ${money(computed.avgPerDay)}  (${pctLabel(computed.todayUsedPct)})  ·  ${computed.paceLabel}`,
         )
-      : null,
+      : showTodayUsageOnly
+        ? React.createElement(Text, { dimColor: true }, `Today:      ${money(computed.todayUsage)}`)
+        : null,
     config.hasSpendCap === false
       ? React.createElement(
           Text,
@@ -154,6 +200,20 @@ function renderStatsHeader(config: Config, computed: ComputedUsage): React.React
           { color: colorForPct(computed.monthUsedPct) },
           `This month: ${money(computed.monthlySpent)} / ${money(computed.monthlyCap)}  (${pctLabel(computed.monthUsedPct)})`,
         ),
+    config.hasSpendCap !== false && computed.monthDay0AvgPerDay !== null
+      ? React.createElement(
+          Text,
+          { dimColor: true },
+          `Day-0 max:  ${money(computed.monthDay0AvgPerDay)}  (first equal-split this month)`,
+        )
+      : null,
+    config.hasSpendCap !== false && computed.realAvgPerDay !== null
+      ? React.createElement(
+          Text,
+          { dimColor: true },
+          `Real avg:   ${money(computed.realAvgPerDay)}  / laboral day so far`,
+        )
+      : null,
   );
 }
 
@@ -186,22 +246,69 @@ function renderDayEditBanner(
   /* v8 ignore next */
   const monthName = MONTH_NAMES[dayEdit.month.month - 1] ?? "?";
   const draft = draftWithBufferCommitted(dayEdit);
+  const pool = poolForMonth(dayEdit.month);
   return React.createElement(
     Box,
     { flexDirection: "column" },
     React.createElement(
       Text,
       { color: "cyan" },
-      `Editing ${monthName} ${String(dayEdit.month.year)} day ${String(cursor.day)}: $${dayEdit.buffer}_  ` +
-        `(allocated ${money(sumValues(draft))} of ${money(poolForMonth(dayEdit.month))}, Enter commits, S saves, Esc cancels)`,
+      `Redistributing ${monthName} ${String(dayEdit.month.year)} pool ${money(pool)} across days ` +
+        `(now on day ${String(cursor.day)}). Allocated ${money(sumValues(draft))} of ${money(pool)}. ` +
+        `Type digits on the cell (auto $). Enter commits cell, S saves, Esc cancels.`,
+    ),
+    React.createElement(
+      Text,
+      { dimColor: true },
+      "Tip: put leftover on today to keep history simple and start clean next laboral day.",
     ),
     dayEdit.warning !== null
-      ? React.createElement(Text, { color: "black", backgroundColor: "red" }, ` ${dayEdit.warning} `)
+      ? React.createElement(
+          Text,
+          { color: "black", backgroundColor: "red" },
+          ` ${dayEdit.warning} `,
+        )
       : null,
   );
 }
 
-/** Dashboard/calendar-only nudge (see plan item 7) — reads Claude Code's own already-fetched overage-credit-
+/** One-line hint under the calendar: what Enter/Space or $ edit will do for the focused day. */
+function renderContextHint(
+  config: Config,
+  cursor: Cursor,
+  dayEdit: DayEditSession | null,
+  poolForMonth: (month: MonthKey) => number,
+): React.ReactElement | null {
+  if (config.hasSpendCap === false) return null;
+  if (dayEdit !== null) {
+    const pool = poolForMonth(dayEdit.month);
+    return React.createElement(
+      Box,
+      { flexDirection: "column", marginTop: 1 },
+      React.createElement(
+        Text,
+        { color: "yellow" },
+        `Editing day ${String(cursor.day)} $ (month pool ${money(pool)}) · type digits · Enter: commit cell · S: save if sum matches · Esc: cancel`,
+      ),
+    );
+  }
+  const laboral = (config.laboralDays[String(cursor.year)]?.[String(cursor.month)] ?? []).includes(
+    cursor.day,
+  );
+  return React.createElement(
+    Box,
+    { marginTop: 1 },
+    React.createElement(
+      Text,
+      { color: "yellow" },
+      laboral
+        ? `Day ${String(cursor.day)} · laboral · Enter/Space: unmark laboral (excluded from daily pace)`
+        : `Day ${String(cursor.day)} · off · Enter/Space: mark as laboral (counts in daily pace)`,
+    ),
+  );
+}
+
+/** Calendar-only nudge (see plan item 7) — reads Claude Code's own already-fetched overage-credit-
  * grant cache (account.ts's readOverageCreditGrantCache), no new network call. Deliberately not surfaced in
  * assets/statusline.mjs. */
 function renderCreditGrantBanner(account: Account | null): React.ReactElement | null {
@@ -214,7 +321,16 @@ function renderCreditGrantBanner(account: Account | null): React.ReactElement | 
   );
 }
 
-const CELL_WIDTH = 7; // " 7 $26" style, rounded to whole dollars to fit a compact grid
+const CELL_WIDTH = 9; // two-line cell: day on top, $amount below
+
+function blankDayCell(key: string): React.ReactElement {
+  return React.createElement(
+    Box,
+    { key, flexDirection: "column", width: CELL_WIDTH, marginRight: 1 },
+    React.createElement(Text, null, "".padEnd(CELL_WIDTH, " ")),
+    React.createElement(Text, null, "".padEnd(CELL_WIDTH, " ")),
+  );
+}
 
 function renderDayCell(
   year: number,
@@ -224,26 +340,52 @@ function renderDayCell(
   usage: UsageState,
   cursor: Cursor,
   today: string,
+  dayEdit: DayEditSession | null,
 ): React.ReactElement {
   const iso = isoDate(year, month, day);
   const isLaboral = (config.laboralDays[String(year)]?.[String(month)] ?? []).includes(day);
   const isCursor = cursor.year === year && cursor.month === month && cursor.day === day;
   const isToday = iso === today;
   const amount = usage.days[iso];
-  const label =
-    amount === undefined
-      ? String(day).padStart(2, " ")
-      : `${String(day).padStart(2, " ")}$${String(Math.round(amount))}`;
+  const editingHere = dayEdit !== null && isCursor;
+  let moneyLine: string;
+  if (editingHere) {
+    // `$` is display chrome — the buffer is digits/`.` only.
+    moneyLine = `$${dayEdit.buffer}_`;
+  } else if (amount === undefined) {
+    moneyLine = "—";
+  } else {
+    moneyLine = money(amount);
+  }
+  const dayColor = isToday ? "cyan" : isLaboral ? "green" : "gray";
+  // No border on the cursor cell — Ink borders change width/height and shift the grid. Inverse text only.
   return React.createElement(
-    Text,
+    Box,
     {
       key: iso,
-      inverse: isCursor,
-      bold: isToday,
-      color: isLaboral ? "green" : "gray",
-      dimColor: !isLaboral && amount === undefined,
+      flexDirection: "column",
+      width: CELL_WIDTH,
+      marginRight: 1,
     },
-    label.padEnd(CELL_WIDTH, " "),
+    React.createElement(
+      Text,
+      {
+        bold: isToday || isCursor,
+        inverse: isCursor,
+        color: dayColor,
+        dimColor: !isLaboral && amount === undefined && !editingHere && !isCursor,
+      },
+      String(day).padStart(2, " ").padEnd(CELL_WIDTH, " ").slice(0, CELL_WIDTH),
+    ),
+    React.createElement(
+      Text,
+      {
+        inverse: isCursor,
+        color: editingHere ? "cyan" : dayColor,
+        dimColor: amount === undefined && !editingHere && !isCursor,
+      },
+      moneyLine.padEnd(CELL_WIDTH, " ").slice(0, CELL_WIDTH),
+    ),
   );
 }
 
@@ -254,6 +396,7 @@ function renderMonthCard(
   usage: UsageState,
   cursor: Cursor,
   today: string,
+  dayEdit: DayEditSession | null,
 ): React.ReactElement {
   const total = daysInMonth(year, month);
   const leading = mondayFirstWeekday(year, month, 1);
@@ -262,12 +405,10 @@ function renderMonthCard(
   const monthName = MONTH_NAMES[month - 1] ?? "?";
   const cells: Array<React.ReactElement> = [];
   for (let i = 0; i < leading; i++) {
-    cells.push(
-      React.createElement(Text, { key: `blank-${String(i)}` }, "".padEnd(CELL_WIDTH, " ")),
-    );
+    cells.push(blankDayCell(`blank-${String(i)}`));
   }
   for (let day = 1; day <= total; day++) {
-    cells.push(renderDayCell(year, month, day, config, usage, cursor, today));
+    cells.push(renderDayCell(year, month, day, config, usage, cursor, today, dayEdit));
   }
   const rows: Array<React.ReactElement> = [];
   for (let i = 0; i < cells.length; i += 7) {
@@ -279,49 +420,28 @@ function renderMonthCard(
       ),
     );
   }
+  // Shrink-wrap to the 7-column grid — without alignSelf, a bordered Box stretches to the terminal width.
+  const gridWidth = 7 * CELL_WIDTH + 7; // cell widths + per-cell marginRight
   return React.createElement(
     Box,
     {
       key: `${String(year)}-${String(month)}`,
       flexDirection: "column",
       borderStyle: "round",
-      borderColor: cursor.year === year && cursor.month === month ? "cyan" : "gray",
+      borderColor: "cyan",
       paddingX: 1,
-      marginRight: 1,
       marginBottom: 1,
+      alignSelf: "flex-start",
+      width: gridWidth + 2, // + paddingX left/right; border is drawn around this box
     },
     React.createElement(Text, { bold: true }, `${monthName} ${String(year)}`),
     ...rows,
   );
 }
 
-function renderFooterBar(config: Config, computed: ComputedUsage): React.ReactElement | null {
-  if (config.hasSpendCap === false) return null;
-  const showToday = computed.avgPerDay !== null && computed.todayUsedPct !== null;
-  const parts: Array<React.ReactElement> = [];
-  if (showToday) {
-    parts.push(
-      React.createElement(
-        Text,
-        { key: "today", color: colorForPct(computed.todayUsedPct) },
-        `${money(computed.todayUsage)}/${money(computed.avgPerDay)} (${pctLabel(computed.todayUsedPct)})`,
-      ),
-    );
-    parts.push(React.createElement(Text, { key: "sep", dimColor: true }, " | "));
-  }
-  parts.push(
-    React.createElement(
-      Text,
-      { key: "month", color: colorForPct(computed.monthUsedPct) },
-      `${money(computed.monthlySpent)}/${money(computed.monthlyCap)} (${pctLabel(computed.monthUsedPct)})`,
-    ),
-  );
-  return React.createElement(Box, { marginTop: 1 }, ...parts);
-}
-
-export function DashboardApp(): React.ReactElement {
+export function CalendarApp(): React.ReactElement {
   const { exit } = useApp();
-  const [snapshot, setSnapshot] = useState<DashboardSnapshot>(computeSnapshot);
+  const [snapshot, setSnapshot] = useState<CalendarSnapshot>(computeSnapshot);
   const [cursor, setCursor] = useState<Cursor>(() => {
     const now = new Date();
     return { year: now.getUTCFullYear(), month: now.getUTCMonth() + 1, day: now.getUTCDate() };
@@ -329,7 +449,7 @@ export function DashboardApp(): React.ReactElement {
   const [capEdit, setCapEdit] = useState<string | null>(null);
   const [dayEdit, setDayEdit] = useState<DayEditSession | null>(null);
 
-  const months = monthsToShow(snapshot.config, snapshot.usage, new Date());
+  const years = yearsAvailable(snapshot.config, snapshot.usage, new Date());
   const today = new Date().toISOString().slice(0, 10);
   const currentMonthPrefix = today.slice(0, 7);
 
@@ -340,7 +460,7 @@ export function DashboardApp(): React.ReactElement {
   }
 
   // Live polling — same interval/reasoning the former usage-tui.ts used: reflects the statusline hook's
-  // continual usage.json writes without the user having to manually re-open the dashboard.
+  // continual usage.json writes without the user having to manually re-open the calendar.
   useEffect(() => {
     const timer = setInterval(refresh, POLL_MS);
     return () => {
@@ -367,15 +487,31 @@ export function DashboardApp(): React.ReactElement {
     refresh();
   }
 
+  /** Cycle month 1–12 within the current year (wraps Jan↔Dec). */
   function switchMonth(direction: 1 | -1): void {
-    const index = months.findIndex((m) => m.year === cursor.year && m.month === cursor.month);
-    const nextIndex = (index + direction + months.length) % months.length;
-    const target = months[nextIndex];
-    // `months` always contains at least the current month (see monthsToShow) and nextIndex is always a valid
-    // index into it, so target is always defined — noUncheckedIndexedAccess still requires the guard.
-    /* v8 ignore next */
-    if (!target) return;
-    setCursor({ ...target, day: clampDay(cursor.day, target.year, target.month) });
+    setCursor((c) => {
+      let month = c.month + direction;
+      if (month < 1) month = 12;
+      if (month > 12) month = 1;
+      return { year: c.year, month, day: clampDay(c.day, c.year, month) };
+    });
+  }
+
+  /** Jump to the previous/next year that has data (or adjacent calendar year if only one exists). */
+  function switchYear(direction: 1 | -1): void {
+    setCursor((c) => {
+      const index = years.indexOf(c.year);
+      let nextYear: number;
+      if (index === -1) {
+        nextYear = c.year + direction;
+      } else {
+        const nextIndex = (index + direction + years.length) % years.length;
+        // years is non-empty here (index was found) and nextIndex is always in range.
+        /* v8 ignore next */
+        nextYear = years[nextIndex] ?? c.year + direction;
+      }
+      return { year: nextYear, month: c.month, day: clampDay(c.day, nextYear, c.month) };
+    });
   }
 
   /** The fixed total a month's manually-entered days must sum to exactly. The current in-progress month's
@@ -483,8 +619,20 @@ export function DashboardApp(): React.ReactElement {
       }
       if (key.leftArrow || key.rightArrow || key.upArrow || key.downArrow) {
         const delta = key.leftArrow ? -1 : key.rightArrow ? 1 : key.upArrow ? -7 : 7;
-        updateDayEdit((prev) => ({ ...prev, draft: draftWithBufferCommitted(prev), buffer: "" }));
-        setCursor((c) => ({ ...c, day: clampDay(c.day + delta, c.year, c.month) }));
+        updateDayEdit((prev) => ({
+          ...prev,
+          draft: draftWithBufferCommitted(prev),
+          buffer: "",
+          // Stay in the month being edited — cross-month browse is for non-edit mode.
+          month: prev.month,
+        }));
+        setCursor((c) => {
+          const next = moveCursor(c, delta);
+          if (next.year !== dayEdit.month.year || next.month !== dayEdit.month.month) {
+            return { ...c, day: clampDay(c.day + delta, c.year, c.month) };
+          }
+          return next;
+        });
       }
       return;
     }
@@ -504,7 +652,7 @@ export function DashboardApp(): React.ReactElement {
       return;
     }
 
-    if (input === "q" || key.escape) {
+    if (input === "q" || key.escape || (key.ctrl && input === "c")) {
       exit();
       return;
     }
@@ -524,14 +672,22 @@ export function DashboardApp(): React.ReactElement {
       switchMonth(1);
       return;
     }
+    if (input === "[" || (key.leftArrow && key.shift)) {
+      switchYear(-1);
+      return;
+    }
+    if (input === "]" || (key.rightArrow && key.shift)) {
+      switchYear(1);
+      return;
+    }
     if ((input === " " || key.return) && snapshot.config.hasSpendCap !== false) {
       toggleCursorDay();
       return;
     }
-    if (key.leftArrow) setCursor((c) => ({ ...c, day: clampDay(c.day - 1, c.year, c.month) }));
-    if (key.rightArrow) setCursor((c) => ({ ...c, day: clampDay(c.day + 1, c.year, c.month) }));
-    if (key.upArrow) setCursor((c) => ({ ...c, day: clampDay(c.day - 7, c.year, c.month) }));
-    if (key.downArrow) setCursor((c) => ({ ...c, day: clampDay(c.day + 7, c.year, c.month) }));
+    if (key.leftArrow) setCursor((c) => moveCursor(c, -1));
+    if (key.rightArrow) setCursor((c) => moveCursor(c, 1));
+    if (key.upArrow) setCursor((c) => moveCursor(c, -7));
+    if (key.downArrow) setCursor((c) => moveCursor(c, 7));
   });
 
   // While editing, the focused month's cells reflect the in-progress draft (plus any not-yet-committed
@@ -539,7 +695,10 @@ export function DashboardApp(): React.ReactElement {
   const usageForCalendar: UsageState =
     dayEdit === null
       ? snapshot.usage
-      : { ...snapshot.usage, days: { ...snapshot.usage.days, ...draftWithBufferCommitted(dayEdit) } };
+      : {
+          ...snapshot.usage,
+          days: { ...snapshot.usage.days, ...draftWithBufferCommitted(dayEdit) },
+        };
 
   return React.createElement(
     Box,
@@ -547,7 +706,7 @@ export function DashboardApp(): React.ReactElement {
     // the month-card grid below actually flex-wrap responsively; 80 is only the *minimum* a terminal needs
     // for a single card to fit, not a cap on how many fit side by side on a wider one.
     { flexDirection: "column" },
-    renderStatsHeader(snapshot.config, snapshot.computed),
+    renderStatsHeader(snapshot.config, snapshot.computed, cursor, new Date()),
     renderWarningBanner(snapshot.config, new Date()),
     renderCreditGrantBanner(snapshot.account),
     capEdit !== null
@@ -560,33 +719,35 @@ export function DashboardApp(): React.ReactElement {
     renderDayEditBanner(dayEdit, cursor, poolForMonth, draftWithBufferCommitted),
     snapshot.config.hasSpendCap === false
       ? null
-      : React.createElement(
-          Box,
-          { flexDirection: "row", flexWrap: "wrap" },
-          ...months.map((m) =>
-            renderMonthCard(m.year, m.month, snapshot.config, usageForCalendar, cursor, today),
-          ),
+      : renderMonthCard(
+          cursor.year,
+          cursor.month,
+          snapshot.config,
+          usageForCalendar,
+          cursor,
+          today,
+          dayEdit,
         ),
-    renderFooterBar(snapshot.config, snapshot.computed),
+    renderContextHint(snapshot.config, cursor, dayEdit, poolForMonth),
     React.createElement(
       Text,
       { dimColor: true },
       snapshot.config.hasSpendCap === false
         ? "q quit"
-        : "←→ day  ↑↓ week  Tab month  Space/Enter toggle laboral  c cap  u edit days  S save  q quit",
+        : "←→↑↓ move  Tab month  [/] year  u edit $  c cap  q quit",
     ),
   );
 }
 
 /**
- * Opens the dashboard; resolves once the user exits (q/Esc/Ctrl+C). Thin IO wrapper around ink's real render
- * against process.stdout/stdin — DashboardApp carries the actual logic and is covered directly via
+ * Opens the calendar; resolves once the user exits (q/Esc/Ctrl+C). Thin IO wrapper around ink's real render
+ * against process.stdout/stdin — CalendarApp carries the actual logic and is covered directly via
  * ink-testing-library; this shim isn't meaningfully testable without a real terminal (same reasoning the
  * former usage-tui.ts's runUsageTui shim used).
  */
 /* v8 ignore start */
-export async function runDashboardTui(): Promise<number> {
-  const { waitUntilExit } = render(React.createElement(DashboardApp));
+export async function runCalendarTui(): Promise<number> {
+  const { waitUntilExit } = render(React.createElement(CalendarApp));
   await waitUntilExit();
   return 0;
 }

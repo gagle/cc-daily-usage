@@ -1,6 +1,6 @@
 # Use cases
 
-The three CLI operations, the hidden statusline hook mode, dashboard interaction,
+The three CLI operations, the hidden statusline hook mode, calendar interaction,
 and the statusline's segment-by-segment rendering.
 
 ## `cc-daily-usage init`
@@ -24,9 +24,9 @@ detects the `// cc-daily-usage:managed v<hash>` marker and silently no-ops or
 upgrades instead of prompting or re-backing-up. See `docs/data-model.md` for the
 marker format and the capture-only fallback path.
 
-## `cc-daily-usage dashboard`
+## `cc-daily-usage calendar`
 
-Launches the Ink TUI (`dashboard-tui.ts`). Polls `config.json`/`usage.json`
+Launches the Ink TUI (`calendar-tui.ts`). Polls `config.json`/`usage.json`
 directly every 2000ms (independent of the hook path).
 
 Keybindings:
@@ -59,17 +59,20 @@ field hides just that segment, never breaks the whole line:
 1. Repo name + branch (git, if inside a repo).
 2. Context-window usage bar (20-cell, colored by `%`) + emoji threshold.
 3. Session cost (`$X.XX`).
-4. Lines added/removed (`+N`/`-N`), if present in the hook payload.
-5. Model name + effort level.
-6. `⏱` 5h/7d rate-limit windows (`used_percentage`), with a `⚠ resets <time>`
-   nudge once a window hits 100% and Claude Code has attached a `resets_at`.
-7. cc-daily-usage today/month `$` segments — **skipped entirely** when
-   `avgPerDay`/`monthlyCap` are absent (no laboral days configured, or
-   `hasSpendCap === false`).
-8. `⚠ run: cc-daily-usage init` nudge instead of segment 7, the first time a
-   dollar-cap account renders with no `laboralDays`/`monthlyCap` configured yet.
-9. `🎫` extra-usage (usage credits) segment, independent of subscription type —
-   can appear alongside the `⏱` segment on Pro/Max accounts too.
+4. Session timer (`⏲`), if `total_duration_ms` is present.
+5. Lines added/removed (`+N`/`-N`), if present in the hook payload.
+6. Model name + effort level.
+7. `⏱` 5h/7d seat windows — **Pro/Max only** (`hasSpendCap === false`). Live
+   or cached `%`, or placeholder `⏱ —/5h —/7d` before the first fetch. Hidden
+   on enterprise dollar-budget accounts.
+8. cc-daily-usage today segment — enterprise only. Laboral days:
+   `$today/$avgPerDay (pct)`. Non-laboral: `$today` only. (day0 / real / pace
+   labels live in `cc-daily-usage calendar`, not the CLI statusline.)
+9. cc-daily-usage `$month/$monthlyCap` — enterprise only (`hasSpendCap !== false`).
+10. `⚠ run: cc-daily-usage init` nudge instead of the `$` segments, the first
+    time a dollar-cap account has no `laboralDays` configured yet.
+11. `🎫` usage-credits — **Pro/Max only**. Hidden on enterprise so it does not
+    duplicate the `$month` self-budget line.
 
 All `$` segments use the same 5-bucket `ccColor()` thresholds — see
 `docs/calculations.md`'s `colorForPct`.

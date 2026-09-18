@@ -50,6 +50,20 @@ function migrateLegacyFilesIfNeeded(): void {
   }
 }
 
+/** Empty or unparseable account JSON must not crash the statusline hook — self-heal to null so callers
+ * can re-seed defaults. A non-object JSON value (array/null/number) is also treated as corrupt. */
+function readObjectFile(file: string): Record<string, unknown> | null {
+  try {
+    const raw = readFileSync(file, "utf8");
+    if (raw.trim() === "") return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 // Transparent first-run seeding (decision 3): the tool must never crash on a clean machine. `init` is the
 // real, user-facing way to author laboralDays — this is just the silent default so nothing else has to guard
 // against a missing file.
@@ -61,13 +75,18 @@ export function loadConfig(accountKey: string): Config {
     saveConfig(accountKey, DEFAULT_CONFIG);
     return DEFAULT_CONFIG;
   }
+  const parsed = readObjectFile(file);
+  if (parsed === null) {
+    // Empty/corrupt file (e.g. a truncated write) — rewrite defaults so the next --statusline call works.
+    saveConfig(accountKey, DEFAULT_CONFIG);
+    return DEFAULT_CONFIG;
+  }
   // Merged under DEFAULT_CONFIG rather than returned raw: a hasSpendCap:false account's monthlyCap/
   // laboralDays are meaningless and may be absent from the file entirely (see cli.ts's hasSpendCap gate) —
-  // every caller still gets a complete Config in memory, so an unguarded read (e.g. dashboard-tui.ts's
+  // every caller still gets a complete Config in memory, so an unguarded read (e.g. calendar-tui.ts's
   // rolloverIfNeeded call) fills in the empty default instead of crashing on undefined. Never rewrites the
-  // file — purely an in-memory fill.
-  const parsed = JSON.parse(readFileSync(file, "utf8")) as Partial<Config>;
-  return { ...DEFAULT_CONFIG, ...parsed };
+  // file for a valid partial object — purely an in-memory fill.
+  return { ...DEFAULT_CONFIG, ...(parsed as Partial<Config>) };
 }
 
 export function saveConfig(accountKey: string, config: Config): void {
@@ -83,7 +102,13 @@ export function loadUsage(accountKey: string): UsageState {
     saveUsage(accountKey, DEFAULT_USAGE);
     return DEFAULT_USAGE;
   }
-  return JSON.parse(readFileSync(file, "utf8")) as UsageState;
+  const parsed = readObjectFile(file);
+  if (parsed === null) {
+    // Same self-heal as loadConfig: an empty usage.json was taking down the whole Pro statusline path.
+    saveUsage(accountKey, DEFAULT_USAGE);
+    return DEFAULT_USAGE;
+  }
+  return parsed as unknown as UsageState;
 }
 
 export function saveUsage(accountKey: string, usage: UsageState): void {

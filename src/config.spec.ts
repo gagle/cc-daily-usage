@@ -46,6 +46,50 @@ describe("config.ts", () => {
     expect(mode).toBe(0o600);
   });
 
+  it("self-heals an empty usage.json to DEFAULT_USAGE and rewrites the file", async () => {
+    const { loadUsage, ACCOUNTS_DIR } = await freshConfigModule();
+    const dir = path.join(ACCOUNTS_DIR, "acct");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "usage.json");
+    writeFileSync(file, "");
+    const usage = loadUsage("acct");
+    expect(usage.monthlySpent).toBe(0);
+    expect(usage.sessions).toEqual({});
+    expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ monthlySpent: 0, sessions: {} });
+  });
+
+  it("self-heals invalid usage.json to DEFAULT_USAGE and rewrites the file", async () => {
+    const { loadUsage, ACCOUNTS_DIR } = await freshConfigModule();
+    const dir = path.join(ACCOUNTS_DIR, "acct");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "usage.json");
+    writeFileSync(file, "{ not json");
+    expect(loadUsage("acct").monthlySpent).toBe(0);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ monthlySpent: 0 });
+  });
+
+  it("self-heals non-object usage.json values (null/array/number) to DEFAULT_USAGE", async () => {
+    const { loadUsage, ACCOUNTS_DIR } = await freshConfigModule();
+    const dir = path.join(ACCOUNTS_DIR, "acct");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "usage.json");
+    for (const raw of ["null", "[]", "42"]) {
+      writeFileSync(file, raw);
+      expect(loadUsage("acct").monthlySpent).toBe(0);
+      expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ monthlySpent: 0 });
+    }
+  });
+
+  it("self-heals an empty config.json to DEFAULT_CONFIG and rewrites the file", async () => {
+    const { loadConfig, ACCOUNTS_DIR } = await freshConfigModule();
+    const dir = path.join(ACCOUNTS_DIR, "acct");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, "");
+    expect(loadConfig("acct")).toEqual({ monthlyCap: 200, laboralDays: {} });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ monthlyCap: 200, laboralDays: {} });
+  });
+
   it("round-trips a saved config", async () => {
     const { loadConfig, saveConfig } = await freshConfigModule();
     saveConfig("acct", { monthlyCap: 650, laboralDays: { "2026": { "9": [1, 2, 3] } } });

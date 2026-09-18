@@ -30,6 +30,8 @@ interface UsageState {
   extraUsageCache?: ExtraUsageCacheEntry; // short-TTL cache around the live /api/oauth/usage fetch
   extraUsageSnapshot?: ExtraUsageSnapshot; // last cumulative reading, for day-over-day reconciliation
   rateLimitsCache?: RateLimitsCache; // last-seen Claude Code hook rate_limits
+  monthDay0AvgPerDay?: number | null; // first equal-split daily max this calendar month
+  monthDay0ForMonth?: string | null; // "YYYY-MM" the day-0 max belongs to
 }
 ```
 

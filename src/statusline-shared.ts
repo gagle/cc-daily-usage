@@ -56,7 +56,9 @@ export async function defaultConfirm(question: string): Promise<boolean> {
 export function assetsDir(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const sameLevel = path.join(here, "assets");
-  if (existsSync(sameLevel)) return sameLevel;
+  // Require the template file, not just the directory — an empty sibling (e.g. a parallel test's
+  // brief mkdir) must not steal resolution away from ../assets.
+  if (existsSync(path.join(sameLevel, "statusline.mjs"))) return sameLevel;
   return path.join(here, "..", "assets");
 }
 

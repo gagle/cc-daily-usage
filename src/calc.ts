@@ -5,6 +5,12 @@ export function getLaboralDays(config: Config, year: number, month: number): Rea
   return config.laboralDays[String(year)]?.[String(month)] ?? [];
 }
 
+/** True when `date`'s UTC day-of-month is listed in that month's laboralDays. */
+export function isLaboralDay(config: Config, date: Date): boolean {
+  const days = getLaboralDays(config, date.getUTCFullYear(), date.getUTCMonth() + 1);
+  return days.includes(date.getUTCDate());
+}
+
 export function utcDateString(date: Date): string {
   return date.toISOString().slice(0, 10); // "YYYY-MM-DD"
 }
@@ -27,6 +33,26 @@ function sumDaysBeforeInMonth(usage: UsageState, isoDate: string): number {
 /** Days in `days` that are `>= fromDay` (inclusive) — Excel's COUNTIF(">="&DAY(TODAY())) port. */
 function remainingLaboralDaysCount(days: ReadonlyArray<number>, fromDay: number): number {
   return days.filter((day) => day >= fromDay).length;
+}
+
+/** Laboral days in `days` with `day <= throughDay` (inclusive) — elapsed work days so far this month. */
+function elapsedLaboralDaysCount(days: ReadonlyArray<number>, throughDay: number): number {
+  return days.filter((day) => day <= throughDay).length;
+}
+
+/**
+ * Actual $/laboral-day so far: monthlySpent ÷ count of laboral days with day ≤ today.
+ * Distinct from frozenAvgPerDay (remaining budget ÷ remaining laboral days).
+ */
+export function computeRealAvgPerDay(
+  config: Config,
+  monthlySpent: number,
+  nowUtc: Date,
+): number | null {
+  const laboralDays = getLaboralDays(config, nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1);
+  const elapsed = elapsedLaboralDaysCount(laboralDays, nowUtc.getUTCDate());
+  if (elapsed === 0) return null;
+  return Math.round((monthlySpent / elapsed) * 100) / 100;
 }
 
 function computeAvgPerDay(config: Config, monthlySpent: number, remaining: number): number | null {
@@ -64,6 +90,8 @@ export function rolloverIfNeeded(usage: UsageState, config: Config, nowUtc: Date
       const next = addUtcDays(cursor, 1);
       if (next.getUTCMonth() !== cursor.getUTCMonth()) {
         usage.monthlySpent = 0;
+        usage.monthDay0AvgPerDay = null;
+        usage.monthDay0ForMonth = null;
       }
       cursor = next;
     }
@@ -83,7 +111,74 @@ export function rolloverIfNeeded(usage: UsageState, config: Config, nowUtc: Date
     usage.frozenSafeMonthTotal = avgPerDay === null ? null : avgPerDay + usage.monthlySpent;
     usage.frozenForDate = today;
   }
+  // Equal-split day-0 plan for this month (cap / all laboral days) — never copied from frozenAvgPerDay.
+  captureMonthDay0IfNeeded(usage, config, nowUtc);
 
+  return usage;
+}
+
+/** "YYYY-MM" for the UTC month of `date`. */
+function monthKeyUtc(date: Date): string {
+  return `${String(date.getUTCFullYear())}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/**
+ * Stores the month's equal-split daily max: monthlyCap / laboralDays.length at $0 spent.
+ * Never copies frozenAvgPerDay (that shrinks mid-month). Heals a mid-month backfill mistake where
+ * day0 was wrongly set equal to the then-current freeze while spend had already accrued.
+ */
+function captureMonthDay0IfNeeded(usage: UsageState, config: Config, nowUtc: Date): void {
+  const key = monthKeyUtc(nowUtc);
+  const laboralDays = getLaboralDays(config, nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1);
+  const equalSplit = computeAvgPerDay(config, 0, laboralDays.length);
+
+  if (usage.monthDay0ForMonth !== key) {
+    usage.monthDay0ForMonth = key;
+    usage.monthDay0AvgPerDay = equalSplit;
+    return;
+  }
+
+  if (usage.monthDay0AvgPerDay == null) {
+    usage.monthDay0AvgPerDay = equalSplit;
+    return;
+  }
+
+  // Heal: old code backfilled day0 from frozenAvgPerDay mid-month.
+  if (
+    usage.monthlySpent > 1 &&
+    usage.frozenAvgPerDay != null &&
+    usage.monthDay0AvgPerDay === usage.frozenAvgPerDay &&
+    equalSplit !== null &&
+    usage.monthDay0AvgPerDay !== equalSplit
+  ) {
+    usage.monthDay0AvgPerDay = equalSplit;
+  }
+}
+
+/**
+ * On a non-laboral UTC day, weekend/off-day spend still raises monthlySpent but must not keep yesterday's
+ * frozenAvgPerDay. Recompute pace from current monthlySpent and remaining laboral days (from today onward,
+ * which excludes today when it is not laboral). No-op on laboral days (day-start freeze stays stable) or
+ * when frozenForDate is not today.
+ */
+export function refreshFrozenPaceIfNonLaboral(
+  usage: UsageState,
+  config: Config,
+  nowUtc: Date,
+): UsageState {
+  const today = utcDateString(nowUtc);
+  if (usage.frozenForDate !== today) return usage;
+  if (isLaboralDay(config, nowUtc)) return usage;
+
+  const laboralDaysThisMonth = getLaboralDays(
+    config,
+    nowUtc.getUTCFullYear(),
+    nowUtc.getUTCMonth() + 1,
+  );
+  const remaining = remainingLaboralDaysCount(laboralDaysThisMonth, nowUtc.getUTCDate());
+  const avgPerDay = computeAvgPerDay(config, usage.monthlySpent, remaining);
+  usage.frozenAvgPerDay = avgPerDay;
+  usage.frozenSafeMonthTotal = avgPerDay === null ? null : avgPerDay + usage.monthlySpent;
   return usage;
 }
 
@@ -115,13 +210,14 @@ export function captureSessionCost(
 }
 
 /**
- * Maps a Claude Code `organizationType` (from ~/.claude.json's oauthAccount) to the dollar-cap
- * classification, available at session start before any `rate_limits` hook data exists. Unknown or
- * absent org types return undefined so the caller can fall back to the rate_limits-based guess/self-heal.
+ * Maps a Claude Code `organizationType` (from ~/.claude.json's oauthAccount) to whether this tool's
+ * fabricated dollar monthlyCap / laboralDays budget should run. Independent of seat-window `rate_limits`
+ * (Pro/Max/Team/Enterprise all have 5h/7d seat allowances per Claude Code docs). Unknown or absent org
+ * types return undefined so the caller can fall back to a rate_limits-based guess.
  */
 export function classifyHasSpendCap(organizationType: string | null): boolean | undefined {
-  if (organizationType === "claude_enterprise") return true;
-  if (organizationType === "claude_pro") return false;
+  if (organizationType === "claude_enterprise" || organizationType === "claude_team") return true;
+  if (organizationType === "claude_pro" || organizationType === "claude_max") return false;
   return undefined;
 }
 
@@ -143,6 +239,21 @@ export function pruneStaleSessions(usage: UsageState, nowUtc: Date): UsageState 
  * (decision 24): avgPerDay/safeMonthTotal are read straight off usage.frozenAvgPerDay/frozenSafeMonthTotal,
  * never recomputed here. Caller MUST run rolloverIfNeeded first — computeToday itself never mutates usage.
  */
+/**
+ * Motivational / warning label for todayUsage / today's frozenAvgPerDay.
+ * Coast ≤25% · Ahead ≤50% · Steady ≤75% · On pace ≤100% · Hot ≤150% · Over ≤200% · Burn >200%.
+ */
+export function paceLabel(todayUsedPct: number | null): string | null {
+  if (todayUsedPct === null) return null;
+  if (todayUsedPct <= 0.25) return "Coast";
+  if (todayUsedPct <= 0.5) return "Ahead";
+  if (todayUsedPct <= 0.75) return "Steady";
+  if (todayUsedPct <= 1) return "On pace";
+  if (todayUsedPct <= 1.5) return "Hot";
+  if (todayUsedPct <= 2) return "Over";
+  return "Burn";
+}
+
 export function computeToday(usage: UsageState, config: Config, nowUtc: Date): ComputedUsage {
   const today = utcDateString(nowUtc);
 
@@ -150,6 +261,9 @@ export function computeToday(usage: UsageState, config: Config, nowUtc: Date): C
   const safeMonthTotal = usage.frozenSafeMonthTotal;
   const todayUsage = Math.max(0, usage.monthlySpent - sumDaysBeforeInMonth(usage, today));
   const todayUsedPct = avgPerDay === null || avgPerDay === 0 ? null : todayUsage / avgPerDay;
+  const monthKey = monthKeyUtc(nowUtc);
+  const monthDay0AvgPerDay =
+    usage.monthDay0ForMonth === monthKey ? (usage.monthDay0AvgPerDay ?? null) : null;
 
   return {
     monthlyCap: config.monthlyCap,
@@ -160,6 +274,9 @@ export function computeToday(usage: UsageState, config: Config, nowUtc: Date): C
     todayUsage,
     todayUsedPct,
     monthUsedPct: config.monthlyCap === 0 ? 0 : usage.monthlySpent / config.monthlyCap,
+    paceLabel: paceLabel(todayUsedPct),
+    monthDay0AvgPerDay,
+    realAvgPerDay: computeRealAvgPerDay(config, usage.monthlySpent, nowUtc),
   };
 }
 

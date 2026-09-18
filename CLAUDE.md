@@ -8,7 +8,7 @@
 
 # cc-daily-usage
 
-Claude Code spend/usage tracker: CLI + statusline + Ink dashboard.
+Claude Code spend/usage tracker: CLI + statusline + Ink calendar.
 
 ## Load on demand
 

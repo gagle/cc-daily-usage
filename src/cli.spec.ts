@@ -49,8 +49,8 @@ vi.mock("./statusline-capture-install.js", () => ({
   installCaptureOnly: (...args: Array<unknown>) => installCaptureOnlyMock(...args),
 }));
 
-const runDashboardTuiMock = vi.fn().mockResolvedValue(0);
-vi.mock("./dashboard-tui.js", () => ({ runDashboardTui: () => runDashboardTuiMock() }));
+const runCalendarTuiMock = vi.fn().mockResolvedValue(0);
+vi.mock("./calendar-tui.js", () => ({ runCalendarTui: () => runCalendarTuiMock() }));
 
 function mockReadline(answer: string): void {
   vi.doMock("node:readline/promises", () => ({
@@ -90,6 +90,7 @@ describe("runCli", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     rmSync(tmpDir, { recursive: true, force: true });
     vi.unstubAllGlobals();
     vi.doUnmock("node:readline/promises");
@@ -234,12 +235,12 @@ describe("runCli", () => {
     expect(printed).toHaveProperty("monthlySpent");
   });
 
-  it("runs the dashboard operation", async () => {
-    runDashboardTuiMock.mockResolvedValue(0);
+  it("runs the calendar operation", async () => {
+    runCalendarTuiMock.mockResolvedValue(0);
     const { runCli } = await freshCli();
-    const code = await runCli(["dashboard"]);
+    const code = await runCli(["calendar"]);
     expect(code).toBe(0);
-    expect(runDashboardTuiMock).toHaveBeenCalled();
+    expect(runCalendarTuiMock).toHaveBeenCalled();
   });
 
   it("hidden --statusline mode: tolerates empty stdin and a missing session/cost", async () => {
@@ -251,6 +252,12 @@ describe("runCli", () => {
   });
 
   it("hidden --statusline mode: includes extraUsage in the printed JSON when the live fetch has data", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 0,
+      laboralDays: {},
+      planType: "claude_pro",
+      hasSpendCap: false,
+    });
     resolveOAuthAccessTokenMock.mockReturnValue({ token: "t", expiresAt: null });
     getCachedExtraUsageMock.mockResolvedValue({
       usedCredits: 162.99,
@@ -320,6 +327,31 @@ describe("runCli", () => {
     const code = await runCli(["--statusline"]);
     expect(code).toBe(0);
     expect(saveConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("hidden --statusline mode: syncs planType when hasSpendCap already matches organizationType", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 650,
+      laboralDays: { "2026": { "9": [1, 2, 3] } },
+      planType: "old_label",
+      hasSpendCap: true,
+    });
+    resolveActiveAccountMock.mockResolvedValue({
+      email: "a@b.com",
+      accountUuid: "u1",
+      organizationType: "claude_enterprise",
+    });
+    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    expect(saveConfigMock).toHaveBeenCalledWith(
+      "default",
+      expect.objectContaining({ planType: "claude_enterprise", hasSpendCap: true }),
+    );
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.planType).toBe("claude_enterprise");
   });
 
   it("hidden --statusline mode: self-heals a previously-cached hasSpendCap:true once rate_limits is later observed", async () => {
@@ -409,6 +441,76 @@ describe("runCli", () => {
     expect(printed).toHaveProperty("monthlySpent");
   });
 
+  it("hidden --statusline mode: enterprise keeps hasSpendCap:true and $ fields when rate_limits are also present", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 650,
+      laboralDays: { "2026": { "9": [1, 2, 3, 13] } },
+      planType: "claude_enterprise",
+      hasSpendCap: true,
+    });
+    resolveActiveAccountMock.mockResolvedValue({
+      email: "a@b.com",
+      accountUuid: "u1",
+      organizationType: "claude_enterprise",
+    });
+    stubStdin(
+      JSON.stringify({
+        session_id: "s1",
+        cost: { total_cost_usd: 5 },
+        rate_limits: { five_hour: { used_percentage: 90 }, seven_day: { used_percentage: 35 } },
+      }),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T12:00:00.000Z")); // day 13 is laboral in this fixture
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    vi.useRealTimers();
+    expect(code).toBe(0);
+    expect(saveConfigMock).not.toHaveBeenCalled();
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.hasSpendCap).toBe(true);
+    expect(printed.planType).toBe("claude_enterprise");
+    expect(printed).toHaveProperty("monthlySpent");
+    expect(printed).toHaveProperty("avgPerDay");
+    expect(printed.extraUsage).toBeNull();
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 90,
+      sevenDayPct: 35,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+    });
+  });
+
+  it("hidden --statusline mode: enterprise emits todayUsage-only on a non-laboral day (no avg pace)", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 650,
+      laboralDays: { "2026": { "9": [1, 2, 3, 14, 15] } }, // 13 Sep Sunday omitted
+      planType: "claude_enterprise",
+      hasSpendCap: true,
+    });
+    resolveActiveAccountMock.mockResolvedValue({
+      email: "a@b.com",
+      accountUuid: "u1",
+      organizationType: "claude_enterprise",
+    });
+    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T12:00:00.000Z"));
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    vi.useRealTimers();
+    expect(code).toBe(0);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed).toHaveProperty("monthlySpent");
+    expect(printed).toHaveProperty("monthlyCap");
+    expect(printed).toHaveProperty("todayUsage");
+    expect(printed).not.toHaveProperty("avgPerDay");
+    expect(printed).not.toHaveProperty("todayUsedPct");
+    expect(printed.extraUsage).toBeNull();
+  });
+
   it("hidden --statusline mode: never flips a confirmed hasSpendCap:false back to true", async () => {
     loadConfigMock.mockReturnValue({
       monthlyCap: 650,
@@ -467,6 +569,8 @@ describe("runCli", () => {
       hasSpendCap: true,
     });
     stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-02T12:00:00.000Z"));
     const { runCli } = await freshCli();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const code = await runCli(["--statusline"]);
@@ -495,6 +599,93 @@ describe("runCli", () => {
     );
     const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
     expect(printed).toHaveProperty("monthlySpent");
+  });
+
+  it("hidden --statusline mode: when usage-credits exist, monthlySpent syncs to usedCredits and session $ does not accumulate", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 650,
+      laboralDays: { "2026": { "9": [1, 2, 3, 14] } },
+      planType: "claude_enterprise",
+      hasSpendCap: true,
+    });
+    resolveActiveAccountMock.mockResolvedValue({
+      email: "a@b.com",
+      accountUuid: "u1",
+      organizationType: "claude_enterprise",
+    });
+    resolveOAuthAccessTokenMock.mockReturnValue({ token: "t", expiresAt: null });
+    getCachedExtraUsageMock.mockResolvedValue({
+      usedCredits: 196.22,
+      monthlyLimit: 650,
+      utilizationPct: 30,
+    });
+    // Inflated self-tracked total + a new session reporting $2.54 — must not stick.
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 198.75,
+      lastUpdated: "2026-09-14T00:00:00.000Z",
+      days: {
+        "2026-09-01": 21.98,
+        "2026-09-13": 0.15,
+      },
+      sessions: {},
+      frozenForDate: "2026-09-14",
+      frozenAvgPerDay: 34.91,
+      frozenSafeMonthTotal: 231,
+    });
+    stubStdin(
+      JSON.stringify({
+        session_id: "new-session",
+        cost: { total_cost_usd: 2.54 },
+      }),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as {
+      monthlySpent: number;
+      sessions: Record<string, { lastSeenCost: number }>;
+    };
+    expect(savedUsage.monthlySpent).toBe(196.22);
+    expect(savedUsage.sessions["new-session"]?.lastSeenCost).toBe(2.54);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    // todayUsage = 196.22 - sum(days before 14). Fixture only has 22.13 before → not the live Storyteq set;
+    // assert monthlySpent sync is what the print path sees.
+    expect(printed.monthlySpent).toBe(196.22);
+  });
+
+  it("hidden --statusline mode: without usage-credits, enterprise still accumulates session cost deltas", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 650,
+      laboralDays: { "2026": { "9": [14] } },
+      planType: "claude_enterprise",
+      hasSpendCap: true,
+    });
+    resolveActiveAccountMock.mockResolvedValue({
+      email: "a@b.com",
+      accountUuid: "u1",
+      organizationType: "claude_enterprise",
+    });
+    resolveOAuthAccessTokenMock.mockReturnValue(null);
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 100,
+      lastUpdated: "2026-09-14T00:00:00.000Z",
+      days: {},
+      sessions: {},
+      frozenForDate: "2026-09-14",
+      frozenAvgPerDay: 50,
+      frozenSafeMonthTotal: 150,
+    });
+    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 3 } }));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
+    const { runCli } = await freshCli();
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await runCli(["--statusline"]);
+    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as { monthlySpent: number };
+    expect(savedUsage.monthlySpent).toBe(103);
   });
 
   it("hidden --statusline mode: a claude_pro account never accumulates monthlySpent, even on the first render", async () => {
@@ -673,6 +864,156 @@ describe("runCli", () => {
     });
   });
 
+  it("hidden --statusline mode: a live turn below 100% clears a prior seeded resets_at", async () => {
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 0,
+      lastUpdated: "2026-09-03T00:00:00.000Z",
+      days: {},
+      sessions: {},
+      frozenForDate: null,
+      frozenAvgPerDay: null,
+      frozenSafeMonthTotal: null,
+      rateLimitsCache: {
+        fiveHourPct: 100,
+        sevenDayPct: 100,
+        fiveHourResetsAt: 9999,
+        sevenDayResetsAt: 8888,
+      },
+    });
+    stubStdin(
+      JSON.stringify({
+        session_id: "s1",
+        cost: { total_cost_usd: 1 },
+        rate_limits: {
+          five_hour: { used_percentage: 40 },
+          seven_day: { used_percentage: 20 },
+        },
+      }),
+    );
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 40,
+      sevenDayPct: 20,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+    });
+  });
+
+  it("hidden --statusline mode: keeps prior resets_at while still at 100% if Claude omitted it", async () => {
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 0,
+      lastUpdated: "2026-09-03T00:00:00.000Z",
+      days: {},
+      sessions: {},
+      frozenForDate: null,
+      frozenAvgPerDay: null,
+      frozenSafeMonthTotal: null,
+      rateLimitsCache: {
+        fiveHourPct: 100,
+        sevenDayPct: 31,
+        fiveHourResetsAt: 9999,
+        sevenDayResetsAt: null,
+      },
+    });
+    stubStdin(
+      JSON.stringify({
+        session_id: "s1",
+        cost: { total_cost_usd: 1 },
+        rate_limits: { five_hour: { used_percentage: 100 } },
+      }),
+    );
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 100,
+      sevenDayPct: 31,
+      fiveHourResetsAt: 9999,
+      sevenDayResetsAt: null,
+    });
+  });
+
+  it("hidden --statusline mode: at 100% with no prior resets_at stays null when Claude omitted it", async () => {
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 0,
+      lastUpdated: "2026-09-03T00:00:00.000Z",
+      days: {},
+      sessions: {},
+      frozenForDate: null,
+      frozenAvgPerDay: null,
+      frozenSafeMonthTotal: null,
+      rateLimitsCache: {
+        fiveHourPct: 90,
+        sevenDayPct: null,
+        fiveHourResetsAt: null,
+        sevenDayResetsAt: null,
+      },
+    });
+    stubStdin(
+      JSON.stringify({
+        session_id: "s1",
+        cost: { total_cost_usd: 1 },
+        rate_limits: { five_hour: { used_percentage: 100 } },
+      }),
+    );
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 100,
+      sevenDayPct: null,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+    });
+  });
+
+  it("hidden --statusline mode: a live resets_at always overwrites the prior cached one", async () => {
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 0,
+      lastUpdated: "2026-09-03T00:00:00.000Z",
+      days: {},
+      sessions: {},
+      frozenForDate: null,
+      frozenAvgPerDay: null,
+      frozenSafeMonthTotal: null,
+      rateLimitsCache: {
+        fiveHourPct: 100,
+        sevenDayPct: 100,
+        fiveHourResetsAt: 1111,
+        sevenDayResetsAt: 2222,
+      },
+    });
+    stubStdin(
+      JSON.stringify({
+        session_id: "s1",
+        cost: { total_cost_usd: 1 },
+        rate_limits: {
+          five_hour: { used_percentage: 100, resets_at: 5555 },
+          seven_day: { used_percentage: 100, resets_at: 6666 },
+        },
+      }),
+    );
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.rateLimitsCache).toEqual({
+      fiveHourPct: 100,
+      sevenDayPct: 100,
+      fiveHourResetsAt: 5555,
+      sevenDayResetsAt: 6666,
+    });
+  });
+
   it("hidden --statusline mode: echoes a prior rateLimitsCache when this call's payload has no rate_limits", async () => {
     loadUsageMock.mockReturnValue({
       monthlySpent: 80.94,
@@ -711,6 +1052,26 @@ describe("runCli", () => {
     expect(code).toBe(0);
     const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
     expect(printed.rateLimitsCache).toBeNull();
+    // No organizationType and no rate_limits → classifier leaves it unresolved, first-pass guess is true.
+    expect(printed.hasSpendCap).toBe(true);
+  });
+
+  it("hidden --statusline mode: echoes hasSpendCap:false so the statusline can show the Pro ⏱ placeholder", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 0,
+      laboralDays: {},
+      planType: "claude_pro",
+      hasSpendCap: false,
+    });
+    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 0 } }));
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const code = await runCli(["--statusline"]);
+    expect(code).toBe(0);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.hasSpendCap).toBe(false);
+    expect(printed.rateLimitsCache).toBeNull();
+    expect(printed.monthlyCap).toBeUndefined();
   });
 
   it("runs init and skips the calendar picker when the account has no spend cap", async () => {

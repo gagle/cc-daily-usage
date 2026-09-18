@@ -2,12 +2,12 @@
 
 Check this folder before reading source — it is kept current and cheaper to
 read than re-deriving behavior from `src/`. `cc-daily-usage` is a CLI +
-statusline + Ink dashboard that tracks Claude Code spend/usage.
+statusline + Ink calendar that tracks Claude Code spend/usage.
 
 ## [architecture.md](./architecture.md)
 
 Module map (`account.ts` → `anthropic-usage.ts` → `calc.ts` → `config.ts` →
-`cli.ts` → `dashboard-tui.ts`, plus the statusline installer and `init-server.ts`),
+`cli.ts` → `calendar-tui.ts`, plus the statusline installer and `init-server.ts`),
 the statusline-hook and `init`/`statusline` data-flow diagrams, the multi-account
 model (`accountKey()`, per-account directories, legacy migration), the
 `hasSpendCap` branch that gates all dollar-cap math, and the loopback-server
@@ -32,10 +32,10 @@ UsageState, Config, on-disk layout, managed marker, statusline.mjs.
 
 ## [use-cases.md](./use-cases.md)
 
-What each CLI operation does end-to-end (`init`, `statusline`, `dashboard`, the
-hidden `--statusline` hook mode), dashboard keybindings and the day-edit "pool
+What each CLI operation does end-to-end (`init`, `statusline`, `calendar`, the
+hidden `--statusline` hook mode), calendar keybindings and the day-edit "pool
 must balance" validation, and `assets/statusline.mjs`'s segment-by-segment
-rendering with every guard that hides a segment. Keywords: CLI, init, dashboard,
+rendering with every guard that hides a segment. Keywords: CLI, init, calendar,
 keybindings, statusline segments, hook mode.
 
 ## [testing-and-verification.md](./testing-and-verification.md)

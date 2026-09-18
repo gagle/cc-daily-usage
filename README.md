@@ -20,7 +20,7 @@ npm install -g cc-daily-usage
 ```sh
 cc-daily-usage init         # pick a monthly budget + working days (one-time, browser calendar)
 cc-daily-usage statusline   # turn on the live statusline
-cc-daily-usage dashboard    # open the terminal dashboard
+cc-daily-usage calendar     # open the terminal calendar
 ```
 
 Spend is captured automatically from Claude Code's own hooks — nothing to

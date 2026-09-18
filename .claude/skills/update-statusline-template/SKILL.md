@@ -25,3 +25,10 @@ see `docs/data-model.md`'s "Statusline managed-file markers" table.
    flags this explicitly).
 5. Run `pnpm vitest run src/statusline-install.spec.ts src/statusline-capture-install.spec.ts`,
    then the full verification sequence before calling it done.
+6. After every build that follows a template (or hook-path) change, refresh
+   the machine copy:
+   ```
+   pnpm build && cc-daily-usage statusline
+   ```
+   Never leave `~/.claude/statusline.mjs` on an old hash when `assets/` or
+   `dist/` changed in this session.

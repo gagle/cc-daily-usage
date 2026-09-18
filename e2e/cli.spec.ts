@@ -17,7 +17,7 @@ describe("cc-daily-usage CLI (built)", () => {
   it("prints the usage block for --help", async () => {
     const { stdout } = await execFileAsync("node", [BIN_PATH, "--help"]);
     expect(stdout).toContain("cc-daily-usage <operation>");
-    expect(stdout).toContain("dashboard");
+    expect(stdout).toContain("calendar");
     expect(stdout).toContain("init");
     expect(stdout).toContain("statusline");
   });

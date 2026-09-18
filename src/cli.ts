@@ -4,7 +4,9 @@ import {
   captureSessionCost,
   classifyHasSpendCap,
   computeToday,
+  isLaboralDay,
   reconcileFromExtraUsageSnapshot,
+  refreshFrozenPaceIfNonLaboral,
   rolloverIfNeeded,
 } from "./calc.js";
 import { loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
@@ -18,7 +20,7 @@ const USAGE = `cc-daily-usage <operation> [flags]
 Operations:
   init              Open an interactive calendar picker to author laboralDays + monthlyCap
   statusline        Install/update the live usage statusline in ~/.claude/statusline.mjs
-  dashboard         Open a live terminal dashboard: stats, calendar, laboral-day editing
+  calendar          Open the live terminal calendar: stats, laboral days, day-$ edit
 
 Flags:
   -h, --help        Print this help and exit
@@ -34,6 +36,29 @@ async function readStdin(): Promise<string> {
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Merge one Claude Code rate-limit window into the cache.
+ * - Window key absent → keep prior pct/resets_at (other side may still refresh this turn).
+ * - Window key present → pct is the live used_percentage (or null). resets_at prefers the live value;
+ *   if Claude omitted it while pct is still ≥100, keep the prior resets_at so ⚠ can stay visible;
+ *   otherwise clear it so a recovered or seeded window cannot keep a stale reset time. */
+function mergeRateLimitWindow(
+  incoming: { used_percentage?: number; resets_at?: number } | undefined,
+  prevPct: number | null | undefined,
+  prevResetsAt: number | null | undefined,
+): { pct: number | null; resetsAt: number | null } {
+  if (incoming === undefined) {
+    return { pct: prevPct ?? null, resetsAt: prevResetsAt ?? null };
+  }
+  const pct = incoming.used_percentage ?? null;
+  if (incoming.resets_at !== undefined) {
+    return { pct, resetsAt: incoming.resets_at };
+  }
+  if (pct !== null && pct >= 100) {
+    return { pct, resetsAt: prevResetsAt ?? null };
+  }
+  return { pct, resetsAt: null };
 }
 
 /** Hidden internal mode — called by assets/statusline.mjs (or the capture-only injected line) on every render.
@@ -54,30 +79,36 @@ async function runStatuslineHidden(): Promise<number> {
   const usage = loadUsage(key);
   const now = new Date();
 
-  // Cached on config — see the Config.planType/hasSpendCap doc comment. `organizationType`, resolved from
-  // ~/.claude.json at session start (account.ts), is authoritative and available before any turn happens, so
-  // it classifies hasSpendCap immediately — no need to wait for `rate_limits`. A recognized organizationType
-  // always wins over whatever's cached (a `mismatch` re-derives it either direction), which also self-heals
-  // installs that had a wrong guess baked in before this classifier existed. `rate_limits` on the hook payload
-  // is Claude Code's own signal that this account has 5h/7d request windows (a subscription plan) rather than
-  // our fabricated dollar-cap tracking meant for pay-as-you-go/API-key use; it's kept only as a fallback
-  // guess/self-heal for org types classifyHasSpendCap doesn't recognize.
+  // Cached on config — see the Config.planType/hasSpendCap doc comment. `organizationType` classifies the
+  // dollar self-budget (`hasSpendCap`) at session start. Seat-window `rate_limits` (5h/7d) are separate:
+  // Team/Enterprise seats have them too (costs.md), and may appear alongside dollar tracking. A recognized
+  // organizationType always wins (mismatch re-derives either direction). `sawRateLimits` may demote an
+  // *unrecognized* org's true guess to false (subscription seat, no dollar budget) — never demote a known
+  // enterprise/team classification just because rate_limits arrived.
   const sawRateLimits = "rate_limits" in hookPayload;
   const classified = classifyHasSpendCap(account?.organizationType ?? null);
   const mismatch = classified !== undefined && classified !== loadedConfig.hasSpendCap;
-  if (loadedConfig.hasSpendCap === undefined || mismatch || (sawRateLimits && loadedConfig.hasSpendCap)) {
+  if (
+    loadedConfig.hasSpendCap === undefined ||
+    mismatch ||
+    (sawRateLimits && loadedConfig.hasSpendCap && classified === undefined)
+  ) {
     loadedConfig = {
       ...loadedConfig,
-      planType: account?.organizationType ?? null,
+      planType: account?.organizationType ?? loadedConfig.planType ?? null,
       hasSpendCap: classified ?? (sawRateLimits ? false : (loadedConfig.hasSpendCap ?? true)),
     };
+    saveConfig(key, loadedConfig);
+  } else if (account?.organizationType && loadedConfig.planType !== account.organizationType) {
+    loadedConfig = { ...loadedConfig, planType: account.organizationType };
     saveConfig(key, loadedConfig);
   }
 
   // Claude Code doesn't attach `rate_limits` to the very first --statusline call of a session (it needs a
   // turn to know current window usage) — assets/statusline.mjs's native ⏱ segment would render blank for
-  // that render. Cache the last-seen five_hour/seven_day percentages here so the JSON below always carries
-  // *something* to fall back to; per-field, so a payload that only refreshes one side doesn't blank the other.
+  // that render. Cache the last-seen five_hour/seven_day snapshot so later renders can fall back. Each
+  // present window is authoritative for that turn (clears seeded/stale values); an absent window key keeps
+  // the prior side so a one-sided refresh doesn't blank the other.
   const rawRateLimits = hookPayload.rate_limits as
     | {
         five_hour?: { used_percentage?: number; resets_at?: number };
@@ -85,23 +116,29 @@ async function runStatuslineHidden(): Promise<number> {
       }
     | undefined;
   if (rawRateLimits) {
+    const prev = usage.rateLimitsCache;
+    const five = mergeRateLimitWindow(
+      rawRateLimits.five_hour,
+      prev?.fiveHourPct,
+      prev?.fiveHourResetsAt,
+    );
+    const seven = mergeRateLimitWindow(
+      rawRateLimits.seven_day,
+      prev?.sevenDayPct,
+      prev?.sevenDayResetsAt,
+    );
     usage.rateLimitsCache = {
-      fiveHourPct:
-        rawRateLimits.five_hour?.used_percentage ?? usage.rateLimitsCache?.fiveHourPct ?? null,
-      sevenDayPct:
-        rawRateLimits.seven_day?.used_percentage ?? usage.rateLimitsCache?.sevenDayPct ?? null,
-      // Unix epoch seconds the window resets — Claude Code drops the window from the payload once this
-      // passes, so the cached value is what lets assets/statusline.mjs keep showing "resets at X" while
-      // the window is still over 100%, even on a render where Claude Code omitted it.
-      fiveHourResetsAt:
-        rawRateLimits.five_hour?.resets_at ?? usage.rateLimitsCache?.fiveHourResetsAt ?? null,
-      sevenDayResetsAt:
-        rawRateLimits.seven_day?.resets_at ?? usage.rateLimitsCache?.sevenDayResetsAt ?? null,
+      fiveHourPct: five.pct,
+      sevenDayPct: seven.pct,
+      fiveHourResetsAt: five.resetsAt,
+      sevenDayResetsAt: seven.resetsAt,
     };
   }
 
-  // Live "Extra usage" fetch (cached — see anthropic-usage.ts) is independent of and additional to the
-  // self-tracked monthlyCap tracking below; a failed/missing token just means the segment stays absent.
+  // Live "Extra usage" fetch (cached — see anthropic-usage.ts). When present it is the authoritative
+  // month ledger for dollar-cap accounts; Claude's cost.total_cost_usd can invent phantom spend on a
+  // brand-new session id (full currentCost accumulate), so we only fold session deltas into
+  // monthlySpent when the credits API is unavailable.
   const token = resolveOAuthAccessToken();
   const extraUsage = token ? await getCachedExtraUsage(usage, token.token, now) : null;
   reconcileFromExtraUsageSnapshot(usage, extraUsage, now);
@@ -112,24 +149,33 @@ async function runStatuslineHidden(): Promise<number> {
   if (loadedConfig.hasSpendCap !== false) {
     rolloverIfNeeded(usage, loadedConfig, now);
   }
-  // Only a confirmed dollar-cap (enterprise) account accumulates cost into monthlySpent — a mid-session
-  // pro/enterprise switch (see classifyHasSpendCap above) must never fold a pro-classified interval's
-  // cost into the enterprise total, or vice versa. The lastSeenCost baseline still advances either way.
-  captureSessionCost(usage, sessionId, currentCost, now, loadedConfig.hasSpendCap === true);
+  const accumulateSessions = loadedConfig.hasSpendCap === true && extraUsage === null;
+  // lastSeenCost baseline still advances even when accumulateSessions is false.
+  captureSessionCost(usage, sessionId, currentCost, now, accumulateSessions);
+  if (loadedConfig.hasSpendCap === true && extraUsage !== null) {
+    usage.monthlySpent = extraUsage.usedCredits;
+  }
+  if (loadedConfig.hasSpendCap === true) {
+    refreshFrozenPaceIfNonLaboral(usage, loadedConfig, now);
+  }
   saveUsage(key, usage);
 
   const computed = computeToday(usage, loadedConfig, now);
+  const showTodayPace = loadedConfig.hasSpendCap !== false && isLaboralDay(loadedConfig, now);
   console.log(
     JSON.stringify({
-      // Both dollar segments (today's and the month's) are fabricated self-tracked estimates, meaningless
-      // once this account is known to have no dollar cap — omit both so assets/statusline.mjs's guards skip
-      // rendering, leaving Claude Code's own native ⏱ 5h/7d rate-limit segment as the sole usage indicator.
+      // Dollar self-budget: omitted entirely for Pro/Max. On enterprise, todayUsage always ships so
+      // off-days still show spent-today; avgPerDay/todayUsedPct only on laboral days (pace vs max).
       ...(loadedConfig.hasSpendCap === false
         ? {}
         : {
             todayUsage: computed.todayUsage,
-            avgPerDay: computed.avgPerDay,
-            todayUsedPct: computed.todayUsedPct,
+            ...(showTodayPace
+              ? {
+                  avgPerDay: computed.avgPerDay,
+                  todayUsedPct: computed.todayUsedPct,
+                }
+              : {}),
             monthlySpent: computed.monthlySpent,
             monthlyCap: computed.monthlyCap,
             monthUsedPct: computed.monthUsedPct,
@@ -138,8 +184,12 @@ async function runStatuslineHidden(): Promise<number> {
             // configured) today/month segments above.
             needsInit: Object.keys(loadedConfig.laboralDays).length === 0,
           }),
-      extraUsage,
+      // Pro/Max only in the statusline UI — enterprise hides 🎫 to avoid duplicating $month.
+      extraUsage: loadedConfig.hasSpendCap === false ? extraUsage : null,
       rateLimitsCache: usage.rateLimitsCache ?? null,
+      // hasSpendCap gates ⏱ (Pro only) vs $ budget (enterprise) in assets/statusline.mjs.
+      hasSpendCap: loadedConfig.hasSpendCap as boolean,
+      planType: loadedConfig.planType ?? null,
     }),
   );
   return 0;
@@ -242,9 +292,9 @@ export async function runCli(argv: ReadonlyArray<string>): Promise<number> {
       return runInitOperation();
     case "statusline":
       return runStatuslineOperation();
-    case "dashboard": {
-      const { runDashboardTui } = await import("./dashboard-tui.js");
-      return runDashboardTui();
+    case "calendar": {
+      const { runCalendarTui } = await import("./calendar-tui.js");
+      return runCalendarTui();
     }
   }
 }

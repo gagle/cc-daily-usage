@@ -4,10 +4,14 @@ import {
   captureSessionCost,
   classifyHasSpendCap,
   colorForPct,
+  computeRealAvgPerDay,
   computeToday,
   getLaboralDays,
+  isLaboralDay,
+  paceLabel,
   pruneStaleSessions,
   reconcileFromExtraUsageSnapshot,
+  refreshFrozenPaceIfNonLaboral,
   rolloverIfNeeded,
   utcDateString,
 } from "./calc.js";
@@ -42,6 +46,65 @@ describe("getLaboralDays", () => {
   it("returns an empty array when the year/month is not configured", () => {
     expect(getLaboralDays(makeConfig(), 2027, 1)).toEqual([]);
     expect(getLaboralDays(makeConfig(), 2026, 10)).toEqual([]);
+  });
+});
+
+describe("isLaboralDay", () => {
+  it("is true when the UTC day-of-month is in laboralDays", () => {
+    expect(isLaboralDay(makeConfig(), new Date("2026-09-03T12:00:00.000Z"))).toBe(true);
+  });
+
+  it("is false on a non-laboral UTC day", () => {
+    expect(isLaboralDay(makeConfig(), new Date("2026-09-05T12:00:00.000Z"))).toBe(false);
+  });
+});
+
+describe("refreshFrozenPaceIfNonLaboral", () => {
+  it("recomputes frozenAvgPerDay from current monthlySpent on a non-laboral day", () => {
+    const config = makeConfig({
+      monthlyCap: 100,
+      laboralDays: { "2026": { "9": [8, 9, 10] } }, // 5 Sep Saturday is off; remaining from 5 = 8,9,10
+    });
+    const usage = makeUsage({
+      monthlySpent: 40,
+      frozenForDate: "2026-09-05",
+      frozenAvgPerDay: 20,
+      frozenSafeMonthTotal: 60,
+      lastUpdated: "2026-09-05T10:00:00.000Z",
+    });
+    const result = refreshFrozenPaceIfNonLaboral(
+      usage,
+      config,
+      new Date("2026-09-05T15:00:00.000Z"),
+    );
+    // remaining laboral from day 5 = 3 days; (100-40)/3 = 20 → still 20 after ceil-to-cent
+    expect(result.frozenAvgPerDay).toBe(20);
+    usage.monthlySpent = 70;
+    refreshFrozenPaceIfNonLaboral(usage, config, new Date("2026-09-05T16:00:00.000Z"));
+    // (100-70)/3 = 10
+    expect(usage.frozenAvgPerDay).toBe(10);
+    expect(usage.frozenSafeMonthTotal).toBe(80);
+  });
+
+  it("is a no-op on a laboral day", () => {
+    const usage = makeUsage({
+      monthlySpent: 40,
+      frozenForDate: "2026-09-03",
+      frozenAvgPerDay: 99,
+      frozenSafeMonthTotal: 139,
+    });
+    refreshFrozenPaceIfNonLaboral(usage, makeConfig(), new Date("2026-09-03T15:00:00.000Z"));
+    expect(usage.frozenAvgPerDay).toBe(99);
+  });
+
+  it("is a no-op when frozenForDate is not today", () => {
+    const usage = makeUsage({
+      monthlySpent: 40,
+      frozenForDate: "2026-09-04",
+      frozenAvgPerDay: 99,
+    });
+    refreshFrozenPaceIfNonLaboral(usage, makeConfig(), new Date("2026-09-05T15:00:00.000Z"));
+    expect(usage.frozenAvgPerDay).toBe(99);
   });
 });
 
@@ -83,7 +146,12 @@ describe("rolloverIfNeeded", () => {
   });
 
   it("resets monthlySpent to 0 the moment the walk crosses a calendar-month boundary", () => {
-    const usage = makeUsage({ lastUpdated: "2026-08-30T00:00:00.000Z", monthlySpent: 100 });
+    const usage = makeUsage({
+      lastUpdated: "2026-08-30T00:00:00.000Z",
+      monthlySpent: 100,
+      monthDay0AvgPerDay: 50,
+      monthDay0ForMonth: "2026-08",
+    });
     const now = new Date("2026-09-02T00:00:00.000Z");
     const result = rolloverIfNeeded(usage, makeConfig(), now);
     // 08-30 and 08-31 still belong to August — frozen from the pre-reset $100 total (nothing else recorded
@@ -94,6 +162,42 @@ describe("rolloverIfNeeded", () => {
       "2026-09-01": 0,
     });
     expect(result.monthlySpent).toBe(0);
+    expect(result.monthDay0ForMonth).toBe("2026-09");
+    // Equal-split over all 8 Sep laboral days — not the same as frozenAvgPerDay on day 2
+    // (remaining divisor excludes day 1 even when that day froze at $0).
+    expect(result.monthDay0AvgPerDay).toBe(81.25);
+  });
+
+  it("captures month day-0 as equal-split (cap/N) and does not follow later freezes", () => {
+    const config = makeConfig({ monthlyCap: 650 }); // 8 laboral days in fixture Sep → 81.25
+    const usage = makeUsage({ lastUpdated: "2026-09-01T00:00:00.000Z", monthlySpent: 0 });
+    const day1 = rolloverIfNeeded(usage, config, new Date("2026-09-01T12:00:00.000Z"));
+    expect(day1.monthDay0ForMonth).toBe("2026-09");
+    expect(day1.monthDay0AvgPerDay).toBe(81.25); // 650/8
+    expect(day1.frozenAvgPerDay).toBe(81.25); // same on day 1 with $0 spent
+    day1.monthlySpent = 200;
+    day1.lastUpdated = "2026-09-01T12:00:00.000Z";
+    day1.frozenForDate = null; // force re-freeze next day
+    const day2 = rolloverIfNeeded(day1, config, new Date("2026-09-02T12:00:00.000Z"));
+    expect(day2.monthDay0AvgPerDay).toBe(81.25); // unchanged
+    expect(day2.frozenAvgPerDay).not.toBeNull();
+    expect(day2.frozenAvgPerDay as number).toBeLessThan(81.25);
+  });
+
+  it("heals a mid-month day0 that was wrongly backfilled from frozenAvgPerDay", () => {
+    const config = makeConfig({ monthlyCap: 650 }); // equal-split 81.25
+    const usage = makeUsage({
+      lastUpdated: "2026-09-14T00:00:00.000Z",
+      monthlySpent: 196.22,
+      frozenForDate: "2026-09-14",
+      frozenAvgPerDay: 34.91,
+      frozenSafeMonthTotal: 231,
+      monthDay0ForMonth: "2026-09",
+      monthDay0AvgPerDay: 34.91, // bad mid-month backfill
+    });
+    const result = rolloverIfNeeded(usage, config, new Date("2026-09-14T12:00:00.000Z"));
+    expect(result.monthDay0AvgPerDay).toBe(81.25);
+    expect(result.frozenAvgPerDay).toBe(34.91); // theoretic unchanged
   });
 
   it("keeps accumulating within the same month without resetting", () => {
@@ -205,16 +309,18 @@ describe("captureSessionCost", () => {
 });
 
 describe("classifyHasSpendCap", () => {
-  it("classifies claude_enterprise as a dollar cap", () => {
+  it("classifies claude_enterprise and claude_team as dollar-budget accounts", () => {
     expect(classifyHasSpendCap("claude_enterprise")).toBe(true);
+    expect(classifyHasSpendCap("claude_team")).toBe(true);
   });
 
-  it("classifies claude_pro as a window cap (no dollar tracking)", () => {
+  it("classifies claude_pro and claude_max as no dollar self-budget", () => {
     expect(classifyHasSpendCap("claude_pro")).toBe(false);
+    expect(classifyHasSpendCap("claude_max")).toBe(false);
   });
 
   it("leaves unknown or null org types unresolved", () => {
-    expect(classifyHasSpendCap("claude_max")).toBeUndefined();
+    expect(classifyHasSpendCap("something_else")).toBeUndefined();
     expect(classifyHasSpendCap(null)).toBeUndefined();
   });
 });
@@ -251,6 +357,7 @@ describe("computeToday", () => {
     expect(result.todayUsedPct).toBeCloseTo(result.todayUsage / 33.48, 5);
     expect(result.monthUsedPct).toBeCloseTo(80.94 / 650, 5);
     expect(result.leftThisMonth).toBeCloseTo(650 - 80.94, 5);
+    expect(result.paceLabel).toBe(paceLabel(result.todayUsedPct));
   });
 
   it("returns a null todayUsedPct when avgPerDay is null", () => {
@@ -261,6 +368,7 @@ describe("computeToday", () => {
     });
     const result = computeToday(usage, makeConfig(), new Date("2026-09-11T00:00:00.000Z"));
     expect(result.todayUsedPct).toBeNull();
+    expect(result.paceLabel).toBeNull();
   });
 
   it("returns a null todayUsedPct when the frozen avgPerDay is zero", () => {
@@ -271,6 +379,21 @@ describe("computeToday", () => {
     });
     const result = computeToday(usage, makeConfig(), new Date("2026-09-01T00:00:00.000Z"));
     expect(result.todayUsedPct).toBeNull();
+    expect(result.paceLabel).toBeNull();
+  });
+
+  it("surfaces monthDay0AvgPerDay only when it matches the current month key", () => {
+    const usage = makeUsage({
+      frozenAvgPerDay: 30,
+      monthDay0AvgPerDay: 40,
+      monthDay0ForMonth: "2026-09",
+    });
+    expect(
+      computeToday(usage, makeConfig(), new Date("2026-09-03T00:00:00.000Z")).monthDay0AvgPerDay,
+    ).toBe(40);
+    expect(
+      computeToday(usage, makeConfig(), new Date("2026-10-01T00:00:00.000Z")).monthDay0AvgPerDay,
+    ).toBeNull();
   });
 
   it("treats a zero monthlyCap as 0% used, not a division-by-zero NaN", () => {
@@ -281,6 +404,47 @@ describe("computeToday", () => {
       new Date("2026-09-01T00:00:00.000Z"),
     );
     expect(result.monthUsedPct).toBe(0);
+  });
+});
+
+describe("paceLabel", () => {
+  it("maps each band and null", () => {
+    expect(paceLabel(null)).toBeNull();
+    expect(paceLabel(0)).toBe("Coast");
+    expect(paceLabel(0.25)).toBe("Coast");
+    expect(paceLabel(0.26)).toBe("Ahead");
+    expect(paceLabel(0.5)).toBe("Ahead");
+    expect(paceLabel(0.51)).toBe("Steady");
+    expect(paceLabel(0.75)).toBe("Steady");
+    expect(paceLabel(0.76)).toBe("On pace");
+    expect(paceLabel(1)).toBe("On pace");
+    expect(paceLabel(1.01)).toBe("Hot");
+    expect(paceLabel(1.5)).toBe("Hot");
+    expect(paceLabel(1.51)).toBe("Over");
+    expect(paceLabel(2)).toBe("Over");
+    expect(paceLabel(2.01)).toBe("Burn");
+  });
+});
+
+describe("computeRealAvgPerDay", () => {
+  it("divides monthlySpent by elapsed laboral days through today", () => {
+    // laboral: 1,2,3,4,7,8,9,10 — through day 3 → 3 days; 90/3 = 30
+    expect(computeRealAvgPerDay(makeConfig(), 90, new Date("2026-09-03T12:00:00.000Z"))).toBe(30);
+  });
+
+  it("returns null when no laboral day has elapsed yet", () => {
+    expect(
+      computeRealAvgPerDay(
+        makeConfig({ laboralDays: { "2026": { "9": [10, 11] } } }),
+        50,
+        new Date("2026-09-03T12:00:00.000Z"),
+      ),
+    ).toBeNull();
+  });
+
+  it("counts only laboral days <= today (weekend spend raises avg without growing divisor)", () => {
+    // through Sunday 6 Sep: laboral <=6 are 1,2,3,4 → 4 days; 100/4 = 25
+    expect(computeRealAvgPerDay(makeConfig(), 100, new Date("2026-09-06T12:00:00.000Z"))).toBe(25);
   });
 });
 
@@ -372,4 +536,3 @@ describe("reconcileFromExtraUsageSnapshot", () => {
     expect(usage.extraUsageSnapshot).toEqual({ date: "2026-09-10", usedCredits: 133 });
   });
 });
-

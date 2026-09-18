@@ -4,9 +4,9 @@ export interface Config {
   // outer key = year as string ("2026"), inner key = month 1-12 as string ("9"), value = day-of-month array
   // Both fields below are cached here — see runStatuslineHidden in cli.ts. undefined = not yet resolved.
   readonly planType?: string | null; // verbatim ~/.claude.json oauthAccount.organizationType; null = no OAuth account
-  readonly hasSpendCap?: boolean; // false once any hook payload has carried Claude Code's own rate_limits (a
-  // subscription plan with 5h/7d request windows, not a dollar-metered pay-as-you-go/API-key account) — a
-  // `true` guess (no rate_limits seen yet) keeps being re-checked on every call; false is permanent once seen
+  readonly hasSpendCap?: boolean; // whether this tool's fabricated dollar monthlyCap budget runs. Independent
+  // of seat-window rate_limits (Pro/Max/Team/Enterprise all have 5h/7d seats). organizationType wins when
+  // known; rate_limits may demote an unrecognized org's true guess to false, never a known enterprise/team.
 }
 
 export interface SessionCost {
@@ -47,6 +47,8 @@ export interface UsageState {
   extraUsageSnapshot?: ExtraUsageSnapshot; // last cumulative reading, for day-over-day reconciliation
   rateLimitsCache?: RateLimitsCache; // last-seen Claude Code hook rate_limits, for the render(s) at session
   // start before Claude Code has attached a fresh one — see runStatuslineHidden in cli.ts
+  monthDay0AvgPerDay?: number | null; // first equal-split daily max frozen this calendar month; never overwritten later
+  monthDay0ForMonth?: string | null; // "YYYY-MM" the day-0 max belongs to
 }
 
 export const DEFAULT_CONFIG: Config = { monthlyCap: 200, laboralDays: {} };
@@ -59,4 +61,6 @@ export const DEFAULT_USAGE: UsageState = {
   frozenForDate: null,
   frozenAvgPerDay: null,
   frozenSafeMonthTotal: null,
+  monthDay0AvgPerDay: null,
+  monthDay0ForMonth: null,
 };

@@ -30,6 +30,7 @@ const pctraw = payload.context_window?.used_percentage ?? 0;
 const cost = payload.cost?.total_cost_usd ?? 0;
 const added = payload.cost?.total_lines_added;
 const removed = payload.cost?.total_lines_removed;
+const totalDurationMs = payload.cost?.total_duration_ms;
 
 // cc-daily-usage: fetched up front (not where its segments render further down) so the cached_rl5h/cached_rl7d
 // fallback below is available before the native ⏱ block runs. A failed/missing `cc-daily-usage` on PATH, or
@@ -38,7 +39,11 @@ const removed = payload.cost?.total_lines_removed;
 // Safe here regardless: the command is a fixed literal, nothing user-controlled goes into it.
 let statusline = null;
 try {
-  const result = spawnSync("cc-daily-usage --statusline", { input: raw, encoding: "utf8", shell: true });
+  const result = spawnSync("cc-daily-usage --statusline", {
+    input: raw,
+    encoding: "utf8",
+    shell: true,
+  });
   if (result.status === 0 && result.stdout.trim() !== "") {
     statusline = JSON.parse(result.stdout);
   }
@@ -67,13 +72,25 @@ let er;
 let eg;
 let eb;
 if (pct < 20) {
-  emoji = "🟢"; er = 0; eg = 200; eb = 80;
+  emoji = "🟢";
+  er = 0;
+  eg = 200;
+  eb = 80;
 } else if (pct < 70) {
-  emoji = "⚡"; er = 220; eg = 200; eb = 0;
+  emoji = "⚡";
+  er = 220;
+  eg = 200;
+  eb = 0;
 } else if (pct < 90) {
-  emoji = "🔥"; er = 230; eg = 120; eb = 0;
+  emoji = "🔥";
+  er = 230;
+  eg = 120;
+  eb = 0;
 } else {
-  emoji = "🚨"; er = 220; eg = 40; eb = 20;
+  emoji = "🚨";
+  er = 220;
+  eg = 40;
+  eb = 20;
 }
 
 // Color cells by position on the full 20-cell bar (not within filled span),
@@ -112,8 +129,20 @@ if (branch) {
 
 line += ` ${bar} ${emoji} \x1b[38;2;${er};${eg};${eb}m${pct}%\x1b[0m ${sep} \x1b[38;2;220;200;0m$${Number(cost).toFixed(2)}\x1b[0m`;
 
+// Session wall-clock elapsed — distinct from the ⏱ rate-limit-window segment further down, which is
+// Claude's subscription usage window, not this session's own duration. `total_duration_ms` is absent
+// only before the very first hook payload (no session yet), so a plain undefined check is enough.
+if (totalDurationMs !== undefined) {
+  const totalSec = Math.floor(totalDurationMs / 1000);
+  const durH = Math.floor(totalSec / 3600);
+  const durM = Math.floor((totalSec % 3600) / 60);
+  const durS = totalSec % 60;
+  const durFmt = durH > 0 ? `${durH}h ${durM}m` : `${durM}m ${durS}s`;
+  line += ` ${sep} \x1b[38;2;150;150;150m⏲ ${durFmt}\x1b[0m`;
+}
+
 if (added !== undefined || removed !== undefined) {
-  line += `${sep} \x1b[38;2;0;200;80m+${added ?? 0}\x1b[0m\x1b[38;2;220;40;20m-${removed ?? 0}\x1b[0m`;
+  line += ` ${sep} \x1b[38;2;0;200;80m+${added ?? 0}\x1b[0m\x1b[38;2;220;40;20m-${removed ?? 0}\x1b[0m`;
 }
 
 line += ` ${sep} \x1b[38;2;200;0;200m🤖 ${model}\x1b[0m`;
@@ -122,39 +151,44 @@ if (effort) {
   line += ` ${sep} \x1b[38;2;150;150;250m💪 ${effort}\x1b[0m`;
 }
 
-const rl5h = rl5hRaw ?? statusline?.rateLimitsCache?.fiveHourPct;
-const rl7d = rl7dRaw ?? statusline?.rateLimitsCache?.sevenDayPct;
+// Seat windows (⏱) are Pro/Max-only in this statusline. Enterprise uses the $ self-budget instead.
+if (statusline?.hasSpendCap === false) {
+  const rl5h = rl5hRaw ?? statusline?.rateLimitsCache?.fiveHourPct;
+  const rl7d = rl7dRaw ?? statusline?.rateLimitsCache?.sevenDayPct;
+  const hasLiveRateLimits =
+    (rl5h !== undefined && rl5h !== null) || (rl7d !== undefined && rl7d !== null);
 
-if ((rl5h !== undefined && rl5h !== null) || (rl7d !== undefined && rl7d !== null)) {
-  let rlParts = "";
-  if (rl5h !== undefined && rl5h !== null) {
-    rlParts = `${Math.round(rl5h)}%/5h`;
+  if (hasLiveRateLimits) {
+    let rlParts = "";
+    if (rl5h !== undefined && rl5h !== null) {
+      rlParts = `${Math.round(rl5h)}%/5h`;
+    }
+    if (rl7d !== undefined && rl7d !== null) {
+      if (rlParts) rlParts += " ";
+      rlParts += `${Math.round(rl7d)}%/7d`;
+    }
+    line += ` ${sep} \x1b[38;2;100;180;255m⏱ ${rlParts}\x1b[0m`;
+  } else {
+    // First login / cleared cache / before Claude attaches rate_limits.
+    line += ` ${sep} \x1b[38;2;100;180;255m⏱ —/5h —/7d\x1b[0m`;
   }
-  if (rl7d !== undefined && rl7d !== null) {
-    if (rlParts) rlParts += " ";
-    rlParts += `${Math.round(rl7d)}%/7d`;
+
+  function formatResetTime(epochSeconds) {
+    const resetDate = new Date(epochSeconds * 1000);
+    const time = resetDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (resetDate.toDateString() === new Date().toDateString()) return time;
+    return `${resetDate.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
   }
-  line += ` ${sep} \x1b[38;2;100;180;255m⏱ ${rlParts}\x1b[0m`;
-}
 
-// A maxed-out window (Pro/Max, no dollar cap) gets its own short "when it resets" nudge — resets_at is a
-// Unix-epoch-seconds field Claude Code attaches per window (see docs), cached the same way the pct itself
-// falls back to usage.rateLimitsCache when a given render's payload doesn't carry rate_limits at all.
-function formatResetTime(epochSeconds) {
-  const resetDate = new Date(epochSeconds * 1000);
-  const time = resetDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (resetDate.toDateString() === new Date().toDateString()) return time;
-  return `${resetDate.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
-}
+  const rl5hResetsAt = rl5hResetsAtRaw ?? statusline?.rateLimitsCache?.fiveHourResetsAt;
+  const rl7dResetsAt = rl7dResetsAtRaw ?? statusline?.rateLimitsCache?.sevenDayResetsAt;
 
-const rl5hResetsAt = rl5hResetsAtRaw ?? statusline?.rateLimitsCache?.fiveHourResetsAt;
-const rl7dResetsAt = rl7dResetsAtRaw ?? statusline?.rateLimitsCache?.sevenDayResetsAt;
-
-if (rl5h !== undefined && rl5h !== null && rl5h >= 100 && rl5hResetsAt) {
-  line += ` ${sep} \x1b[38;2;220;40;20m⚠ 5h resets ${formatResetTime(rl5hResetsAt)}\x1b[0m`;
-}
-if (rl7d !== undefined && rl7d !== null && rl7d >= 100 && rl7dResetsAt) {
-  line += ` ${sep} \x1b[38;2;220;40;20m⚠ 7d resets ${formatResetTime(rl7dResetsAt)}\x1b[0m`;
+  if (rl5h !== undefined && rl5h !== null && rl5h >= 100 && rl5hResetsAt) {
+    line += ` ${sep} \x1b[38;2;220;40;20m⚠ 5h resets ${formatResetTime(rl5hResetsAt)}\x1b[0m`;
+  }
+  if (rl7d !== undefined && rl7d !== null && rl7d >= 100 && rl7dResetsAt) {
+    line += ` ${sep} \x1b[38;2;220;40;20m⚠ 7d resets ${formatResetTime(rl7dResetsAt)}\x1b[0m`;
+  }
 }
 
 // cc-daily-usage: daily/monthly spend segments (§18 auto-capture + §9.2 segment order). Fields already
@@ -174,12 +208,13 @@ if (statusline) {
     // today/month segments below would be meaningless defaults — a short nudge instead.
     line += ` ${sep} \x1b[38;2;220;200;0m⚠ run: cc-daily-usage init\x1b[0m`;
   } else {
-    // avgPerDay/todayUsedPct come through absent when laboral days aren't configured for the current month
-    // (computeToday returns null) — skip the "today" segment entirely rather than show a misleading $X/$0.00.
+    // Laboral: $today/$avg (pct). Non-laboral: $today only. day0 / real / pace live in the calendar UI.
     if (statusline.avgPerDay !== undefined && statusline.avgPerDay !== null) {
       const todayColor = ccColor(statusline.todayUsedPct);
       const todayPctDisplay = Math.round(statusline.todayUsedPct * 100);
       line += ` ${sep} \x1b[38;2;${todayColor}m$${(statusline.todayUsage ?? 0).toFixed(2)}/$${statusline.avgPerDay.toFixed(2)} (${todayPctDisplay}%)\x1b[0m`;
+    } else if (statusline.todayUsage !== undefined && statusline.todayUsage !== null) {
+      line += ` ${sep} \x1b[38;2;180;180;180m$${Number(statusline.todayUsage).toFixed(2)}\x1b[0m`;
     }
 
     // monthlyCap comes through absent once the account is known to have no dollar cap (config.hasSpendCap
@@ -192,16 +227,22 @@ if (statusline) {
     }
   }
 
-  // Anthropic's own live "Usage credits" ledger (extraUsage via /api/oauth/usage, see src/anthropic-usage.ts)
-  // — independent of the self-tracked segment above, shown only when the account has it enabled. Not gated on
-  // subscription/rate-limit-window type: it can appear alongside the ⏱ segment on Pro/Max accounts too.
-  const extraUsed = statusline.extraUsage?.usedCredits;
-  const extraLimit = statusline.extraUsage?.monthlyLimit;
-  if (extraUsed !== undefined && extraUsed !== null && extraLimit !== undefined && extraLimit !== null) {
-    const extraPct = (statusline.extraUsage?.utilizationPct ?? 0) / 100;
-    const extraColor = ccColor(extraPct);
-    const extraPctDisplay = Math.round(extraPct * 100);
-    line += ` ${sep} \x1b[38;2;${extraColor}m🎫 $${extraUsed.toFixed(2)}/$${extraLimit.toFixed(2)} (${extraPctDisplay}%)\x1b[0m`;
+  // Usage credits (🎫): Pro/Max only. Enterprise already shows $month from the self-budget; cli.ts nulls
+  // extraUsage there so this guard is belt-and-suspenders.
+  if (statusline.hasSpendCap === false) {
+    const extraUsed = statusline.extraUsage?.usedCredits;
+    const extraLimit = statusline.extraUsage?.monthlyLimit;
+    if (
+      extraUsed !== undefined &&
+      extraUsed !== null &&
+      extraLimit !== undefined &&
+      extraLimit !== null
+    ) {
+      const extraPct = (statusline.extraUsage?.utilizationPct ?? 0) / 100;
+      const extraColor = ccColor(extraPct);
+      const extraPctDisplay = Math.round(extraPct * 100);
+      line += ` ${sep} \x1b[38;2;${extraColor}m🎫 $${extraUsed.toFixed(2)}/$${extraLimit.toFixed(2)} (${extraPctDisplay}%)\x1b[0m`;
+    }
   }
 }
 

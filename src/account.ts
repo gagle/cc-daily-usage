@@ -21,7 +21,7 @@ interface RawOauthAccount {
 
 /** Sync-only resolution — just `~/.claude.json`'s global `oauthAccount`, no per-session token-override
  * lookup (that path needs a network call — see resolveActiveAccount). Used by callers that can't await, e.g.
- * the dashboard's Ink `useState` initializer. */
+ * the calendar's Ink `useState` initializer. */
 export function resolveActiveAccountSync(): Account | null {
   return readGlobalOauthAccount();
 }
@@ -80,7 +80,7 @@ export interface OverageCreditGrantInfo {
 /** Reads Claude Code's own already-fetched overage-credit-grant cache straight out of `~/.claude.json` —
  * never fetches it ourselves (Claude Code refreshes it on its own upsell-surface cadence). Returns null when
  * there's no cached entry for this org (Claude Code hasn't fetched it recently) or on any read/parse
- * failure. Dashboard-only (see plan item 7) — deliberately not surfaced in the statusline. */
+ * failure. Calendar-only (see plan item 7) — deliberately not surfaced in the statusline. */
 export function readOverageCreditGrantCache(
   accountUuid: string | null,
 ): OverageCreditGrantInfo | null {

@@ -37,6 +37,70 @@ monthUsedPct  = monthlyCap === 0 ? 0 : monthlySpent / monthlyCap
 
 `avgPerDay` and the two "safe" totals used here come from the **frozen** values
 set once per day by `rolloverIfNeeded`, not recomputed live — see the note above.
+Also returns `paceLabel` (see below) and `monthDay0AvgPerDay` when stored for this month.
+Laboral days show `$today/$avg (pct)`; non-laboral days show `$today` only
+(see `isLaboralDay` / cli.ts); `monthlySpent` still includes off-day spend.
+
+## `paceLabel`
+
+```
+null            -> null
+pct <= 0.25     -> "Coast"
+pct <= 0.50     -> "Ahead"
+pct <= 0.75     -> "Steady"
+pct <= 1.00     -> "On pace"
+pct <= 1.50     -> "Hot"
+pct <= 2.00     -> "Over"
+pct >  2.00     -> "Burn"
+```
+
+Compares `todayUsage` to **today’s** `frozenAvgPerDay` (not the month day-0 max).
+
+## Month day-0 max
+
+Equal-split plan for the month:
+
+```
+monthDay0AvgPerDay = computeAvgPerDay(config, spent=0, laboralDays.length)
+                   = monthlyCap / laboralDaysInMonth   (ceil to cent)
+```
+
+Stored once per `monthDay0ForMonth` (`YYYY-MM`). **Not** copied from
+`frozenAvgPerDay` (that is remaining pace and shrinks after spend). A mid-month
+backfill that left `day0 === frozenAvgPerDay` while `monthlySpent > 1` is healed
+back to the equal-split. Cleared when `rolloverIfNeeded` crosses a month boundary.
+
+## `computeRealAvgPerDay`
+
+```
+elapsedLaboral = count of laboral days with day <= today (UTC)
+elapsed === 0 -> null
+otherwise     -> round_cent(monthlySpent / elapsedLaboral)
+```
+
+Actual burn per work day so far. Off-day spend is in `monthlySpent` but does **not**
+grow the divisor — so weekend burn raises real avg. Distinct from `frozenAvgPerDay`
+(remaining budget ÷ remaining laboral days).
+
+Non-laboral spend and theoretic max: raising `monthlySpent` on a Sunday immediately
+lowers `frozenAvgPerDay` via `refreshFrozenPaceIfNonLaboral` (and Monday’s day-start
+freeze), because the numerator `monthlyCap − monthlySpent` shrinks while the remaining
+laboral divisor ignores the Sunday itself.
+
+## `refreshFrozenPaceIfNonLaboral`
+
+On a non-laboral UTC day, after session cost has been captured into `monthlySpent`,
+recompute the frozen pace so weekend/off-day burn immediately reduces the
+theoretical daily budget for remaining laboral days:
+
+```
+remaining = count of laboral days in this month with day >= today
+frozenAvgPerDay = computeAvgPerDay(config, monthlySpent, remaining)
+frozenSafeMonthTotal = avgPerDay === null ? null : avgPerDay + monthlySpent
+```
+
+No-op when today is laboral (day-start freeze stays stable) or `frozenForDate`
+is not today.
 
 ## `captureSessionCost`
 
@@ -46,9 +110,11 @@ Per-session delta capture, keyed by Claude Code's own session id:
   delta — this happens when Claude Code itself resets a session's reported cost
   (e.g. a new session reusing an id, or a mid-session model/account switch).
 - The `accumulate` flag gates whether the delta actually folds into
-  `monthlySpent`. This exists for the Pro/Enterprise mid-session account-switch
-  case: a session's cost is tracked, but only accumulated into the spend total
-  once the account is confirmed to have a spend cap (`hasSpendCap === true`).
+  `monthlySpent`. Enterprise with a live Anthropic **usage-credits** ledger sets
+  `accumulate: false` and instead assigns `monthlySpent = usedCredits` (see
+  `cli.ts`) — a new session id reporting a full `cost.total_cost_usd` must not
+  invent phantom today-spend on top of the ledger. When credits are unavailable,
+  session deltas still accumulate for dollar-cap accounts.
 
 ## `reconcileFromExtraUsageSnapshot`
 
