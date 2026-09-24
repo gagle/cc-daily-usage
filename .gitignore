@@ -9,6 +9,7 @@ node_modules
 **/.claude/*.lock
 **/.claude/worktrees/
 **/.claude/artifacts/
+**/.claude/.headroom_wrap_marker.json
 CLAUDE.local.md
 
 .tokensave
