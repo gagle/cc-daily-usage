@@ -2,6 +2,14 @@ dist
 coverage
 node_modules
 *.tsbuildinfo
-.claude/settings.local.json
+
+# Claude Code local configuration
+**/.claude/settings.local.json
+**/.claude/*.local.*
+**/.claude/*.lock
+**/.claude/worktrees/
+**/.claude/artifacts/
+CLAUDE.local.md
+
 .tokensave
 .zvec-grep
