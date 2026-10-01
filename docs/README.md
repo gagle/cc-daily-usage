@@ -18,14 +18,14 @@ hasSpendCap, loopback server.
 
 Every formula in `calc.ts`, verbatim, one heading per function:
 `rolloverIfNeeded`, `computeAvgPerDay`, `computeToday`, `captureSessionCost`,
-`reconcileFromExtraUsageSnapshot`, `colorForPct`, `pruneStaleSessions`. Includes
-the deliberate "frozen not live" avgPerDay deviation. Keywords: math, formula,
-monthlyCap, monthlySpent, rollover, avgPerDay, session cost delta, reconcile.
+`applyLedgerReading`, `colorForPct`, `pruneStaleSessions`. Includes
+the derived (not stored) daily max. Keywords: math, formula,
+monthlyCap, monthlySpent, rollover, avgPerDay, session cost delta, ledger.
 
 ## [data-model.md](./data-model.md)
 
 Field-by-field reference for `Config`, `UsageState`, `SessionCost`,
-`ExtraUsageSnapshot`, `ExtraUsageCacheEntry`, `RateLimitsCache`; the on-disk
+`ExtraUsageCacheEntry`, `RateLimitsCache`; the on-disk
 `~/.config/cc-daily-usage/accounts/<key>/{config,usage}.json` layout; and the
 statusline installer's managed-file markers. Keywords: interface, schema,
 UsageState, Config, on-disk layout, managed marker, statusline.mjs.

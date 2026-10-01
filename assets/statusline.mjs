@@ -208,9 +208,12 @@ if (statusline) {
     // today/month segments below would be meaningless defaults — a short nudge instead.
     line += ` ${sep} \x1b[38;2;220;200;0m⚠ run: cc-daily-usage init\x1b[0m`;
   } else {
-    // Laboral: $today/$avg (pct). Non-laboral: $today only. day0 / real / pace live in the calendar UI.
-    if (statusline.avgPerDay !== undefined && statusline.avgPerDay !== null) {
-      const todayColor = ccColor(statusline.todayUsedPct);
+    // Laboral: $today/$avg (pct). Non-laboral: $today only. day-1 max / real / pace live in the calendar UI.
+    if (statusline.budgetExhausted) {
+      // Max is $0: the month budget is spent, so "(0%)" green would mislead.
+      line += ` ${sep} \x1b[38;2;248;105;107m$${(statusline.todayUsage ?? 0).toFixed(2)}/$0.00 (over)\x1b[0m`;
+    } else if (statusline.avgPerDay !== undefined && statusline.avgPerDay !== null) {
+      const todayColor = ccColor(statusline.todayUsedPct ?? 0);
       const todayPctDisplay = Math.round(statusline.todayUsedPct * 100);
       line += ` ${sep} \x1b[38;2;${todayColor}m$${(statusline.todayUsage ?? 0).toFixed(2)}/$${statusline.avgPerDay.toFixed(2)} (${todayPctDisplay}%)\x1b[0m`;
     } else if (statusline.todayUsage !== undefined && statusline.todayUsage !== null) {

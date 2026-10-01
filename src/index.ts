@@ -13,16 +13,16 @@ export {
   resolveOAuthAccessToken,
 } from "./anthropic-usage.js";
 export {
+  applyLedgerReading,
   captureSessionCost,
   colorForPct,
+  computeAvgPerDay,
   computeRealAvgPerDay,
   computeToday,
   getLaboralDays,
   isLaboralDay,
   paceLabel,
   pruneStaleSessions,
-  reconcileFromExtraUsageSnapshot,
-  refreshFrozenPaceIfNonLaboral,
   rolloverIfNeeded,
   utcDateString,
 } from "./calc.js";
@@ -38,7 +38,6 @@ export type { ComputedUsage, StatuslineJson } from "./interfaces/calc.interface.
 export type {
   Config,
   ExtraUsageCacheEntry,
-  ExtraUsageSnapshot,
   SessionCost,
   UsageState,
 } from "./interfaces/config.interface.js";

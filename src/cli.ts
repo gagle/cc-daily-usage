@@ -1,12 +1,11 @@
 import { accountKey, resolveActiveAccount } from "./account.js";
 import { getCachedExtraUsage, resolveOAuthAccessToken } from "./anthropic-usage.js";
 import {
+  applyLedgerReading,
   captureSessionCost,
   classifyHasSpendCap,
   computeToday,
   isLaboralDay,
-  reconcileFromExtraUsageSnapshot,
-  refreshFrozenPaceIfNonLaboral,
   rolloverIfNeeded,
 } from "./calc.js";
 import { loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
@@ -135,28 +134,31 @@ async function runStatuslineHidden(): Promise<number> {
     };
   }
 
+  // A confirmed no-spend-cap account (Pro/Max) has nothing meaningful for rollover to compute — skip it so
+  // usage.json's days stop growing/changing on every turn for a feature this account provably doesn't use
+  // (mirrors the captureSessionCost gate below). Runs before the ledger fetch: at a month edge rollover
+  // reads the last ledger reading still sitting in extraUsageCache as the new ledgerBaseline.
+  if (loadedConfig.hasSpendCap !== false) {
+    rolloverIfNeeded(usage, now);
+  }
+
   // Live "Extra usage" fetch (cached — see anthropic-usage.ts). When present it is the authoritative
   // month ledger for dollar-cap accounts; Claude's cost.total_cost_usd can invent phantom spend on a
   // brand-new session id (full currentCost accumulate), so we only fold session deltas into
   // monthlySpent when the credits API is unavailable.
   const token = resolveOAuthAccessToken();
   const extraUsage = token ? await getCachedExtraUsage(usage, token.token, now) : null;
-  reconcileFromExtraUsageSnapshot(usage, extraUsage, now);
 
-  // A confirmed no-spend-cap account (Pro/Max) has nothing meaningful for either of these to compute —
-  // skip both so config.json's laboralDays/monthlyCap and usage.json's frozen* fields stop growing/changing
-  // on every turn for a feature this account provably doesn't use (mirrors the captureSessionCost gate below).
-  if (loadedConfig.hasSpendCap !== false) {
-    rolloverIfNeeded(usage, loadedConfig, now);
-  }
   const accumulateSessions = loadedConfig.hasSpendCap === true && extraUsage === null;
   // lastSeenCost baseline still advances even when accumulateSessions is false.
   captureSessionCost(usage, sessionId, currentCost, now, accumulateSessions);
   if (loadedConfig.hasSpendCap === true && extraUsage !== null) {
-    usage.monthlySpent = extraUsage.usedCredits;
-  }
-  if (loadedConfig.hasSpendCap === true) {
-    refreshFrozenPaceIfNonLaboral(usage, loadedConfig, now);
+    applyLedgerReading(usage, extraUsage.usedCredits);
+    // Anthropic's monthly_limit is the source of truth for the cap — a manual edit would be overwritten here.
+    if (extraUsage.monthlyLimit > 0 && extraUsage.monthlyLimit !== loadedConfig.monthlyCap) {
+      loadedConfig = { ...loadedConfig, monthlyCap: extraUsage.monthlyLimit };
+      saveConfig(key, loadedConfig);
+    }
   }
   saveUsage(key, usage);
 
@@ -174,6 +176,7 @@ async function runStatuslineHidden(): Promise<number> {
               ? {
                   avgPerDay: computed.avgPerDay,
                   todayUsedPct: computed.todayUsedPct,
+                  budgetExhausted: computed.avgPerDay === 0,
                 }
               : {}),
             monthlySpent: computed.monthlySpent,

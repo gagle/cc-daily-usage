@@ -94,9 +94,13 @@ export interface OauthProfile {
 }
 
 export interface ExtraUsage {
-  readonly usedCredits: number; // dollars
-  readonly monthlyLimit: number; // dollars
+  readonly usedCredits: number; // major units (dollars)
+  readonly monthlyLimit: number; // major units (dollars)
   readonly utilizationPct: number;
+  readonly currency: string;
+  readonly spendLimitReached: boolean;
+  readonly disabledReason: string | null;
+  readonly stale?: boolean; // last good reading served after a failed fetch
 }
 
 interface RawUsageResponse {
@@ -105,6 +109,10 @@ interface RawUsageResponse {
     readonly monthly_limit?: number | null;
     readonly used_credits?: number | null;
     readonly utilization?: number | null;
+    readonly currency?: string | null;
+    readonly decimal_places?: number | null;
+    readonly spend_limit_reached?: boolean | null;
+    readonly disabled_reason?: string | null;
   } | null;
 }
 
@@ -132,27 +140,38 @@ export async function fetchOauthProfile(token: string): Promise<OauthProfile | n
   return fetchJson<OauthProfile>(`${BASE_API_URL}/api/oauth/profile`, token);
 }
 
-/** `GET /api/oauth/usage` — same endpoint that already backs Claude Code's own `⏱ 5h/7d` rate-limit display;
- * this reads its `extra_usage` field (Anthropic's server-side "Usage credits" ledger). Returns null when
- * extra usage isn't enabled for this account, or on any fetch/parse failure. */
-export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null> {
-  const raw = await fetchJson<RawUsageResponse>(`${BASE_API_URL}/api/oauth/usage`, token);
+function parseExtraUsage(raw: RawUsageResponse | null): ExtraUsage | null {
   const extraUsage = raw?.extra_usage;
   if (!extraUsage?.is_enabled) return null;
   if (typeof extraUsage.used_credits !== "number" || typeof extraUsage.monthly_limit !== "number")
     return null;
+  const divisor = 10 ** (extraUsage.decimal_places ?? 2);
   return {
-    usedCredits: extraUsage.used_credits / 100,
-    monthlyLimit: extraUsage.monthly_limit / 100,
+    usedCredits: extraUsage.used_credits / divisor,
+    monthlyLimit: extraUsage.monthly_limit / divisor,
     utilizationPct: extraUsage.utilization ?? 0,
+    currency: extraUsage.currency ?? "USD",
+    spendLimitReached: extraUsage.spend_limit_reached ?? false,
+    disabledReason: extraUsage.disabled_reason ?? null,
   };
+}
+
+/** `GET /api/oauth/usage` — same endpoint that already backs Claude Code's own `⏱ 5h/7d` rate-limit display;
+ * this reads its `extra_usage` field (Anthropic's server-side "Usage credits" ledger). Returns null when
+ * extra usage isn't enabled for this account, or on any fetch/parse failure. */
+export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null> {
+  return parseExtraUsage(
+    await fetchJson<RawUsageResponse>(`${BASE_API_URL}/api/oauth/usage`, token),
+  );
 }
 
 const EXTRA_USAGE_CACHE_TTL_MS = 60_000;
 
-/** Throttles fetchExtraUsage to at most once per TTL window, cached on the per-account usage.json — a
+/** Throttles the usage fetch to at most once per TTL window, cached on the per-account usage.json — a
  * statusline can redraw on every keystroke; this keeps that from hammering Anthropic's endpoint on every
- * single render. Mutates `usage.extraUsageCache` in place, matching calc.ts's mutation style. */
+ * single render. A failed fetch (network, 401, 429) keeps the last good reading, marked `stale`, instead of
+ * caching null — null would drop the caller onto session-delta accumulation, which can count phantom spend.
+ * Mutates `usage.extraUsageCache` in place, matching calc.ts's mutation style. */
 export async function getCachedExtraUsage(
   usage: UsageState,
   token: string,
@@ -162,7 +181,8 @@ export async function getCachedExtraUsage(
   if (cache && nowUtc.getTime() - cache.fetchedAt < EXTRA_USAGE_CACHE_TTL_MS) {
     return cache.data;
   }
-  const data = await fetchExtraUsage(token);
+  const raw = await fetchJson<RawUsageResponse>(`${BASE_API_URL}/api/oauth/usage`, token);
+  const data = raw === null && cache?.data ? { ...cache.data, stale: true } : parseExtraUsage(raw);
   usage.extraUsageCache = { fetchedAt: nowUtc.getTime(), data };
   return data;
 }

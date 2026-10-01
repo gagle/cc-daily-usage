@@ -70,9 +70,6 @@ function makeUsage(overrides: Partial<UsageState> = {}): UsageState {
     lastUpdated: "2026-09-03T00:00:00.000Z",
     days: { "2026-09-01": 20, "2026-09-02": 15 },
     sessions: {},
-    frozenForDate: "2026-09-03",
-    frozenAvgPerDay: 33.48,
-    frozenSafeMonthTotal: 114.42,
     ...overrides,
   };
 }
@@ -222,17 +219,18 @@ describe("CalendarApp", () => {
     expect(frame).toContain("Day 3 · laboral · Enter/Space: unmark laboral");
     expect(frame).toContain("u edit $");
     expect(frame).toMatch(/·\s+(Coast|Ahead|Steady|On pace|Hot|Over|Burn)/);
-    expect(frame).toContain("Day-0 max:");
+    expect(frame).toContain("Day-1 max:");
+    expect(frame).toContain("(650 / 4)");
     expect(frame).toContain("Real avg:");
   });
 
-  it("still shows Day-0 equal-split when frozen avg is null (no today pace pair)", async () => {
-    usageStore = makeUsage({ frozenAvgPerDay: null, frozenSafeMonthTotal: null });
+  it("still shows Day-1 max when the budget is exhausted (avg 0, no today pace pair)", async () => {
+    usageStore = makeUsage({ monthlySpent: 700, days: { "2026-09-01": 700 } });
     const { CalendarApp } = await freshCalendar();
     const { lastFrame } = render(React.createElement(CalendarApp));
     const frame = lastFrame() ?? "";
     expect(frame).not.toContain("Today:"); // no pace pair without avg
-    expect(frame).toContain("Day-0 max:"); // equal-split plan still available
+    expect(frame).toContain("Day-1 max:"); // equal-split plan still available
   });
 
   it("shows the warning banner when the current month has zero laboral days", async () => {
@@ -279,24 +277,15 @@ describe("CalendarApp", () => {
     expect(lastFrame()).not.toContain("credit grant available");
   });
 
-  it("falls back to the 'This month' line only when avgPerDay is null on a laboral day (no today segment)", async () => {
-    usageStore = makeUsage({ frozenAvgPerDay: null, frozenSafeMonthTotal: null });
-    const { CalendarApp } = await freshCalendar();
-    const { lastFrame } = render(React.createElement(CalendarApp));
-    expect(lastFrame()).not.toContain("Today:");
-  });
-
   it("shows today usage-only (no /$avg) on a non-laboral day", async () => {
     // 3 Sep 2026 is the fixed system time; omit it from laboral days.
     configStore = makeConfig({ laboralDays: { "2026": { "9": [1, 2, 4] } } });
-    usageStore = makeUsage({ frozenAvgPerDay: 34.91, frozenSafeMonthTotal: 200 });
     const { CalendarApp } = await freshCalendar();
     const { lastFrame } = render(React.createElement(CalendarApp));
     const frame = lastFrame() ?? "";
     expect(frame).toContain("Today:");
     expect(frame).toContain("$45.94"); // todayUsage from fixture monthlySpent - days before
     expect(frame).not.toMatch(/Today:\s+\$[\d.]+ \/ \$/);
-    expect(frame).not.toMatch(/\$45\.94\/\$34\.91/);
   });
 
   it("quits on q", async () => {
@@ -430,6 +419,29 @@ describe("CalendarApp", () => {
     stdin.write("["); // year not in yearsAvailable → c.year + direction
     await flush();
     expect(lastFrame()).toContain("Year 2026");
+  });
+
+  it("labels the cap as from Anthropic and blocks cap edit when the ledger supplies it", async () => {
+    configStore = makeConfig({ hasSpendCap: true });
+    usageStore = makeUsage({
+      extraUsageCache: {
+        fetchedAt: 0,
+        data: {
+          usedCredits: 80.94,
+          monthlyLimit: 650,
+          utilizationPct: 12,
+          currency: "USD",
+          spendLimitReached: false,
+          disabledReason: null,
+        },
+      },
+    });
+    const { CalendarApp } = await freshCalendar();
+    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
+    expect(lastFrame()).toContain("cap from Anthropic");
+    stdin.write("c");
+    await flush();
+    expect(lastFrame()).not.toContain("Monthly cap:");
   });
 
   it("enters cap-edit mode with 'c', accepts digits/backspace, and saves a valid cap on Enter", async () => {

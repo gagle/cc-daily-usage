@@ -9,37 +9,39 @@ the one passed in. Read this instead of re-deriving formulas from source.
 Walks UTC days from `usage.lastUpdated` to now, one day at a time:
 
 - Freezes each completed day into `usage.days[iso] = max(0, monthlySpent - sumOfDaysBeforeInMonth)`.
-- Resets `monthlySpent = 0` when a month boundary is crossed.
-- Freezes `frozenAvgPerDay` / `frozenSafeMonthTotal` once per UTC day (see
-  `computeAvgPerDay` below) — these are **frozen at the start of the day, not
-  live** the rest of the day. This is a deliberate deviation: it keeps the
-  statusline's "$/day budget" number stable through a single day even as
-  `monthlySpent` changes, instead of jittering on every render.
+- Resets `monthlySpent = 0` when a month boundary is crossed, and sets
+  `ledgerBaseline` to the last ledger reading still in `extraUsageCache` (0 when none).
+
+It does not store any daily max. That number is derived (next section).
 
 ## `computeAvgPerDay`
 
 ```
-remaining = days left in month (including today)
+daysBefore = sum of usage.days in today's month with date < today
+remaining  = laboral days in this month with day >= today
 remaining === 0 -> null
-otherwise -> max(0, ceil(((monthlyCap - monthlySpent) / remaining) * 100) / 100)
+otherwise       -> max(0, ceil(((monthlyCap - daysBefore) / remaining) * 100) / 100)
 ```
 
-Rounds up to the nearest cent so the suggested daily budget never under-shoots
-the cap.
+Rounds up to the nearest cent. Derived on every render, never frozen: both inputs
+are fixed for the whole UTC day (today's own spend is not in `daysBefore`), so the
+value is stable through the day. It follows a `monthlyCap` change at once, and a
+weekend's spend (frozen into `days`) lowers the next laboral day's max.
+`0` means the budget is spent (`budgetExhausted` in the statusline JSON).
 
 ## `computeToday`
 
 ```
-todayUsage    = max(0, monthlySpent - sumOfDaysBeforeInMonth(today))
-todayUsedPct  = avgPerDay in {null, 0} ? null : todayUsage / avgPerDay
-monthUsedPct  = monthlyCap === 0 ? 0 : monthlySpent / monthlyCap
+todayUsage     = max(0, monthlySpent - sumOfDaysBeforeInMonth(today))
+safeMonthTotal = avgPerDay === null ? null : daysBefore + avgPerDay
+todayUsedPct   = avgPerDay in {null, 0} ? null : todayUsage / avgPerDay
+monthUsedPct   = monthlyCap === 0 ? 0 : monthlySpent / monthlyCap
 ```
 
-`avgPerDay` and the two "safe" totals used here come from the **frozen** values
-set once per day by `rolloverIfNeeded`, not recomputed live — see the note above.
-Also returns `paceLabel` (see below) and `monthDay0AvgPerDay` when stored for this month.
-Laboral days show `$today/$avg (pct)`; non-laboral days show `$today` only
-(see `isLaboralDay` / cli.ts); `monthlySpent` still includes off-day spend.
+Also returns `paceLabel` (see below) and `monthDay0AvgPerDay`.
+Laboral days show `$today/$avg (pct)`; `avgPerDay === 0` shows `$today/$0.00 (over)` in red;
+non-laboral days show `$today` only (see `isLaboralDay` / cli.ts); `monthlySpent`
+still includes off-day spend.
 
 ## `paceLabel`
 
@@ -54,21 +56,17 @@ pct <= 2.00     -> "Over"
 pct >  2.00     -> "Burn"
 ```
 
-Compares `todayUsage` to **today’s** `frozenAvgPerDay` (not the month day-0 max).
+Compares `todayUsage` to **today’s** `avgPerDay` (not the month day-1 max).
 
-## Month day-0 max
+## Month day-1 max
 
-Equal-split plan for the month:
+Equal-split plan for the month, derived live (a cap change re-bases it at once):
 
 ```
-monthDay0AvgPerDay = computeAvgPerDay(config, spent=0, laboralDays.length)
-                   = monthlyCap / laboralDaysInMonth   (ceil to cent)
+monthDay0AvgPerDay = monthlyCap / laboralDays.length   (ceil to cent; null with no laboral days)
 ```
 
-Stored once per `monthDay0ForMonth` (`YYYY-MM`). **Not** copied from
-`frozenAvgPerDay` (that is remaining pace and shrinks after spend). A mid-month
-backfill that left `day0 === frozenAvgPerDay` while `monthlySpent > 1` is healed
-back to the equal-split. Cleared when `rolloverIfNeeded` crosses a month boundary.
+The field name keeps the old `Day0` spelling; the TUI labels it "Day-1 max".
 
 ## `computeRealAvgPerDay`
 
@@ -79,28 +77,8 @@ otherwise     -> round_cent(monthlySpent / elapsedLaboral)
 ```
 
 Actual burn per work day so far. Off-day spend is in `monthlySpent` but does **not**
-grow the divisor — so weekend burn raises real avg. Distinct from `frozenAvgPerDay`
+grow the divisor, so weekend burn raises real avg. Distinct from `computeAvgPerDay`
 (remaining budget ÷ remaining laboral days).
-
-Non-laboral spend and theoretic max: raising `monthlySpent` on a Sunday immediately
-lowers `frozenAvgPerDay` via `refreshFrozenPaceIfNonLaboral` (and Monday’s day-start
-freeze), because the numerator `monthlyCap − monthlySpent` shrinks while the remaining
-laboral divisor ignores the Sunday itself.
-
-## `refreshFrozenPaceIfNonLaboral`
-
-On a non-laboral UTC day, after session cost has been captured into `monthlySpent`,
-recompute the frozen pace so weekend/off-day burn immediately reduces the
-theoretical daily budget for remaining laboral days:
-
-```
-remaining = count of laboral days in this month with day >= today
-frozenAvgPerDay = computeAvgPerDay(config, monthlySpent, remaining)
-frozenSafeMonthTotal = avgPerDay === null ? null : avgPerDay + monthlySpent
-```
-
-No-op when today is laboral (day-start freeze stays stable) or `frozenForDate`
-is not today.
 
 ## `captureSessionCost`
 
@@ -111,18 +89,24 @@ Per-session delta capture, keyed by Claude Code's own session id:
   (e.g. a new session reusing an id, or a mid-session model/account switch).
 - The `accumulate` flag gates whether the delta actually folds into
   `monthlySpent`. Enterprise with a live Anthropic **usage-credits** ledger sets
-  `accumulate: false` and instead assigns `monthlySpent = usedCredits` (see
+  `accumulate: false` and instead calls `applyLedgerReading` (see
   `cli.ts`) — a new session id reporting a full `cost.total_cost_usd` must not
   invent phantom today-spend on top of the ledger. When credits are unavailable,
   session deltas still accumulate for dollar-cap accounts.
 
-## `reconcileFromExtraUsageSnapshot`
+## `applyLedgerReading`
 
-Corrects a previously-frozen day using Anthropic's own cumulative
-`extra_usage.used_credits` ledger (fetched via `/api/oauth/usage`, see
-`anthropic-usage.ts`). Only applies the correction when the self-tracked figure
-disagrees with Anthropic's ledger by more than $0.005 — small floating-point
-drift is left alone rather than triggering a correction every call.
+Folds Anthropic's cumulative `extra_usage.used_credits` (fetched via
+`/api/oauth/usage`, see `anthropic-usage.ts`) into `monthlySpent`:
+
+```
+baseline     = usedCredits < ledgerBaseline ? 0 : ledgerBaseline
+monthlySpent = usedCredits - baseline
+```
+
+A reading below the baseline means the ledger reset, so the baseline drops to 0.
+Assumes the ledger resets on the UTC calendar month. If its cycle differs the budget
+month is wrong (`# ponytail` note in `calc.ts`).
 
 ## `colorForPct`
 

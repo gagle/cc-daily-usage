@@ -144,6 +144,9 @@ describe("anthropic-usage.ts", () => {
         usedCredits: 162.94,
         monthlyLimit: 650,
         utilizationPct: 25,
+        currency: "USD",
+        spendLimitReached: false,
+        disabledReason: null,
       });
     });
 
@@ -181,6 +184,9 @@ describe("anthropic-usage.ts", () => {
         usedCredits: 1,
         monthlyLimit: 10,
         utilizationPct: 0,
+        currency: "USD",
+        spendLimitReached: false,
+        disabledReason: null,
       });
     });
 
@@ -210,9 +216,6 @@ describe("anthropic-usage.ts", () => {
         lastUpdated: "2026-09-01T00:00:00.000Z",
         days: {},
         sessions: {},
-        frozenForDate: null,
-        frozenAvgPerDay: null,
-        frozenSafeMonthTotal: null,
       };
     }
 
@@ -236,7 +239,14 @@ describe("anthropic-usage.ts", () => {
       const usage = makeUsage();
       const now = new Date("2026-09-10T00:00:00.000Z");
       const data = await getCachedExtraUsage(usage, "t", now);
-      expect(data).toEqual({ usedCredits: 1, monthlyLimit: 10, utilizationPct: 10 });
+      expect(data).toEqual({
+        usedCredits: 1,
+        monthlyLimit: 10,
+        utilizationPct: 10,
+        currency: "USD",
+        spendLimitReached: false,
+        disabledReason: null,
+      });
       expect(usage.extraUsageCache).toEqual({ fetchedAt: now.getTime(), data });
     });
 
@@ -244,7 +254,14 @@ describe("anthropic-usage.ts", () => {
       const fetchMock = vi.fn();
       vi.stubGlobal("fetch", fetchMock);
       const { getCachedExtraUsage } = await freshModule();
-      const cached = { usedCredits: 5, monthlyLimit: 50, utilizationPct: 10 };
+      const cached = {
+        usedCredits: 5,
+        monthlyLimit: 50,
+        utilizationPct: 10,
+        currency: "USD",
+        spendLimitReached: false,
+        disabledReason: null,
+      };
       const usage = makeUsage();
       usage.extraUsageCache = {
         fetchedAt: new Date("2026-09-10T00:00:00.000Z").getTime(),
@@ -275,10 +292,85 @@ describe("anthropic-usage.ts", () => {
       const usage = makeUsage();
       usage.extraUsageCache = {
         fetchedAt: new Date("2026-09-10T00:00:00.000Z").getTime(),
-        data: { usedCredits: 1, monthlyLimit: 10, utilizationPct: 10 },
+        data: {
+          usedCredits: 1,
+          monthlyLimit: 10,
+          utilizationPct: 10,
+          currency: "USD",
+          spendLimitReached: false,
+          disabledReason: null,
+        },
       };
       const data = await getCachedExtraUsage(usage, "t", new Date("2026-09-10T00:02:00.000Z"));
-      expect(data).toEqual({ usedCredits: 2, monthlyLimit: 10, utilizationPct: 20 });
+      expect(data).toEqual({
+        usedCredits: 2,
+        monthlyLimit: 10,
+        utilizationPct: 20,
+        currency: "USD",
+        spendLimitReached: false,
+        disabledReason: null,
+      });
+    });
+
+    it("keeps the last good reading, marked stale, when the refetch fails", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+      const { getCachedExtraUsage } = await freshModule();
+      const usage = makeUsage();
+      const good = {
+        usedCredits: 7,
+        monthlyLimit: 80,
+        utilizationPct: 9,
+        currency: "USD",
+        spendLimitReached: false,
+        disabledReason: null,
+      };
+      usage.extraUsageCache = {
+        fetchedAt: new Date("2026-09-10T00:00:00.000Z").getTime(),
+        data: good,
+      };
+      const now = new Date("2026-09-10T00:02:00.000Z");
+      const data = await getCachedExtraUsage(usage, "t", now);
+      expect(data).toEqual({ ...good, stale: true });
+      expect(usage.extraUsageCache.fetchedAt).toBe(now.getTime());
+    });
+
+    it("caches null when the fetch fails and there is no prior good reading", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+      const { getCachedExtraUsage } = await freshModule();
+      const usage = makeUsage();
+      const data = await getCachedExtraUsage(usage, "t", new Date("2026-09-10T00:00:00.000Z"));
+      expect(data).toBeNull();
+    });
+
+    it("parses decimal_places, currency, limit-reached and disabled reason", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              extra_usage: {
+                is_enabled: true,
+                used_credits: 80000,
+                monthly_limit: 80000,
+                utilization: 100,
+                currency: "EUR",
+                decimal_places: 3,
+                spend_limit_reached: true,
+                disabled_reason: "limit",
+              },
+            }),
+        }),
+      );
+      const { fetchExtraUsage } = await freshModule();
+      expect(await fetchExtraUsage("t")).toEqual({
+        usedCredits: 80,
+        monthlyLimit: 80,
+        utilizationPct: 100,
+        currency: "EUR",
+        spendLimitReached: true,
+        disabledReason: "limit",
+      });
     });
   });
 

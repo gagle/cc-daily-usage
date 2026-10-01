@@ -42,7 +42,7 @@ function elapsedLaboralDaysCount(days: ReadonlyArray<number>, throughDay: number
 
 /**
  * Actual $/laboral-day so far: monthlySpent ÷ count of laboral days with day ≤ today.
- * Distinct from frozenAvgPerDay (remaining budget ÷ remaining laboral days).
+ * Distinct from computeAvgPerDay (remaining budget ÷ remaining laboral days).
  */
 export function computeRealAvgPerDay(
   config: Config,
@@ -55,9 +55,22 @@ export function computeRealAvgPerDay(
   return Math.round((monthlySpent / elapsed) * 100) / 100;
 }
 
-function computeAvgPerDay(config: Config, monthlySpent: number, remaining: number): number | null {
+/** Ceil-to-cent share of `cap - spent` over `remaining` laboral days; null when none remain. */
+function splitCap(cap: number, spent: number, remaining: number): number | null {
   if (remaining === 0) return null;
-  return Math.max(0, Math.ceil(((config.monthlyCap - monthlySpent) / remaining) * 100) / 100);
+  return Math.max(0, Math.ceil(((cap - spent) / remaining) * 100) / 100);
+}
+
+/**
+ * Today's max: (monthlyCap - sum of days before today) ÷ laboral days from today onward. Derived, never
+ * stored: both inputs are fixed for the whole UTC day (today's own spend is excluded), so it is stable
+ * through the day, follows a monthlyCap change at once, and a weekend's spend lowers the next laboral day.
+ * 0 means the budget is exhausted; null means no laboral day remains.
+ */
+export function computeAvgPerDay(config: Config, usage: UsageState, nowUtc: Date): number | null {
+  const laboralDays = getLaboralDays(config, nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1);
+  const remaining = remainingLaboralDaysCount(laboralDays, nowUtc.getUTCDate());
+  return splitCap(config.monthlyCap, sumDaysBeforeInMonth(usage, utcDateString(nowUtc)), remaining);
 }
 
 /**
@@ -65,15 +78,14 @@ function computeAvgPerDay(config: Config, monthlySpent: number, remaining: numbe
  * freezing each day's final derived amount into usage.days — including lastUpdated's day itself, since that
  * day's spend is fully settled by the time nowUtc rolls onto a new date (its own capture already happened
  * before this call). Every day gets frozen, laboral or not — laboral-day membership only ever affects the
- * avgPerDay pace math (getLaboralDays/remainingLaboralDaysCount below), never which days get real spend
+ * avgPerDay pace math (getLaboralDays/remainingLaboralDaysCount above), never which days get real spend
  * recorded. Also resets monthlySpent to 0 the moment the walk crosses into a new calendar month — Claude
  * Code's own usage windows reset monthly, so ours must too; the outgoing month's last day is frozen first
- * (using its pre-reset total), so nothing is lost. Also freezes today's avgPerDay/safeMonthTotal exactly
- * once per UTC day (decision 24) — the moment nowUtc's date differs from usage.frozenForDate, using
- * monthlySpent as it stands at that instant, before today's own spend accrues. Idempotent: calling it again
- * the same UTC day is a no-op beyond refreshing lastUpdated's timestamp.
+ * (using its pre-reset total), so nothing is lost. At that crossing ledgerBaseline takes the last ledger
+ * reading, so a ledger that did not reset still yields this month's spend (see applyLedgerReading).
+ * Idempotent: calling it again the same UTC day is a no-op beyond refreshing lastUpdated's timestamp.
  */
-export function rolloverIfNeeded(usage: UsageState, config: Config, nowUtc: Date): UsageState {
+export function rolloverIfNeeded(usage: UsageState, nowUtc: Date): UsageState {
   const lastDate = new Date(usage.lastUpdated);
   const today = utcDateString(nowUtc);
 
@@ -90,95 +102,26 @@ export function rolloverIfNeeded(usage: UsageState, config: Config, nowUtc: Date
       const next = addUtcDays(cursor, 1);
       if (next.getUTCMonth() !== cursor.getUTCMonth()) {
         usage.monthlySpent = 0;
-        usage.monthDay0AvgPerDay = null;
-        usage.monthDay0ForMonth = null;
+        usage.ledgerBaseline = usage.extraUsageCache?.data?.usedCredits ?? 0;
       }
       cursor = next;
     }
   }
 
   usage.lastUpdated = nowUtc.toISOString();
-
-  if (usage.frozenForDate !== today) {
-    const laboralDaysThisMonth = getLaboralDays(
-      config,
-      nowUtc.getUTCFullYear(),
-      nowUtc.getUTCMonth() + 1,
-    );
-    const remaining = remainingLaboralDaysCount(laboralDaysThisMonth, nowUtc.getUTCDate());
-    const avgPerDay = computeAvgPerDay(config, usage.monthlySpent, remaining);
-    usage.frozenAvgPerDay = avgPerDay;
-    usage.frozenSafeMonthTotal = avgPerDay === null ? null : avgPerDay + usage.monthlySpent;
-    usage.frozenForDate = today;
-  }
-  // Equal-split day-0 plan for this month (cap / all laboral days) — never copied from frozenAvgPerDay.
-  captureMonthDay0IfNeeded(usage, config, nowUtc);
-
   return usage;
 }
 
-/** "YYYY-MM" for the UTC month of `date`. */
-function monthKeyUtc(date: Date): string {
-  return `${String(date.getUTCFullYear())}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
-}
-
 /**
- * Stores the month's equal-split daily max: monthlyCap / laboralDays.length at $0 spent.
- * Never copies frozenAvgPerDay (that shrinks mid-month). Heals a mid-month backfill mistake where
- * day0 was wrongly set equal to the then-current freeze while spend had already accrued.
+ * Folds Anthropic's cumulative `extra_usage.used_credits` into monthlySpent. A reading below
+ * ledgerBaseline means the ledger reset (new billing month), so the baseline drops to 0.
+ * # ponytail: assumes the ledger resets on the UTC calendar month; if its cycle differs the budget month is
+ * wrong — fix by moving the month edge to the observed reset date.
  */
-function captureMonthDay0IfNeeded(usage: UsageState, config: Config, nowUtc: Date): void {
-  const key = monthKeyUtc(nowUtc);
-  const laboralDays = getLaboralDays(config, nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1);
-  const equalSplit = computeAvgPerDay(config, 0, laboralDays.length);
-
-  if (usage.monthDay0ForMonth !== key) {
-    usage.monthDay0ForMonth = key;
-    usage.monthDay0AvgPerDay = equalSplit;
-    return;
-  }
-
-  if (usage.monthDay0AvgPerDay == null) {
-    usage.monthDay0AvgPerDay = equalSplit;
-    return;
-  }
-
-  // Heal: old code backfilled day0 from frozenAvgPerDay mid-month.
-  if (
-    usage.monthlySpent > 1 &&
-    usage.frozenAvgPerDay != null &&
-    usage.monthDay0AvgPerDay === usage.frozenAvgPerDay &&
-    equalSplit !== null &&
-    usage.monthDay0AvgPerDay !== equalSplit
-  ) {
-    usage.monthDay0AvgPerDay = equalSplit;
-  }
-}
-
-/**
- * On a non-laboral UTC day, weekend/off-day spend still raises monthlySpent but must not keep yesterday's
- * frozenAvgPerDay. Recompute pace from current monthlySpent and remaining laboral days (from today onward,
- * which excludes today when it is not laboral). No-op on laboral days (day-start freeze stays stable) or
- * when frozenForDate is not today.
- */
-export function refreshFrozenPaceIfNonLaboral(
-  usage: UsageState,
-  config: Config,
-  nowUtc: Date,
-): UsageState {
-  const today = utcDateString(nowUtc);
-  if (usage.frozenForDate !== today) return usage;
-  if (isLaboralDay(config, nowUtc)) return usage;
-
-  const laboralDaysThisMonth = getLaboralDays(
-    config,
-    nowUtc.getUTCFullYear(),
-    nowUtc.getUTCMonth() + 1,
-  );
-  const remaining = remainingLaboralDaysCount(laboralDaysThisMonth, nowUtc.getUTCDate());
-  const avgPerDay = computeAvgPerDay(config, usage.monthlySpent, remaining);
-  usage.frozenAvgPerDay = avgPerDay;
-  usage.frozenSafeMonthTotal = avgPerDay === null ? null : avgPerDay + usage.monthlySpent;
+export function applyLedgerReading(usage: UsageState, usedCredits: number): UsageState {
+  const baseline = usedCredits < (usage.ledgerBaseline ?? 0) ? 0 : (usage.ledgerBaseline ?? 0);
+  usage.ledgerBaseline = baseline;
+  usage.monthlySpent = usedCredits - baseline;
   return usage;
 }
 
@@ -235,12 +178,7 @@ export function pruneStaleSessions(usage: UsageState, nowUtc: Date): UsageState 
 }
 
 /**
- * Direct port of Panel B2/B3/B4/B5/C5, with one deliberate deviation from the xlsx's literal "live" formula
- * (decision 24): avgPerDay/safeMonthTotal are read straight off usage.frozenAvgPerDay/frozenSafeMonthTotal,
- * never recomputed here. Caller MUST run rolloverIfNeeded first — computeToday itself never mutates usage.
- */
-/**
- * Motivational / warning label for todayUsage / today's frozenAvgPerDay.
+ * Motivational / warning label for todayUsage / today's max (computeAvgPerDay).
  * Coast ≤25% · Ahead ≤50% · Steady ≤75% · On pace ≤100% · Hot ≤150% · Over ≤200% · Burn >200%.
  */
 export function paceLabel(todayUsedPct: number | null): string | null {
@@ -254,16 +192,16 @@ export function paceLabel(todayUsedPct: number | null): string | null {
   return "Burn";
 }
 
+/** Direct port of Panel B2/B3/B4/B5/C5. Caller MUST run rolloverIfNeeded first — never mutates usage. */
 export function computeToday(usage: UsageState, config: Config, nowUtc: Date): ComputedUsage {
   const today = utcDateString(nowUtc);
+  const daysBefore = sumDaysBeforeInMonth(usage, today);
 
-  const avgPerDay = usage.frozenAvgPerDay;
-  const safeMonthTotal = usage.frozenSafeMonthTotal;
-  const todayUsage = Math.max(0, usage.monthlySpent - sumDaysBeforeInMonth(usage, today));
+  const avgPerDay = computeAvgPerDay(config, usage, nowUtc);
+  const safeMonthTotal = avgPerDay === null ? null : daysBefore + avgPerDay;
+  const todayUsage = Math.max(0, usage.monthlySpent - daysBefore);
   const todayUsedPct = avgPerDay === null || avgPerDay === 0 ? null : todayUsage / avgPerDay;
-  const monthKey = monthKeyUtc(nowUtc);
-  const monthDay0AvgPerDay =
-    usage.monthDay0ForMonth === monthKey ? (usage.monthDay0AvgPerDay ?? null) : null;
+  const laboralDays = getLaboralDays(config, nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1);
 
   return {
     monthlyCap: config.monthlyCap,
@@ -275,43 +213,9 @@ export function computeToday(usage: UsageState, config: Config, nowUtc: Date): C
     todayUsedPct,
     monthUsedPct: config.monthlyCap === 0 ? 0 : usage.monthlySpent / config.monthlyCap,
     paceLabel: paceLabel(todayUsedPct),
-    monthDay0AvgPerDay,
+    monthDay0AvgPerDay: splitCap(config.monthlyCap, 0, laboralDays.length),
     realAvgPerDay: computeRealAvgPerDay(config, usage.monthlySpent, nowUtc),
   };
-}
-
-/**
- * Anthropic's own cumulative `extra_usage.used_credits` (see anthropic-usage.ts) is more trustworthy than
- * our own session cost-delta summation — it's the server-side ledger, ours can drift. Called once per
- * `--statusline` invocation, after a fresh extraUsage fetch: if a snapshot from a PRIOR UTC day exists, the
- * delta between it and today's cumulative total is that prior day's true spend — overwrite
- * `usage.days[priorDate]` (and `monthlySpent`) with it when it disagrees with the self-tracked figure.
- * Purely additive: a no-op on the very first call (no prior snapshot yet) and never touches today's own
- * still-accruing figure. Mutates `usage` in place, matching rolloverIfNeeded/captureSessionCost.
- */
-export function reconcileFromExtraUsageSnapshot(
-  usage: UsageState,
-  extraUsage: { usedCredits: number } | null,
-  nowUtc: Date,
-): UsageState {
-  if (extraUsage === null) return usage;
-  const today = utcDateString(nowUtc);
-  const prior = usage.extraUsageSnapshot;
-
-  if (prior && prior.date !== today) {
-    const trueAmount = Math.max(0, extraUsage.usedCredits - prior.usedCredits);
-    const selfTracked = usage.days[prior.date];
-    if (selfTracked !== undefined && Math.abs(selfTracked - trueAmount) > 0.005) {
-      usage.monthlySpent += trueAmount - selfTracked;
-      usage.days[prior.date] = trueAmount;
-    }
-  }
-
-  if (!prior || prior.date !== today) {
-    usage.extraUsageSnapshot = { date: today, usedCredits: extraUsage.usedCredits };
-  }
-
-  return usage;
 }
 
 export function colorForPct(pct: number): string {

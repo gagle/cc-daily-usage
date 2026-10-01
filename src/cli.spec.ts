@@ -80,9 +80,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
     });
     resolveActiveAccountMock.mockResolvedValue(null);
     resolveOAuthAccessTokenMock.mockReturnValue(null);
@@ -531,7 +528,7 @@ describe("runCli", () => {
     expect(printed).not.toHaveProperty("todayUsedPct");
   });
 
-  it("hidden --statusline mode: skips rolloverIfNeeded/reconcileLaboralDays entirely on a confirmed no-spend-cap account", async () => {
+  it("hidden --statusline mode: skips rolloverIfNeeded entirely on a confirmed no-spend-cap account", async () => {
     loadConfigMock.mockReturnValue({
       monthlyCap: 650,
       laboralDays: {},
@@ -543,9 +540,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-01T00:00:00.000Z", // a prior UTC day — would normally trigger rollover
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
     });
     stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
     const { runCli } = await freshCli();
@@ -553,12 +547,8 @@ describe("runCli", () => {
     const code = await runCli(["--statusline"]);
     expect(code).toBe(0);
     expect(saveConfigMock).not.toHaveBeenCalled();
-    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as {
-      frozenForDate: string | null;
-      frozenAvgPerDay: number | null;
-    };
-    expect(savedUsage.frozenForDate).toBeNull();
-    expect(savedUsage.frozenAvgPerDay).toBeNull();
+    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as { days: Record<string, number> };
+    expect(savedUsage.days).toEqual({});
   });
 
   it("hidden --statusline mode: a spend-cap account still prints todayUsage/avgPerDay/todayUsedPct alongside monthlySpent", async () => {
@@ -618,6 +608,9 @@ describe("runCli", () => {
       usedCredits: 196.22,
       monthlyLimit: 650,
       utilizationPct: 30,
+      currency: "USD",
+      spendLimitReached: false,
+      disabledReason: null,
     });
     // Inflated self-tracked total + a new session reporting $2.54 — must not stick.
     loadUsageMock.mockReturnValue({
@@ -628,9 +621,6 @@ describe("runCli", () => {
         "2026-09-13": 0.15,
       },
       sessions: {},
-      frozenForDate: "2026-09-14",
-      frozenAvgPerDay: 34.91,
-      frozenSafeMonthTotal: 231,
     });
     stubStdin(
       JSON.stringify({
@@ -656,6 +646,77 @@ describe("runCli", () => {
     expect(printed.monthlySpent).toBe(196.22);
   });
 
+  it("hidden --statusline mode: monthlyCap follows Anthropic's monthly_limit and is saved when it changes", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 700,
+      laboralDays: { "2026": { "9": [14] } },
+      planType: "claude_enterprise",
+      hasSpendCap: true,
+    });
+    resolveActiveAccountMock.mockResolvedValue({
+      email: "a@b.com",
+      accountUuid: "u1",
+      organizationType: "claude_enterprise",
+    });
+    resolveOAuthAccessTokenMock.mockReturnValue({ token: "t", expiresAt: null });
+    getCachedExtraUsageMock.mockResolvedValue({
+      usedCredits: 100,
+      monthlyLimit: 800,
+      utilizationPct: 12,
+      currency: "USD",
+      spendLimitReached: false,
+      disabledReason: null,
+    });
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 90,
+      lastUpdated: "2026-09-14T00:00:00.000Z",
+      days: {},
+      sessions: {},
+    });
+    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 0 } }));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await runCli(["--statusline"]);
+    expect(saveConfigMock).toHaveBeenCalledWith(
+      "default",
+      expect.objectContaining({ monthlyCap: 800 }),
+    );
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.monthlyCap).toBe(800);
+    expect(printed.avgPerDay).toBe(800); // 800 left over the single laboral day
+  });
+
+  it("hidden --statusline mode: flags budgetExhausted when the daily max is 0", async () => {
+    loadConfigMock.mockReturnValue({
+      monthlyCap: 650,
+      laboralDays: { "2026": { "9": [14] } },
+      planType: "claude_enterprise",
+      hasSpendCap: true,
+    });
+    resolveActiveAccountMock.mockResolvedValue({
+      email: "a@b.com",
+      accountUuid: "u1",
+      organizationType: "claude_enterprise",
+    });
+    loadUsageMock.mockReturnValue({
+      monthlySpent: 700,
+      lastUpdated: "2026-09-14T00:00:00.000Z",
+      days: { "2026-09-13": 700 },
+      sessions: {},
+    });
+    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 0 } }));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
+    const { runCli } = await freshCli();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await runCli(["--statusline"]);
+    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
+    expect(printed.avgPerDay).toBe(0);
+    expect(printed.budgetExhausted).toBe(true);
+  });
+
   it("hidden --statusline mode: without usage-credits, enterprise still accumulates session cost deltas", async () => {
     loadConfigMock.mockReturnValue({
       monthlyCap: 650,
@@ -674,9 +735,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-14T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: "2026-09-14",
-      frozenAvgPerDay: 50,
-      frozenSafeMonthTotal: 150,
     });
     stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 3 } }));
     vi.useFakeTimers();
@@ -741,9 +799,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
       rateLimitsCache: {
         fiveHourPct: 46,
         sevenDayPct: 31,
@@ -777,9 +832,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
       rateLimitsCache: {
         fiveHourPct: 46,
         sevenDayPct: 31,
@@ -813,9 +865,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
       rateLimitsCache: {
         fiveHourPct: 46,
         sevenDayPct: 31,
@@ -870,9 +919,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
       rateLimitsCache: {
         fiveHourPct: 100,
         sevenDayPct: 100,
@@ -909,9 +955,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
       rateLimitsCache: {
         fiveHourPct: 100,
         sevenDayPct: 31,
@@ -945,9 +988,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
       rateLimitsCache: {
         fiveHourPct: 90,
         sevenDayPct: null,
@@ -981,9 +1021,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
       rateLimitsCache: {
         fiveHourPct: 100,
         sevenDayPct: 100,
@@ -1020,9 +1057,6 @@ describe("runCli", () => {
       lastUpdated: "2026-09-03T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
       rateLimitsCache: {
         fiveHourPct: 46,
         sevenDayPct: 31,

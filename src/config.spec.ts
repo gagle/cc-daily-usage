@@ -104,9 +104,6 @@ describe("config.ts", () => {
       lastUpdated: "2026-09-01T00:00:00.000Z",
       days: {},
       sessions: {},
-      frozenForDate: null,
-      frozenAvgPerDay: null,
-      frozenSafeMonthTotal: null,
     };
     saveUsage("acct", usage);
     expect(loadUsage("acct")).toEqual(usage);
@@ -161,9 +158,6 @@ describe("config.ts", () => {
         lastUpdated: "2026-09-01T00:00:00.000Z",
         days: {},
         sessions: {},
-        frozenForDate: null,
-        frozenAvgPerDay: null,
-        frozenSafeMonthTotal: null,
       }),
     );
 
@@ -186,9 +180,6 @@ describe("config.ts", () => {
         lastUpdated: "2026-09-01T00:00:00.000Z",
         days: {},
         sessions: {},
-        frozenForDate: null,
-        frozenAvgPerDay: null,
-        frozenSafeMonthTotal: null,
       }),
     );
 

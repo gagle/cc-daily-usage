@@ -3,7 +3,13 @@ import React, { useEffect, useState } from "react";
 
 import type { Account } from "./account.js";
 import { accountKey, readOverageCreditGrantCache, resolveActiveAccountSync } from "./account.js";
-import { colorForPct, computeToday, isLaboralDay, rolloverIfNeeded } from "./calc.js";
+import {
+  colorForPct,
+  computeToday,
+  getLaboralDays,
+  isLaboralDay,
+  rolloverIfNeeded,
+} from "./calc.js";
 import { loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
 import type { ComputedUsage } from "./interfaces/calc.interface.js";
 import type { Config, UsageState } from "./interfaces/config.interface.js";
@@ -120,7 +126,7 @@ export function computeSnapshot(): CalendarSnapshot {
   const config = loadConfig(key);
   const usage = loadUsage(key);
   const now = new Date();
-  rolloverIfNeeded(usage, config, now);
+  rolloverIfNeeded(usage, now);
   const computed = computeToday(usage, config, now);
   return { config, usage, computed, account };
 }
@@ -161,6 +167,7 @@ function renderStatsHeader(
   computed: ComputedUsage,
   cursor: Cursor,
   now: Date,
+  capFromAnthropic: boolean,
 ): React.ReactElement {
   const showTodayPace =
     config.hasSpendCap !== false &&
@@ -198,13 +205,13 @@ function renderStatsHeader(
       : React.createElement(
           Text,
           { color: colorForPct(computed.monthUsedPct) },
-          `This month: ${money(computed.monthlySpent)} / ${money(computed.monthlyCap)}  (${pctLabel(computed.monthUsedPct)})`,
+          `This month: ${money(computed.monthlySpent)} / ${money(computed.monthlyCap)}  (${pctLabel(computed.monthUsedPct)})${capFromAnthropic ? "  cap from Anthropic" : ""}`,
         ),
     config.hasSpendCap !== false && computed.monthDay0AvgPerDay !== null
       ? React.createElement(
           Text,
           { dimColor: true },
-          `Day-0 max:  ${money(computed.monthDay0AvgPerDay)}  (first equal-split this month)`,
+          `Day-1 max:  ${money(computed.monthDay0AvgPerDay)}  (${String(config.monthlyCap)} / ${String(getLaboralDays(config, now.getUTCFullYear(), now.getUTCMonth() + 1).length)})`,
         )
       : null,
     config.hasSpendCap !== false && computed.realAvgPerDay !== null
@@ -447,6 +454,8 @@ export function CalendarApp(): React.ReactElement {
     return { year: now.getUTCFullYear(), month: now.getUTCMonth() + 1, day: now.getUTCDate() };
   });
   const [capEdit, setCapEdit] = useState<string | null>(null);
+  const capFromAnthropic =
+    snapshot.config.hasSpendCap === true && Boolean(snapshot.usage.extraUsageCache?.data);
   const [dayEdit, setDayEdit] = useState<DayEditSession | null>(null);
 
   const years = yearsAvailable(snapshot.config, snapshot.usage, new Date());
@@ -656,7 +665,8 @@ export function CalendarApp(): React.ReactElement {
       exit();
       return;
     }
-    if (input === "c" && snapshot.config.hasSpendCap !== false) {
+    // The cap follows Anthropic's monthly_limit on every render (cli.ts), so a manual edit would be overwritten.
+    if (input === "c" && snapshot.config.hasSpendCap !== false && !capFromAnthropic) {
       setCapEdit(String(snapshot.config.monthlyCap));
       return;
     }
@@ -706,7 +716,7 @@ export function CalendarApp(): React.ReactElement {
     // the month-card grid below actually flex-wrap responsively; 80 is only the *minimum* a terminal needs
     // for a single card to fit, not a cap on how many fit side by side on a wider one.
     { flexDirection: "column" },
-    renderStatsHeader(snapshot.config, snapshot.computed, cursor, new Date()),
+    renderStatsHeader(snapshot.config, snapshot.computed, cursor, new Date(), capFromAnthropic),
     renderWarningBanner(snapshot.config, new Date()),
     renderCreditGrantBanner(snapshot.account),
     capEdit !== null

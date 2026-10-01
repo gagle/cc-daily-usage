@@ -21,13 +21,12 @@ Full data flow: `docs/architecture.md`'s "Statusline hook" diagram.
    "Multi-account model") is a common root cause of "stale" numbers.
 3. Trace the compute chain: `resolveActiveAccount()` (`account.ts`) →
    `rolloverIfNeeded()` → `captureSessionCost()` →
-   `reconcileFromExtraUsageSnapshot()` (all in `calc.ts`, see
+   `applyLedgerReading()` (all in `calc.ts`, see
    `docs/calculations.md` for exact formulas) → written back to
    `usage.json` → printed as one JSON line.
-4. If the number looks "frozen"/stale mid-day, check whether it's
-   `avgPerDay`/`safeMonthTotal` — those are deliberately frozen once per
-   UTC day, not live (`docs/architecture.md`'s "Why these decisions").
-   That's expected behavior, not a bug.
+4. If `avgPerDay` looks wrong, it is derived each render by `computeAvgPerDay`
+   from `usage.days` and `config.monthlyCap`. Check both files; for a dollar-cap
+   account `monthlyCap` is overwritten from Anthropic's `monthly_limit`.
 5. If color looks wrong, check `colorForPct` in `calc.ts` against
    `ccColor()` in `assets/statusline.mjs` — they must be identical; drift
    between them is a real bug (`docs/calculations.md` flags this).

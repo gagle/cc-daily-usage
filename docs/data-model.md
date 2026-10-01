@@ -24,21 +24,17 @@ interface UsageState {
   lastUpdated: string; // UTC ISO-8601
   days: Record<isoDate, number>; // frozen $ amount per completed day
   sessions: Record<sessionId, SessionCost>;
-  frozenForDate: string | null; // ISO date the two fields below were frozen for
-  frozenAvgPerDay: number | null; // avgPerDay computed once at the start of frozenForDate
-  frozenSafeMonthTotal: number | null; // safeMonthTotal computed at the same moment
   extraUsageCache?: ExtraUsageCacheEntry; // short-TTL cache around the live /api/oauth/usage fetch
-  extraUsageSnapshot?: ExtraUsageSnapshot; // last cumulative reading, for day-over-day reconciliation
   rateLimitsCache?: RateLimitsCache; // last-seen Claude Code hook rate_limits
-  monthDay0AvgPerDay?: number | null; // first equal-split daily max this calendar month
-  monthDay0ForMonth?: string | null; // "YYYY-MM" the day-0 max belongs to
+  ledgerBaseline?: number; // Anthropic ledger reading at this month's start; monthlySpent = used_credits - baseline
 }
 ```
 
 `DEFAULT_USAGE`: `monthlySpent: 0`, `lastUpdated: epoch 0`, everything else empty/null.
 
-**`frozenAvgPerDay`/`frozenSafeMonthTotal` are never live** — see
-`docs/calculations.md`'s note on `rolloverIfNeeded`.
+The daily max is not stored: `computeAvgPerDay` derives it each render (see
+`docs/calculations.md`). Old `frozen*`, `monthDay0*` and `extraUsageSnapshot` keys in an
+existing `usage.json` are ignored (left in place, harmless).
 
 ## `SessionCost`
 
@@ -49,26 +45,27 @@ interface SessionCost {
 }
 ```
 
-## `ExtraUsageSnapshot`
-
-```ts
-interface ExtraUsageSnapshot {
-  date: string; // ISO date this snapshot was captured on
-  usedCredits: number; // cumulative $ (extra_usage.used_credits) at capture time
-}
-```
-
 ## `ExtraUsageCacheEntry`
 
 ```ts
 interface ExtraUsageCacheEntry {
   fetchedAt: number; // epoch ms
-  data: { usedCredits: number; monthlyLimit: number; utilizationPct: number } | null;
+  data: {
+    usedCredits: number; // major units, scaled by decimal_places
+    monthlyLimit: number;
+    utilizationPct: number;
+    currency: string;
+    spendLimitReached: boolean;
+    disabledReason: string | null;
+    stale?: boolean; // last good reading served after a failed fetch
+  } | null;
 }
 ```
 
 60-second TTL cache around the live `/api/oauth/usage` fetch (`getCachedExtraUsage`
-in `anthropic-usage.ts`) — avoids hitting Anthropic's API on every statusline render.
+in `anthropic-usage.ts`) — avoids hitting Anthropic's API on every statusline render. A failed fetch keeps the
+last good `data` (marked `stale`) instead of caching `null`. For a dollar-cap account
+`monthlyCap` is overwritten from `monthlyLimit` on every render.
 
 ## `RateLimitsCache`
 

@@ -14,17 +14,16 @@ export interface SessionCost {
   lastSeenAt: string; // UTC ISO-8601 — drives the 2-day pruning in pruneStaleSessions
 }
 
-export interface ExtraUsageSnapshot {
-  readonly date: string; // ISO date this snapshot was captured on
-  readonly usedCredits: number; // cumulative $ (extra_usage.used_credits) at capture time
-}
-
 export interface ExtraUsageCacheEntry {
   readonly fetchedAt: number; // epoch ms
   readonly data: {
     readonly usedCredits: number;
     readonly monthlyLimit: number;
     readonly utilizationPct: number;
+    readonly currency: string;
+    readonly spendLimitReached: boolean;
+    readonly disabledReason: string | null;
+    readonly stale?: boolean;
   } | null;
 }
 
@@ -40,15 +39,10 @@ export interface UsageState {
   lastUpdated: string; // UTC ISO-8601, e.g. "2026-09-04T23:55:00.000Z"
   days: Record<string, number>; // ISO date "YYYY-MM-DD" -> frozen $ amount
   sessions: Record<string, SessionCost>; // sessionId -> last-seen cost, per-session delta capture
-  frozenForDate: string | null; // ISO date the two fields below were frozen for
-  frozenAvgPerDay: number | null; // avgPerDay as computed once at the start of frozenForDate; never live
-  frozenSafeMonthTotal: number | null; // safeMonthTotal as computed at the same moment; never live
   extraUsageCache?: ExtraUsageCacheEntry; // short-TTL cache around the live /api/oauth/usage fetch
-  extraUsageSnapshot?: ExtraUsageSnapshot; // last cumulative reading, for day-over-day reconciliation
   rateLimitsCache?: RateLimitsCache; // last-seen Claude Code hook rate_limits, for the render(s) at session
   // start before Claude Code has attached a fresh one — see runStatuslineHidden in cli.ts
-  monthDay0AvgPerDay?: number | null; // first equal-split daily max frozen this calendar month; never overwritten later
-  monthDay0ForMonth?: string | null; // "YYYY-MM" the day-0 max belongs to
+  ledgerBaseline?: number; // Anthropic ledger reading at this month's start; monthlySpent = used_credits - baseline
 }
 
 export const DEFAULT_CONFIG: Config = { monthlyCap: 200, laboralDays: {} };
@@ -58,9 +52,4 @@ export const DEFAULT_USAGE: UsageState = {
   lastUpdated: new Date(0).toISOString(),
   days: {},
   sessions: {},
-  frozenForDate: null,
-  frozenAvgPerDay: null,
-  frozenSafeMonthTotal: null,
-  monthDay0AvgPerDay: null,
-  monthDay0ForMonth: null,
 };

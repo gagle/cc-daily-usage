@@ -48,7 +48,7 @@ the cap, rather than allowing an edit that silently breaks the running total.
 Not a documented CLI operation — invoked by the installed `assets/statusline.mjs`
 on every Claude Code statusline render, via `spawnSync("cc-daily-usage --statusline")`.
 Runs `runStatuslineHidden()` in `cli.ts`: resolves the active account, runs
-rollover/capture/reconcile (see `docs/calculations.md`), writes state back, and
+rollover/ledger/capture (see `docs/calculations.md`), writes state back, and
 prints one JSON line (`StatuslineJson`) to stdout for `statusline.mjs` to render.
 
 ## `assets/statusline.mjs` segment rendering
@@ -66,7 +66,7 @@ field hides just that segment, never breaks the whole line:
    or cached `%`, or placeholder `⏱ —/5h —/7d` before the first fetch. Hidden
    on enterprise dollar-budget accounts.
 8. cc-daily-usage today segment — enterprise only. Laboral days:
-   `$today/$avgPerDay (pct)`. Non-laboral: `$today` only. (day0 / real / pace
+   `$today/$avgPerDay (pct)`. Non-laboral: `$today` only. (day-1 max / real / pace
    labels live in `cc-daily-usage calendar`, not the CLI statusline.)
 9. cc-daily-usage `$month/$monthlyCap` — enterprise only (`hasSpendCap !== false`).
 10. `⚠ run: cc-daily-usage init` nudge instead of the `$` segments, the first

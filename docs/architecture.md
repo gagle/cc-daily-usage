@@ -33,11 +33,10 @@ extra-usage credit reconciliation.
   copy-on-write style would just add allocation and diffing work for no
   benefit, since there's only ever one writer per account and no concurrent
   readers to protect against.
-- **`avgPerDay`/`safeMonthTotal` are frozen once per UTC day, not live.**
-  Recomputing on every render would make the statusline's "$/day budget"
-  number jitter as `monthlySpent` changes within the same day — freezing at
-  day-start keeps it a stable target to spend against, at the cost of not
-  reflecting same-day catch-up until midnight UTC. See `docs/calculations.md`.
+- **`avgPerDay`/`safeMonthTotal` are derived, not stored.**
+  `computeAvgPerDay` uses only the days before today, so the value is stable
+  through the UTC day without a frozen copy, and it follows a `monthlyCap`
+  change at once. See `docs/calculations.md`.
 - **`hasSpendCap` starts `undefined` and self-heals, instead of requiring
   explicit config.** It gates this tool's fabricated dollar monthlyCap
   budget only. Seat-window `rate_limits` (5h/7d) are separate — Team and
@@ -76,7 +75,8 @@ Claude Code hook (stdin JSON)
          -> runStatuslineHidden() in cli.ts
               -> resolveActiveAccount() (account.ts) -> accountKey()
               -> reads ~/.config/cc-daily-usage/accounts/<key>/{config,usage}.json
-              -> rolloverIfNeeded(), captureSessionCost(), reconcileFromExtraUsageSnapshot() (calc.ts)
+              -> rolloverIfNeeded(), getCachedExtraUsage(), captureSessionCost(), applyLedgerReading() (calc.ts)
+              -> dollar-cap account + ledger: monthlyCap synced from extra_usage.monthly_limit
               -> writes usage.json back
               -> prints one JSON line to stdout
   <- statusline.mjs renders the ANSI line (bar, cost, rate limits, cc-daily-usage segments)
@@ -133,7 +133,7 @@ Seat windows (`rate_limits` 5h/7d) still arrive on the hook for subscription sea
 but the **statusline display** splits by `hasSpendCap`: Pro/Max show `⏱` (+ `🎫`
 when usage credits exist); enterprise shows `$` self-budget only (no `⏱`, no `🎫`).
 `$today` is omitted on non-laboral days; off-day spend still updates `monthlySpent`
-and refreshes frozen pace — see `docs/calculations.md`.
+and lowers the next laboral day's max — see `docs/calculations.md`.
 
 ## Security model
 

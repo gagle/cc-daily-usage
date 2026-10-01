@@ -15,8 +15,8 @@ standalone).
 
 1. Read `docs/calculations.md` first — it has every current formula
    verbatim. Confirm the change doesn't silently break an assumption another
-   function relies on (e.g. `computeToday` depends on `avgPerDay` being
-   frozen, not live).
+   function relies on (e.g. `computeToday` depends on `computeAvgPerDay`
+   being derived from the days before today).
 2. Change `calc.ts`. Keep the in-place-mutation style — don't switch a
    function to return-only.
 3. Update `calc.spec.ts` in the same change. Coverage thresholds are 100%
