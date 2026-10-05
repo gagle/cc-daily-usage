@@ -108,6 +108,12 @@ A reading below the baseline means the ledger reset, so the baseline drops to 0.
 Assumes the ledger resets on the UTC calendar month. If its cycle differs the budget
 month is wrong (`# ponytail` note in `calc.ts`).
 
+Reconciliation: the ledger is the truth. If this month's frozen `days` before today sum
+to more than the new `monthlySpent`, they were over-counted (phantom session spend) and
+would pin `todayUsage` at 0. They are scaled by `monthlySpent / frozenSum`. Other months
+are untouched. The proportional split is a guess at which days were inflated
+(`# ponytail` note in `calc.ts`).
+
 ## `colorForPct`
 
 5-bucket color thresholds used for both the today and month usage bars:

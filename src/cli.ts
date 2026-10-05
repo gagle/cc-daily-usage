@@ -153,7 +153,7 @@ async function runStatuslineHidden(): Promise<number> {
   // lastSeenCost baseline still advances even when accumulateSessions is false.
   captureSessionCost(usage, sessionId, currentCost, now, accumulateSessions);
   if (loadedConfig.hasSpendCap === true && extraUsage !== null) {
-    applyLedgerReading(usage, extraUsage.usedCredits);
+    applyLedgerReading(usage, extraUsage.usedCredits, now);
     // Anthropic's monthly_limit is the source of truth for the cap — a manual edit would be overwritten here.
     if (extraUsage.monthlyLimit > 0 && extraUsage.monthlyLimit !== loadedConfig.monthlyCap) {
       loadedConfig = { ...loadedConfig, monthlyCap: extraUsage.monthlyLimit };

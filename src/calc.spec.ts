@@ -204,23 +204,43 @@ describe("rolloverIfNeeded", () => {
 describe("applyLedgerReading", () => {
   it("sets monthlySpent to the reading when there is no baseline", () => {
     const usage = makeUsage();
-    applyLedgerReading(usage, 120.5);
+    applyLedgerReading(usage, 120.5, new Date("2026-09-15T00:00:00.000Z"));
     expect(usage.monthlySpent).toBe(120.5);
     expect(usage.ledgerBaseline).toBe(0);
   });
 
   it("subtracts the baseline when the ledger did not reset", () => {
     const usage = makeUsage({ ledgerBaseline: 777 });
-    applyLedgerReading(usage, 780);
+    applyLedgerReading(usage, 780, new Date("2026-09-15T00:00:00.000Z"));
     expect(usage.monthlySpent).toBe(3);
     expect(usage.ledgerBaseline).toBe(777);
   });
 
   it("drops the baseline when the reading falls below it (ledger reset)", () => {
     const usage = makeUsage({ ledgerBaseline: 777 });
-    applyLedgerReading(usage, 5);
+    applyLedgerReading(usage, 5, new Date("2026-09-15T00:00:00.000Z"));
     expect(usage.monthlySpent).toBe(5);
     expect(usage.ledgerBaseline).toBe(0);
+  });
+
+  it("scales this month's frozen days down when the ledger is below their sum, leaving other months", () => {
+    const now = new Date("2026-09-03T10:00:00.000Z");
+    const usage = makeUsage({
+      days: { "2026-08-31": 500, "2026-09-01": 40, "2026-09-02": 60 },
+    });
+    applyLedgerReading(usage, 50, now);
+    expect(usage.days["2026-09-01"]).toBeCloseTo(20);
+    expect(usage.days["2026-09-02"]).toBeCloseTo(30);
+    expect(usage.days["2026-08-31"]).toBe(500);
+    expect(computeToday(usage, makeConfig(), now).todayUsage).toBeCloseTo(0);
+    applyLedgerReading(usage, 55, now);
+    expect(computeToday(usage, makeConfig(), now).todayUsage).toBeCloseTo(5);
+  });
+
+  it("keeps frozen days when the ledger is at or above their sum", () => {
+    const usage = makeUsage({ days: { "2026-09-01": 40 } });
+    applyLedgerReading(usage, 50, new Date("2026-09-03T10:00:00.000Z"));
+    expect(usage.days).toEqual({ "2026-09-01": 40 });
   });
 });
 

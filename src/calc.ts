@@ -118,10 +118,30 @@ export function rolloverIfNeeded(usage: UsageState, nowUtc: Date): UsageState {
  * # ponytail: assumes the ledger resets on the UTC calendar month; if its cycle differs the budget month is
  * wrong — fix by moving the month edge to the observed reset date.
  */
-export function applyLedgerReading(usage: UsageState, usedCredits: number): UsageState {
+export function applyLedgerReading(
+  usage: UsageState,
+  usedCredits: number,
+  nowUtc: Date,
+): UsageState {
   const baseline = usedCredits < (usage.ledgerBaseline ?? 0) ? 0 : (usage.ledgerBaseline ?? 0);
   usage.ledgerBaseline = baseline;
   usage.monthlySpent = usedCredits - baseline;
+
+  // The ledger is the truth: frozen days summing above it were over-counted (phantom session spend), and
+  // would pin todayUsage at 0 until the ledger caught up. Scale them down proportionally to fit.
+  // # ponytail: proportional split is a guess at which days were inflated; exact fix needs a per-day ledger reading.
+  const today = utcDateString(nowUtc);
+  const frozenSum = sumDaysBeforeInMonth(usage, today);
+  if (frozenSum > usage.monthlySpent) {
+    const factor = usage.monthlySpent / frozenSum;
+    const monthPrefix = today.slice(0, 7);
+    usage.days = Object.fromEntries(
+      Object.entries(usage.days).map(([day, amount]) => [
+        day,
+        day.startsWith(monthPrefix) && day < today ? amount * factor : amount,
+      ]),
+    );
+  }
   return usage;
 }
 
