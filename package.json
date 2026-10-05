@@ -1,6 +1,6 @@
 {
   "name": "cc-daily-usage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Keep Claude Code spend predictable: daily/monthly budget tracking, a live statusline, and spend reports for pay-as-you-go teams.",
   "repository": {
     "type": "git",
