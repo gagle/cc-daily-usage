@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -81,6 +81,7 @@ describe("statusline-shared", () => {
     expect(settings.statusLine).toEqual({
       type: "command",
       command: `node ${JSON.stringify(STATUSLINE_FILE)}`,
+      refreshInterval: 30,
     });
   });
 
@@ -147,5 +148,93 @@ describe("defaultConfirm", () => {
     const { defaultConfirm } = await import("./statusline-shared.js");
     await expect(defaultConfirm("Proceed?")).resolves.toBe(expected);
     expect(close).toHaveBeenCalled();
+  });
+
+  describe("refresh interval, prompt gate hook, cache TTL", () => {
+    const readSettings = (file: string): Record<string, unknown> =>
+      JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+
+    it("syncRefreshInterval toggles only our own 30s/1s values, writing only on change", async () => {
+      const { ensureSettingsStatusLine, syncRefreshInterval, SETTINGS_FILE } = await freshModule();
+      syncRefreshInterval(1); // no statusLine of ours yet → nothing
+      expect(existsSync(SETTINGS_FILE)).toBe(false);
+      ensureSettingsStatusLine();
+      syncRefreshInterval(1);
+      expect(
+        (readSettings(SETTINGS_FILE).statusLine as { refreshInterval: number }).refreshInterval,
+      ).toBe(1);
+      syncRefreshInterval(1);
+      syncRefreshInterval(30);
+      expect(
+        (readSettings(SETTINGS_FILE).statusLine as { refreshInterval: number }).refreshInterval,
+      ).toBe(30);
+      const settings = readSettings(SETTINGS_FILE);
+      writeFileSync(
+        SETTINGS_FILE,
+        JSON.stringify({
+          ...settings,
+          statusLine: { ...(settings.statusLine as object), refreshInterval: 7 },
+        }),
+      );
+      syncRefreshInterval(1);
+      expect(
+        (readSettings(SETTINGS_FILE).statusLine as { refreshInterval: number }).refreshInterval,
+      ).toBe(7);
+    });
+
+    it("ensureManagedHooks adds, re-points and removes only our hooks", async () => {
+      const { ensureManagedHooks, hookCommand, SETTINGS_FILE } = await freshModule();
+      const theirs = { hooks: [{ type: "command", command: "their-hook" }] };
+      const bare = { matcher: "" }; // a group with no hooks array is kept as is
+      writeFileSync(
+        SETTINGS_FILE,
+        JSON.stringify({ hooks: { UserPromptSubmit: [theirs, bare], Stop: [] } }),
+      );
+      ensureManagedHooks("/a/bin.js");
+      ensureManagedHooks("/b/bin.js");
+      let hooks = readSettings(SETTINGS_FILE).hooks as Record<string, Array<unknown>>;
+      expect(hooks.UserPromptSubmit).toEqual([
+        theirs,
+        bare,
+        {
+          hooks: [
+            { type: "command", command: hookCommand("/b/bin.js", "--prompt-gate"), timeout: 10 },
+          ],
+        },
+      ]);
+      expect(hooks.PreModelSwitch).toEqual([
+        {
+          hooks: [
+            { type: "command", command: hookCommand("/b/bin.js", "--model-switch"), timeout: 10 },
+          ],
+        },
+      ]);
+      ensureManagedHooks("/b/bin.js"); // unchanged → no write
+      ensureManagedHooks(null);
+      hooks = readSettings(SETTINGS_FILE).hooks as Record<string, Array<unknown>>;
+      expect(hooks.UserPromptSubmit).toEqual([theirs, bare]);
+      expect(hooks.PreModelSwitch).toBeUndefined();
+    });
+
+    it("removing our only hooks drops empty hook keys", async () => {
+      const { ensureManagedHooks, SETTINGS_FILE } = await freshModule();
+      writeFileSync(SETTINGS_FILE, "{}");
+      ensureManagedHooks("/a/bin.js");
+      ensureManagedHooks(null);
+      expect(readSettings(SETTINGS_FILE).hooks).toBeUndefined();
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ hooks: { Stop: [{ hooks: [] }] } }));
+      ensureManagedHooks(null);
+      expect(readSettings(SETTINGS_FILE).hooks).toEqual({ Stop: [{ hooks: [] }] });
+    });
+
+    it("promptCacheTtl reads and writes settings.json", async () => {
+      const { promptCacheTtl, setPromptCacheTtl, SETTINGS_FILE } = await freshModule();
+      expect(promptCacheTtl()).toBeUndefined();
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ keep: true, promptCacheTtl: 5 }));
+      expect(promptCacheTtl()).toBeUndefined();
+      setPromptCacheTtl("1h");
+      expect(promptCacheTtl()).toBe("1h");
+      expect(readSettings(SETTINGS_FILE).keep).toBe(true);
+    });
   });
 });

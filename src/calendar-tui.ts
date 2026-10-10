@@ -1,18 +1,23 @@
-import { Box, render, Text, useApp, useInput } from "ink";
-import React, { useEffect, useState } from "react";
-
 import type { Account } from "./account.js";
-import { accountKey, readOverageCreditGrantCache, resolveActiveAccountSync } from "./account.js";
+import { accountKey, readOverageCreditGrantCache } from "./account.js";
 import {
+  applyLedgerReading,
   colorForPct,
   computeToday,
   getLaboralDays,
   isLaboralDay,
   rolloverIfNeeded,
 } from "./calc.js";
-import { loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
+import { daysInMonth, localDateKey, localYearMonth, utcPeriod } from "./clock.js";
+import { loadApiCache, loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
 import type { ComputedUsage } from "./interfaces/calc.interface.js";
-import type { Config, UsageState } from "./interfaces/config.interface.js";
+import type { ApiCache, Config, UsageState } from "./interfaces/config.interface.js";
+import { requestApiRefresh } from "./refresh.js";
+
+// A dependency-free terminal UI: pure model → string rendering, a pure key reducer, and a thin raw-mode
+// loop. No React/Ink: the first frame paints at Node's own startup speed.
+
+export { daysInMonth };
 
 const MONTH_NAMES = [
   "January",
@@ -29,6 +34,15 @@ const MONTH_NAMES = [
   "December",
 ];
 
+const POLL_MS = 2000;
+const CELL_WIDTH = 9; // two-line cell: day on top, $amount below
+
+function monthName(month: number): string {
+  // month is always 1-12 (cursor/clock derived); noUncheckedIndexedAccess still wants the fallback.
+  /* v8 ignore next */
+  return MONTH_NAMES[month - 1] ?? "?";
+}
+
 function money(amount: number): string {
   return `$${amount.toFixed(2)}`;
 }
@@ -37,11 +51,7 @@ function pctLabel(fraction: number): string {
   return `${String(Math.round(fraction * 100))}%`;
 }
 
-export function daysInMonth(year: number, month: number): number {
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
-}
-
-/** 0 = Monday .. 6 = Sunday — same convention assets/init-calendar.html uses. */
+/** 0 = Monday .. 6 = Sunday — the calendar grid's column order. */
 export function mondayFirstWeekday(year: number, month: number, day: number): number {
   const jsDay = new Date(Date.UTC(year, month - 1, day)).getUTCDay(); // 0 = Sunday
   return (jsDay + 6) % 7;
@@ -56,34 +66,13 @@ export interface MonthKey {
   readonly month: number;
 }
 
-/** Every year/month with configured laboral days or recorded spend, plus always the current month — so
- * there's always a grid to toggle days into existence on, even from a totally empty config. Kept for
- * tests / callers; the live calendar focuses one month and uses yearsAvailable for year switching. */
-export function monthsToShow(
-  config: Config,
-  usage: UsageState,
-  now: Date,
-): ReadonlyArray<MonthKey> {
-  const keys = new Set<string>();
-  for (const [year, months] of Object.entries(config.laboralDays)) {
-    for (const month of Object.keys(months)) keys.add(`${year}-${month}`);
-  }
-  for (const iso of Object.keys(usage.days)) {
-    keys.add(`${iso.slice(0, 4)}-${String(Number(iso.slice(5, 7)))}`);
-  }
-  keys.add(`${String(now.getUTCFullYear())}-${String(now.getUTCMonth() + 1)}`);
-  return Array.from(keys)
-    .map((key): MonthKey => {
-      const [year, month] = key.split("-").map(Number);
-      // Every key was built above as `${year}-${month}` from numeric sources, so both parts always parse —
-      // noUncheckedIndexedAccess just can't see that through the destructure.
-      /* v8 ignore next */
-      return { year: year ?? 0, month: month ?? 0 };
-    })
-    .sort((a, b) => a.year - b.year || a.month - b.month);
+export interface Cursor {
+  readonly year: number;
+  readonly month: number;
+  readonly day: number;
 }
 
-/** Sorted unique years that have laboral config, recorded spend, or are the current UTC year. */
+/** Sorted unique years that have laboral config, recorded spend, or are the current local year. */
 export function yearsAvailable(
   config: Config,
   usage: UsageState,
@@ -92,21 +81,21 @@ export function yearsAvailable(
   const years = new Set<number>();
   for (const year of Object.keys(config.laboralDays)) years.add(Number(year));
   for (const iso of Object.keys(usage.days)) years.add(Number(iso.slice(0, 4)));
-  years.add(now.getUTCFullYear());
+  years.add(now.getFullYear());
   return Array.from(years)
     .filter((year) => Number.isFinite(year))
     .sort((a, b) => a - b);
 }
 
-/** Move the cursor by whole calendar days (UTC), crossing month/year boundaries. */
+/** Move the cursor by whole calendar days, crossing month/year boundaries (pure date math). */
 export function moveCursor(cursor: Cursor, deltaDays: number): Cursor {
   const date = new Date(Date.UTC(cursor.year, cursor.month - 1, cursor.day));
   date.setUTCDate(date.getUTCDate() + deltaDays);
-  return {
-    year: date.getUTCFullYear(),
-    month: date.getUTCMonth() + 1,
-    day: date.getUTCDate(),
-  };
+  return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
+}
+
+function clampDay(day: number, year: number, month: number): number {
+  return Math.max(1, Math.min(daysInMonth(year, month), day));
 }
 
 export interface CalendarSnapshot {
@@ -114,651 +103,664 @@ export interface CalendarSnapshot {
   readonly usage: UsageState;
   readonly computed: ComputedUsage;
   readonly account: Account | null;
+  readonly capFromAnthropic: boolean;
+  readonly now: Date;
 }
 
-/** Read → rollover (in-memory only, matching the former usage-tui's "never persist on read" decision — the
- * statusline hook is what actually persists usage.json) → compute. Account resolution is sync-only here (no
- * per-session token-override profile fetch — see account.ts) since this feeds Ink's synchronous useState
- * initializer. */
-export function computeSnapshot(): CalendarSnapshot {
-  const account = resolveActiveAccountSync();
+/**
+ * Read → rollover + ledger (in memory, the same steps a statusline render takes minus session capture) →
+ * compute. The ledger's monthly_limit replaces the local cap here too, so an admin change shows up even
+ * when no Claude Code session is running (the poll keeps api-cache.json fresh).
+ */
+export function computeSnapshot(account: Account | null, now: Date = new Date()): CalendarSnapshot {
   const key = accountKey(account);
-  const config = loadConfig(key);
-  const usage = loadUsage(key);
-  const now = new Date();
-  rolloverIfNeeded(usage, now);
-  const computed = computeToday(usage, config, now);
-  return { config, usage, computed, account };
+  let config = loadConfig(key);
+  const usage = loadUsage(key, now);
+  const api: ApiCache | null = loadApiCache(key);
+  const extra = api?.extraUsage ?? null;
+  rolloverIfNeeded(usage, now, extra?.usedCredits ?? null);
+  let capFromAnthropic = false;
+  if (config.hasSpendCap === true && extra !== null) {
+    applyLedgerReading(usage, extra.usedCredits, now);
+    if (extra.monthlyLimit > 0) {
+      capFromAnthropic = true;
+      config = { ...config, monthlyCap: extra.monthlyLimit };
+    }
+  }
+  return {
+    config,
+    usage,
+    computed: computeToday(usage, config, now),
+    account,
+    capFromAnthropic,
+    now,
+  };
 }
 
-/** "YYYY-MM" prefix for a MonthKey — used to scope a month's own usage.days entries out of the rest. */
-function monthPrefixOf(m: MonthKey): string {
-  return `${String(m.year)}-${String(m.month).padStart(2, "0")}`;
-}
-
-export interface Cursor {
-  readonly year: number;
-  readonly month: number;
-  readonly day: number;
-}
-
-function clampDay(day: number, year: number, month: number): number {
-  return Math.max(1, Math.min(daysInMonth(year, month), day));
-}
-
-/** Manual calendar day-edit session (plan item: let the user directly type historical per-day $ amounts).
- * `draft` starts as a copy of the edited month's existing usage.days (plus, for the current in-progress
- * month, a synthetic today entry) and only ever grows/overwrites from there — never loses an untouched day. */
-interface DayEditSession {
+/** Manual day-edit session: redistribute recorded $ across the PAST days of one month. Today and future
+ * days are live (the ledger/capture owns them), so they are never in the draft. */
+export interface DayEditSession {
   readonly month: MonthKey;
   readonly draft: Readonly<Record<string, number>>;
   readonly buffer: string;
   readonly warning: string | null;
 }
 
+export interface CalendarModel {
+  readonly snapshot: CalendarSnapshot;
+  readonly cursor: Cursor;
+  readonly capEdit: string | null;
+  readonly dayEdit: DayEditSession | null;
+  readonly notice: string | null; // one-shot message under the grid, cleared by the next key
+}
+
+export function initialModel(snapshot: CalendarSnapshot): CalendarModel {
+  const { now } = snapshot;
+  return {
+    snapshot,
+    cursor: { year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate() },
+    capEdit: null,
+    dayEdit: null,
+    notice: null,
+  };
+}
+
+function monthPrefixOf(m: MonthKey): string {
+  return `${String(m.year)}-${String(m.month).padStart(2, "0")}`;
+}
+
 function sumValues(values: Readonly<Record<string, number>>): number {
   return Object.values(values).reduce((total, amount) => total + amount, 0);
 }
 
-const POLL_MS = 2000;
-
-function renderStatsHeader(
-  config: Config,
-  computed: ComputedUsage,
-  cursor: Cursor,
-  now: Date,
-  capFromAnthropic: boolean,
-): React.ReactElement {
-  const showTodayPace =
-    config.hasSpendCap !== false &&
-    isLaboralDay(config, now) &&
-    computed.avgPerDay !== null &&
-    computed.todayUsedPct !== null &&
-    computed.paceLabel !== null;
-  const showTodayUsageOnly = config.hasSpendCap !== false && !isLaboralDay(config, now);
-  // cursor.month is always 1-12.
-  /* v8 ignore next */
-  const monthName = MONTH_NAMES[cursor.month - 1] ?? "?";
-  return React.createElement(
-    Box,
-    { flexDirection: "column", marginBottom: 1 },
-    React.createElement(
-      Text,
-      { bold: true },
-      `Year ${String(cursor.year)}  ([/] or S-←/→ year)   ${monthName}  (←→/Tab month)`,
-    ),
-    showTodayPace
-      ? React.createElement(
-          Text,
-          { color: colorForPct(computed.todayUsedPct) },
-          `Today:      ${money(computed.todayUsage)} / ${money(computed.avgPerDay)}  (${pctLabel(computed.todayUsedPct)})  ·  ${computed.paceLabel}`,
-        )
-      : showTodayUsageOnly
-        ? React.createElement(Text, { dimColor: true }, `Today:      ${money(computed.todayUsage)}`)
-        : null,
-    config.hasSpendCap === false
-      ? React.createElement(
-          Text,
-          { dimColor: true },
-          `No spend cap on this plan (${config.planType ?? "subscription"}) — see the ⏱ 5h/7d segment in Claude Code's own statusline instead.`,
-        )
-      : React.createElement(
-          Text,
-          { color: colorForPct(computed.monthUsedPct) },
-          `This month: ${money(computed.monthlySpent)} / ${money(computed.monthlyCap)}  (${pctLabel(computed.monthUsedPct)})${capFromAnthropic ? "  cap from Anthropic" : ""}`,
-        ),
-    config.hasSpendCap !== false && computed.monthDay0AvgPerDay !== null
-      ? React.createElement(
-          Text,
-          { dimColor: true },
-          `Day-1 max:  ${money(computed.monthDay0AvgPerDay)}  (${String(config.monthlyCap)} / ${String(getLaboralDays(config, now.getUTCFullYear(), now.getUTCMonth() + 1).length)})`,
-        )
-      : null,
-    config.hasSpendCap !== false && computed.realAvgPerDay !== null
-      ? React.createElement(
-          Text,
-          { dimColor: true },
-          `Real avg:   ${money(computed.realAvgPerDay)}  / laboral day so far`,
-        )
-      : null,
-  );
+function todayKey(model: CalendarModel): string {
+  return localDateKey(model.snapshot.now);
 }
 
-function renderWarningBanner(config: Config, now: Date): React.ReactElement | null {
-  if (config.hasSpendCap === false) return null;
-  const year = now.getUTCFullYear();
-  const month = now.getUTCMonth() + 1;
-  const configured = config.laboralDays[String(year)]?.[String(month)] ?? [];
-  if (configured.length > 0) return null;
-  // month is always 1-12 here (derived from getUTCMonth() + 1), so the index is always in range —
-  // noUncheckedIndexedAccess still requires the fallback.
-  /* v8 ignore next */
-  const monthName = MONTH_NAMES[month - 1] ?? "?";
-  return React.createElement(
-    Text,
-    { color: "black", backgroundColor: "yellow" },
-    ` ⚠ No laboral days configured for ${monthName} ${String(year)} — use the arrows + Space below to add some. `,
-  );
+function isPastDay(model: CalendarModel, year: number, month: number, day: number): boolean {
+  return isoDate(year, month, day) < todayKey(model);
 }
 
-function renderDayEditBanner(
-  dayEdit: DayEditSession | null,
-  cursor: Cursor,
-  poolForMonth: (month: MonthKey) => number,
-  draftWithBufferCommitted: (session: DayEditSession) => Readonly<Record<string, number>>,
-): React.ReactElement | null {
-  if (dayEdit === null) return null;
-  // dayEdit.month.month always comes from cursor.month (always 1-12) — same always-in-range indexing as
-  // renderWarningBanner's monthName.
-  /* v8 ignore next */
-  const monthName = MONTH_NAMES[dayEdit.month.month - 1] ?? "?";
-  const draft = draftWithBufferCommitted(dayEdit);
-  const pool = poolForMonth(dayEdit.month);
-  return React.createElement(
-    Box,
-    { flexDirection: "column" },
-    React.createElement(
-      Text,
-      { color: "cyan" },
-      `Redistributing ${monthName} ${String(dayEdit.month.year)} pool ${money(pool)} across days ` +
-        `(now on day ${String(cursor.day)}). Allocated ${money(sumValues(draft))} of ${money(pool)}. ` +
-        `Type digits on the cell (auto $). Enter commits cell, S saves, Esc cancels.`,
-    ),
-    React.createElement(
-      Text,
-      { dimColor: true },
-      "Tip: put leftover on today to keep history simple and start clean next laboral day.",
-    ),
-    dayEdit.warning !== null
-      ? React.createElement(
-          Text,
-          { color: "black", backgroundColor: "red" },
-          ` ${dayEdit.warning} `,
-        )
-      : null,
-  );
+/** The recorded past days of `month` (what a day edit may redistribute). */
+function pastDaysOf(model: CalendarModel, month: MonthKey): Record<string, number> {
+  const prefix = monthPrefixOf(month);
+  const today = todayKey(model);
+  const days: Record<string, number> = {};
+  for (const [iso, amount] of Object.entries(model.snapshot.usage.days)) {
+    if (iso.startsWith(prefix) && iso < today) days[iso] = amount;
+  }
+  return days;
 }
 
-/** One-line hint under the calendar: what Enter/Space or $ edit will do for the focused day. */
-function renderContextHint(
-  config: Config,
-  cursor: Cursor,
-  dayEdit: DayEditSession | null,
-  poolForMonth: (month: MonthKey) => number,
-): React.ReactElement | null {
-  if (config.hasSpendCap === false) return null;
-  if (dayEdit !== null) {
-    const pool = poolForMonth(dayEdit.month);
-    return React.createElement(
-      Box,
-      { flexDirection: "column", marginTop: 1 },
-      React.createElement(
-        Text,
-        { color: "yellow" },
-        `Editing day ${String(cursor.day)} $ (month pool ${money(pool)}) · type digits · Enter: commit cell · S: save if sum matches · Esc: cancel`,
+/** The fixed total a month's edited past days must sum to: what they sum to now. Redistributing never
+ * changes the month total, so periodFrozen and the ledger stay consistent. */
+export function poolForMonth(model: CalendarModel, month: MonthKey): number {
+  return sumValues(pastDaysOf(model, month));
+}
+
+function draftWithBufferCommitted(model: CalendarModel, session: DayEditSession) {
+  if (session.buffer === "") return session.draft;
+  const parsed = Number(session.buffer);
+  if (!Number.isFinite(parsed) || parsed < 0) return session.draft;
+  // A buffer only ever exists on a past day: typing on a live day is refused, arrows commit first.
+  const { year, month, day } = model.cursor;
+  return { ...session.draft, [isoDate(year, month, day)]: parsed };
+}
+
+export type Key =
+  | { readonly kind: "up" | "down" | "left" | "right" }
+  | { readonly kind: "shift-left" | "shift-right" }
+  | { readonly kind: "tab" | "shift-tab" | "enter" | "escape" | "backspace" | "ctrl-c" }
+  | { readonly kind: "char"; readonly char: string };
+
+/** Splits one stdin chunk (raw mode) into key events. Unknown escape sequences are dropped. */
+export function parseKeys(data: string): ReadonlyArray<Key> {
+  const keys: Array<Key> = [];
+  const sequences: ReadonlyArray<readonly [string, Key]> = [
+    ["\x1b[1;2C", { kind: "shift-right" }],
+    ["\x1b[1;2D", { kind: "shift-left" }],
+    ["\x1b[A", { kind: "up" }],
+    ["\x1b[B", { kind: "down" }],
+    ["\x1b[C", { kind: "right" }],
+    ["\x1b[D", { kind: "left" }],
+    ["\x1bOA", { kind: "up" }],
+    ["\x1bOB", { kind: "down" }],
+    ["\x1bOC", { kind: "right" }],
+    ["\x1bOD", { kind: "left" }],
+    ["\x1b[Z", { kind: "shift-tab" }],
+  ];
+  let i = 0;
+  outer: while (i < data.length) {
+    for (const [sequence, key] of sequences) {
+      if (data.startsWith(sequence, i)) {
+        keys.push(key);
+        i += sequence.length;
+        continue outer;
+      }
+    }
+    const char = data.charAt(i);
+    if (char === "\x1b") {
+      // A lone ESC is Escape; ESC + '[' + params + final byte is an unknown sequence — skip it whole. So is
+      // a mouse event: SGR `ESC [ < b;x;y M|m`, or legacy `ESC [ M` + 3 bytes (settings turns reporting on).
+      // eslint-disable-next-line no-control-regex -- matching terminal escape sequences is the point
+      const unknown = /^\x1b\[(?:<[0-9;]*[Mm]|M[\s\S]{3}|[0-9;]*[A-Za-z~])/.exec(data.slice(i));
+      if (unknown) {
+        i += unknown[0].length;
+        continue;
+      }
+      keys.push({ kind: "escape" });
+    } else if (char === "\t") keys.push({ kind: "tab" });
+    else if (char === "\r" || char === "\n") keys.push({ kind: "enter" });
+    else if (char === "\x7f" || char === "\b") keys.push({ kind: "backspace" });
+    else if (char === "\x03") keys.push({ kind: "ctrl-c" });
+    else if (char >= " ") keys.push({ kind: "char", char });
+    i += 1;
+  }
+  return keys;
+}
+
+/** Side effects the reducer may request; the IO loop (or a test) supplies them. */
+export interface CalendarEffects {
+  saveConfig(config: Config): void;
+  saveUsage(usage: UsageState): void;
+  snapshot(): CalendarSnapshot;
+}
+
+function arrowDelta(kind: Key["kind"]): number | null {
+  if (kind === "left") return -1;
+  if (kind === "right") return 1;
+  if (kind === "up") return -7;
+  if (kind === "down") return 7;
+  return null;
+}
+
+function reduceDayEdit(
+  model: CalendarModel,
+  session: DayEditSession,
+  key: Key,
+  effects: CalendarEffects,
+): CalendarModel {
+  if (key.kind === "escape") return { ...model, dayEdit: null };
+  if (key.kind === "char" && key.char === "S") {
+    const draft = draftWithBufferCommitted(model, session);
+    const pool = poolForMonth(model, session.month);
+    const total = sumValues(draft);
+    if (Math.abs(total - pool) > 0.005) {
+      return {
+        ...model,
+        dayEdit: {
+          ...session,
+          buffer: "",
+          warning: `Adds up to ${money(total)}, needs to equal ${money(pool)} — not saved`,
+        },
+      };
+    }
+    const prefix = monthPrefixOf(session.month);
+    const today = todayKey(model);
+    const kept = Object.fromEntries(
+      Object.entries(model.snapshot.usage.days).filter(
+        ([iso]) => !iso.startsWith(prefix) || iso >= today,
+      ),
+    );
+    effects.saveUsage({ ...model.snapshot.usage, days: { ...kept, ...draft } });
+    return { ...model, dayEdit: null, snapshot: effects.snapshot(), notice: "Saved." };
+  }
+  if (key.kind === "enter") {
+    return {
+      ...model,
+      dayEdit: {
+        ...session,
+        draft: draftWithBufferCommitted(model, session),
+        buffer: "",
+        warning: null,
+      },
+    };
+  }
+  if (key.kind === "backspace") {
+    return { ...model, dayEdit: { ...session, buffer: session.buffer.slice(0, -1) } };
+  }
+  if (key.kind === "char" && /^[0-9.]$/.test(key.char)) {
+    const { year, month, day } = model.cursor;
+    if (!isPastDay(model, year, month, day)) {
+      return {
+        ...model,
+        dayEdit: {
+          ...session,
+          warning: "Today and future days are live — only past days are editable",
+        },
+      };
+    }
+    return { ...model, dayEdit: { ...session, buffer: session.buffer + key.char, warning: null } };
+  }
+  const delta = arrowDelta(key.kind);
+  if (delta !== null) {
+    const committed = { ...session, draft: draftWithBufferCommitted(model, session), buffer: "" };
+    const next = moveCursor(model.cursor, delta);
+    // Stay inside the month being edited — cross-month browsing is for non-edit mode.
+    const cursor =
+      next.year === session.month.year && next.month === session.month.month ? next : model.cursor;
+    return { ...model, cursor, dayEdit: committed };
+  }
+  return model;
+}
+
+function reduceCapEdit(
+  model: CalendarModel,
+  capEdit: string,
+  key: Key,
+  effects: CalendarEffects,
+): CalendarModel {
+  if (key.kind === "escape") return { ...model, capEdit: null };
+  if (key.kind === "enter") {
+    const parsed = Number(capEdit);
+    if (capEdit === "" || !Number.isFinite(parsed) || parsed < 0) {
+      return { ...model, capEdit: null, notice: "Cap not changed — enter a number ≥ 0." };
+    }
+    effects.saveConfig({ ...model.snapshot.config, monthlyCap: parsed });
+    return { ...model, capEdit: null, snapshot: effects.snapshot(), notice: "Cap saved." };
+  }
+  if (key.kind === "backspace") return { ...model, capEdit: capEdit.slice(0, -1) };
+  if (key.kind === "char" && /^[0-9.]$/.test(key.char))
+    return { ...model, capEdit: capEdit + key.char };
+  return model;
+}
+
+function toggleLaboral(model: CalendarModel, effects: CalendarEffects): CalendarModel {
+  const { year, month, day } = model.cursor;
+  if (isPastDay(model, year, month, day)) {
+    return {
+      ...model,
+      notice: `Day ${String(day)} is in the past — its laboral mark is locked (use u to correct $).`,
+    };
+  }
+  const { config } = model.snapshot;
+  const yearKey = String(year);
+  const monthKey = String(month);
+  const existing = config.laboralDays[yearKey]?.[monthKey] ?? [];
+  const next = existing.includes(day)
+    ? existing.filter((d) => d !== day)
+    : [...existing, day].sort((a, b) => a - b);
+  // Save the file's own config: the snapshot's cap may be Anthropic's in-memory value.
+  const onDisk = loadConfig(accountKey(model.snapshot.account));
+  effects.saveConfig({
+    ...onDisk,
+    laboralDays: {
+      ...onDisk.laboralDays,
+      [yearKey]: { ...onDisk.laboralDays[yearKey], [monthKey]: next },
+    },
+  });
+  return { ...model, snapshot: effects.snapshot() };
+}
+
+/** The whole key handler. Returns null to exit. Pure apart from the effects it calls. */
+export function reduceKey(
+  model: CalendarModel,
+  key: Key,
+  effects: CalendarEffects,
+): CalendarModel | null {
+  if (key.kind === "ctrl-c") return null;
+  const base = { ...model, notice: null };
+  if (model.dayEdit !== null) return reduceDayEdit(base, model.dayEdit, key, effects);
+  if (model.capEdit !== null) return reduceCapEdit(base, model.capEdit, key, effects);
+
+  if (key.kind === "escape" || (key.kind === "char" && key.char === "q")) return null;
+  if (key.kind === "char" && key.char === "c") {
+    if (model.snapshot.capFromAnthropic) {
+      return {
+        ...base,
+        notice: "The cap comes from your org's Anthropic spend limit — an admin changes it there.",
+      };
+    }
+    return { ...base, capEdit: String(model.snapshot.config.monthlyCap) };
+  }
+  if (key.kind === "char" && key.char === "u") {
+    const month: MonthKey = { year: model.cursor.year, month: model.cursor.month };
+    const firstOfMonth = isoDate(month.year, month.month, 1);
+    if (firstOfMonth >= todayKey(model)) {
+      return { ...base, notice: "Nothing to edit — this month has no past days yet." };
+    }
+    return {
+      ...base,
+      dayEdit: { month, draft: pastDaysOf(model, month), buffer: "", warning: null },
+    };
+  }
+  if (key.kind === "tab" || key.kind === "shift-tab") {
+    const direction = key.kind === "tab" ? 1 : -1;
+    const { year, day } = model.cursor;
+    let month = model.cursor.month + direction;
+    if (month < 1) month = 12;
+    if (month > 12) month = 1;
+    return { ...base, cursor: { year, month, day: clampDay(day, year, month) } };
+  }
+  const yearStep =
+    key.kind === "shift-left" || (key.kind === "char" && key.char === "[")
+      ? -1
+      : key.kind === "shift-right" || (key.kind === "char" && key.char === "]")
+        ? 1
+        : 0;
+  if (yearStep !== 0) {
+    const years = yearsAvailable(model.snapshot.config, model.snapshot.usage, model.snapshot.now);
+    const { year, month, day } = model.cursor;
+    const index = years.indexOf(year);
+    const nextYear =
+      index === -1 || years.length === 1
+        ? year + yearStep
+        : // index is in range, so the lookup always hits.
+          (years[(index + yearStep + years.length) % years.length] as number);
+    return { ...base, cursor: { year: nextYear, month, day: clampDay(day, nextYear, month) } };
+  }
+  if (key.kind === "enter" || (key.kind === "char" && key.char === " ")) {
+    return toggleLaboral(base, effects);
+  }
+  const delta = arrowDelta(key.kind);
+  if (delta !== null) return { ...base, cursor: moveCursor(model.cursor, delta) };
+  return base;
+}
+
+// ── Rendering ──────────────────────────────────────────────────────────────────────────────────────────
+
+export interface RenderStyle {
+  readonly color: boolean;
+}
+
+function sgr(style: RenderStyle, codes: string, text: string): string {
+  return style.color && codes !== "" ? `\x1b[${codes}m${text}\x1b[0m` : text;
+}
+
+function hexToSgr(hex: string): string {
+  const value = Number.parseInt(hex.slice(1), 16);
+  return `38;2;${String((value >> 16) & 255)};${String((value >> 8) & 255)};${String(value & 255)}`;
+}
+
+function renderStats(model: CalendarModel, style: RenderStyle): Array<string> {
+  const { config, computed, capFromAnthropic, now, usage } = model.snapshot;
+  const { year, month } = model.cursor;
+  const lines = [
+    sgr(style, "1", `Year ${String(year)}  ([/] or S-←/→ year)   ${monthName(month)}  (Tab month)`),
+  ];
+  const laboralToday = isLaboralDay(config, now);
+  if (laboralToday && computed.avgPerDay !== null && computed.todayUsedPct !== null) {
+    lines.push(
+      sgr(
+        style,
+        hexToSgr(colorForPct(computed.todayUsedPct)),
+        `Today:      ${money(computed.todayUsage)} / ${money(computed.avgPerDay)}  (${pctLabel(computed.todayUsedPct)})  ·  ${String(computed.paceLabel)}`,
+      ),
+    );
+  } else if (laboralToday && computed.avgPerDay === 0) {
+    lines.push(
+      sgr(style, hexToSgr("#F8696B"), `Today:      ${money(computed.todayUsage)} / $0.00  (over)`),
+    );
+  } else {
+    lines.push(
+      sgr(
+        style,
+        "2",
+        `Today:      ${money(computed.todayUsage)}${laboralToday ? "" : "  (off day)"}`,
       ),
     );
   }
-  const laboral = (config.laboralDays[String(cursor.year)]?.[String(cursor.month)] ?? []).includes(
-    cursor.day,
-  );
-  return React.createElement(
-    Box,
-    { marginTop: 1 },
-    React.createElement(
-      Text,
-      { color: "yellow" },
-      laboral
-        ? `Day ${String(cursor.day)} · laboral · Enter/Space: unmark laboral (excluded from daily pace)`
-        : `Day ${String(cursor.day)} · off · Enter/Space: mark as laboral (counts in daily pace)`,
+  lines.push(
+    sgr(
+      style,
+      hexToSgr(colorForPct(computed.monthUsedPct)),
+      `This month: ${money(computed.monthlySpent)} / ${money(computed.monthlyCap)}  (${pctLabel(computed.monthUsedPct)})  ${capFromAnthropic ? "cap: Anthropic" : "cap: local"}`,
     ),
   );
+  const period = utcPeriod(now);
+  const laboralCount = getLaboralDays(config, period.year, period.month).length;
+  if (computed.monthDay0AvgPerDay !== null) {
+    lines.push(
+      sgr(
+        style,
+        "2",
+        `Day-1 max:  ${money(computed.monthDay0AvgPerDay)}  (${String(computed.monthlyCap)} / ${String(laboralCount)})`,
+      ),
+    );
+  }
+  if (computed.realAvgPerDay !== null) {
+    lines.push(
+      sgr(style, "2", `Real avg:   ${money(computed.realAvgPerDay)}  / laboral day so far`),
+    );
+  }
+  if (laboralCount > 0 && computed.avgPerDay === null) {
+    lines.push(
+      sgr(style, "2", "No laboral days left this month — remaining budget has nowhere to go."),
+    );
+  }
+  const today = localDateKey(now);
+  const missToday = Object.values(usage.sessions)
+    .filter((session) => localDateKey(new Date(session.lastSeenAt)) === today)
+    .reduce((total, session) => total + (session.cacheMissUsd ?? 0), 0);
+  if (missToday >= 0.01) {
+    lines.push(sgr(style, "2", `Cache re-paid today: ~${money(missToday)}  (prompt-cache misses)`));
+  }
+  return lines;
 }
 
-/** Calendar-only nudge (see plan item 7) — reads Claude Code's own already-fetched overage-credit-
- * grant cache (account.ts's readOverageCreditGrantCache), no new network call. Deliberately not surfaced in
- * assets/statusline.mjs. */
-function renderCreditGrantBanner(account: Account | null): React.ReactElement | null {
+function renderBanners(model: CalendarModel, style: RenderStyle): Array<string> {
+  const lines: Array<string> = [];
+  const { config, account, now } = model.snapshot;
+  const { year, month } = localYearMonth(now);
+  if ((config.laboralDays[String(year)]?.[String(month)] ?? []).length === 0) {
+    lines.push(
+      sgr(
+        style,
+        "30;43",
+        ` ⚠ No laboral days configured for ${monthName(month)} ${String(year)} — use the arrows + Space below to add some. `,
+      ),
+    );
+  }
   const grant = readOverageCreditGrantCache(account?.accountUuid ?? null);
-  if (!grant || !grant.eligible || grant.granted || grant.amount_minor_units === null) return null;
-  return React.createElement(
-    Text,
-    { color: "black", backgroundColor: "green" },
-    ` 🎁 ${money(grant.amount_minor_units / 100)} credit grant available — claim it in Claude Code `,
-  );
+  if (grant && grant.eligible && !grant.granted && grant.amount_minor_units !== null) {
+    lines.push(
+      sgr(
+        style,
+        "30;42",
+        ` 🎁 ${money(grant.amount_minor_units / 100)} credit grant available — claim it in Claude Code `,
+      ),
+    );
+  }
+  if (model.capEdit !== null) {
+    lines.push(sgr(style, "36", `Monthly cap: $${model.capEdit}_ (Enter to save, Esc to cancel)`));
+  }
+  const session = model.dayEdit;
+  if (session !== null) {
+    const pool = poolForMonth(model, session.month);
+    const draft = draftWithBufferCommitted(model, session);
+    lines.push(
+      sgr(
+        style,
+        "36",
+        `Redistributing ${monthName(session.month.month)} ${String(session.month.year)} past days: allocated ${money(sumValues(draft))} of ${money(pool)}. Type digits on a past cell · Enter commits cell · S saves · Esc cancels.`,
+      ),
+    );
+    if (session.warning !== null) lines.push(sgr(style, "30;41", ` ${session.warning} `));
+  }
+  return lines;
 }
 
-const CELL_WIDTH = 9; // two-line cell: day on top, $amount below
-
-function blankDayCell(key: string): React.ReactElement {
-  return React.createElement(
-    Box,
-    { key, flexDirection: "column", width: CELL_WIDTH, marginRight: 1 },
-    React.createElement(Text, null, "".padEnd(CELL_WIDTH, " ")),
-    React.createElement(Text, null, "".padEnd(CELL_WIDTH, " ")),
-  );
-}
-
-function renderDayCell(
+function renderCell(
+  model: CalendarModel,
+  usage: UsageState,
   year: number,
   month: number,
   day: number,
-  config: Config,
-  usage: UsageState,
-  cursor: Cursor,
-  today: string,
-  dayEdit: DayEditSession | null,
-): React.ReactElement {
+  style: RenderStyle,
+): [string, string] {
+  const { config } = model.snapshot;
   const iso = isoDate(year, month, day);
-  const isLaboral = (config.laboralDays[String(year)]?.[String(month)] ?? []).includes(day);
-  const isCursor = cursor.year === year && cursor.month === month && cursor.day === day;
+  const today = todayKey(model);
   const isToday = iso === today;
+  const isPast = iso < today;
+  const isLaboral = (config.laboralDays[String(year)]?.[String(month)] ?? []).includes(day);
+  const isCursor =
+    model.cursor.year === year && model.cursor.month === month && model.cursor.day === day;
+  const editingHere = model.dayEdit !== null && isCursor;
   const amount = usage.days[iso];
-  const editingHere = dayEdit !== null && isCursor;
-  let moneyLine: string;
-  if (editingHere) {
-    // `$` is display chrome — the buffer is digits/`.` only.
-    moneyLine = `$${dayEdit.buffer}_`;
-  } else if (amount === undefined) {
-    moneyLine = "—";
-  } else {
-    moneyLine = money(amount);
-  }
-  const dayColor = isToday ? "cyan" : isLaboral ? "green" : "gray";
-  // No border on the cursor cell — Ink borders change width/height and shift the grid. Inverse text only.
-  return React.createElement(
-    Box,
-    {
-      key: iso,
-      flexDirection: "column",
-      width: CELL_WIDTH,
-      marginRight: 1,
-    },
-    React.createElement(
-      Text,
-      {
-        bold: isToday || isCursor,
-        inverse: isCursor,
-        color: dayColor,
-        dimColor: !isLaboral && amount === undefined && !editingHere && !isCursor,
-      },
-      String(day).padStart(2, " ").padEnd(CELL_WIDTH, " ").slice(0, CELL_WIDTH),
-    ),
-    React.createElement(
-      Text,
-      {
-        inverse: isCursor,
-        color: editingHere ? "cyan" : dayColor,
-        dimColor: amount === undefined && !editingHere && !isCursor,
-      },
-      moneyLine.padEnd(CELL_WIDTH, " ").slice(0, CELL_WIDTH),
-    ),
-  );
+
+  const dayText = `${String(day).padStart(2, " ")}${isToday ? " today" : ""}`;
+  let moneyText: string;
+  if (editingHere) moneyText = `$${model.dayEdit.buffer}_`;
+  else if (isToday) moneyText = `•${money(model.snapshot.computed.todayUsage)}`;
+  else moneyText = amount === undefined ? "—" : money(amount);
+
+  const codes: Array<string> = [];
+  if (isToday) codes.push("1", "4", "36");
+  else if (isPast) codes.push("2", isLaboral ? "32" : "90");
+  else codes.push(isLaboral ? "32" : "90");
+  if (isCursor) codes.push("7");
+  if (editingHere) codes.push("36");
+  const codeText = codes.join(";");
+  return [
+    sgr(style, codeText, dayText.padEnd(CELL_WIDTH).slice(0, CELL_WIDTH)),
+    sgr(style, codeText, moneyText.padEnd(CELL_WIDTH).slice(0, CELL_WIDTH)),
+  ];
 }
 
-function renderMonthCard(
-  year: number,
-  month: number,
-  config: Config,
-  usage: UsageState,
-  cursor: Cursor,
-  today: string,
-  dayEdit: DayEditSession | null,
-): React.ReactElement {
-  const total = daysInMonth(year, month);
-  const leading = mondayFirstWeekday(year, month, 1);
-  // Same always-in-range indexing as renderWarningBanner's monthName.
-  /* v8 ignore next */
-  const monthName = MONTH_NAMES[month - 1] ?? "?";
-  const cells: Array<React.ReactElement> = [];
-  for (let i = 0; i < leading; i++) {
-    cells.push(blankDayCell(`blank-${String(i)}`));
-  }
-  for (let day = 1; day <= total; day++) {
-    cells.push(renderDayCell(year, month, day, config, usage, cursor, today, dayEdit));
-  }
-  const rows: Array<React.ReactElement> = [];
-  for (let i = 0; i < cells.length; i += 7) {
-    rows.push(
-      React.createElement(
-        Box,
-        { key: `row-${String(i)}`, flexDirection: "row" },
-        ...cells.slice(i, i + 7),
-      ),
-    );
-  }
-  // Shrink-wrap to the 7-column grid — without alignSelf, a bordered Box stretches to the terminal width.
-  const gridWidth = 7 * CELL_WIDTH + 7; // cell widths + per-cell marginRight
-  return React.createElement(
-    Box,
-    {
-      key: `${String(year)}-${String(month)}`,
-      flexDirection: "column",
-      borderStyle: "round",
-      borderColor: "cyan",
-      paddingX: 1,
-      marginBottom: 1,
-      alignSelf: "flex-start",
-      width: gridWidth + 2, // + paddingX left/right; border is drawn around this box
-    },
-    React.createElement(Text, { bold: true }, `${monthName} ${String(year)}`),
-    ...rows,
-  );
-}
-
-export function CalendarApp(): React.ReactElement {
-  const { exit } = useApp();
-  const [snapshot, setSnapshot] = useState<CalendarSnapshot>(computeSnapshot);
-  const [cursor, setCursor] = useState<Cursor>(() => {
-    const now = new Date();
-    return { year: now.getUTCFullYear(), month: now.getUTCMonth() + 1, day: now.getUTCDate() };
-  });
-  const [capEdit, setCapEdit] = useState<string | null>(null);
-  const capFromAnthropic =
-    snapshot.config.hasSpendCap === true && Boolean(snapshot.usage.extraUsageCache?.data);
-  const [dayEdit, setDayEdit] = useState<DayEditSession | null>(null);
-
-  const years = yearsAvailable(snapshot.config, snapshot.usage, new Date());
-  const today = new Date().toISOString().slice(0, 10);
-  const currentMonthPrefix = today.slice(0, 7);
-
-  // saveConfig writes synchronously (writeFileSync), so calling this right after a save re-reads the file
-  // we just wrote — no need to thread the new config through by hand.
-  function refresh(): void {
-    setSnapshot(computeSnapshot());
-  }
-
-  // Live polling — same interval/reasoning the former usage-tui.ts used: reflects the statusline hook's
-  // continual usage.json writes without the user having to manually re-open the calendar.
-  useEffect(() => {
-    const timer = setInterval(refresh, POLL_MS);
-    return () => {
-      clearInterval(timer);
-    };
-  }, []);
-
-  function toggleCursorDay(): void {
-    const { year, month, day } = cursor;
-    const yearKey = String(year);
-    const monthKey = String(month);
-    const existing = snapshot.config.laboralDays[yearKey]?.[monthKey] ?? [];
-    const next = existing.includes(day)
-      ? existing.filter((d) => d !== day)
-      : [...existing, day].sort((a, b) => a - b);
-    const config: Config = {
-      ...snapshot.config,
-      laboralDays: {
-        ...snapshot.config.laboralDays,
-        [yearKey]: { ...snapshot.config.laboralDays[yearKey], [monthKey]: next },
-      },
-    };
-    saveConfig(accountKey(snapshot.account), config);
-    refresh();
-  }
-
-  /** Cycle month 1–12 within the current year (wraps Jan↔Dec). */
-  function switchMonth(direction: 1 | -1): void {
-    setCursor((c) => {
-      let month = c.month + direction;
-      if (month < 1) month = 12;
-      if (month > 12) month = 1;
-      return { year: c.year, month, day: clampDay(c.day, c.year, month) };
-    });
-  }
-
-  /** Jump to the previous/next year that has data (or adjacent calendar year if only one exists). */
-  function switchYear(direction: 1 | -1): void {
-    setCursor((c) => {
-      const index = years.indexOf(c.year);
-      let nextYear: number;
-      if (index === -1) {
-        nextYear = c.year + direction;
-      } else {
-        const nextIndex = (index + direction + years.length) % years.length;
-        // years is non-empty here (index was found) and nextIndex is always in range.
-        /* v8 ignore next */
-        nextYear = years[nextIndex] ?? c.year + direction;
-      }
-      return { year: nextYear, month: c.month, day: clampDay(c.day, nextYear, c.month) };
-    });
-  }
-
-  /** The fixed total a month's manually-entered days must sum to exactly. The current in-progress month's
-   * pool is the live monthlySpent (still accruing from real usage); a closed month has no live scalar left
-   * (monthlySpent resets every calendar-month boundary — see rolloverIfNeeded) so its pool is just whatever
-   * its own recorded days already sum to. */
-  function poolForMonth(month: MonthKey): number {
-    if (monthPrefixOf(month) === currentMonthPrefix) return snapshot.usage.monthlySpent;
-    const prefix = monthPrefixOf(month);
-    return sumValues(
-      Object.fromEntries(
-        Object.entries(snapshot.usage.days).filter(([iso]) => iso.startsWith(prefix)),
-      ),
-    );
-  }
-
-  function enterDayEdit(): void {
-    const month: MonthKey = { year: cursor.year, month: cursor.month };
-    const prefix = monthPrefixOf(month);
-    const draft: Record<string, number> = {};
-    for (const [iso, amount] of Object.entries(snapshot.usage.days)) {
-      if (iso.startsWith(prefix)) draft[iso] = amount;
-    }
-    // The live in-progress month's "today" isn't frozen into usage.days yet — seed it from the live figure
-    // so the draft already sums to the pool exactly, a valid starting point to redistribute from.
-    if (prefix === currentMonthPrefix && draft[today] === undefined) {
-      draft[today] = snapshot.computed.todayUsage;
-    }
-    setDayEdit({ month, draft, buffer: "", warning: null });
-  }
-
-  /** Folds any in-progress typed buffer into a draft, at the currently-cursored day — used both by Enter
-   * and by arrow-key navigation (which auto-commits before moving, spreadsheet-style). A non-numeric or
-   * empty buffer is silently dropped rather than corrupting the draft. */
-  function draftWithBufferCommitted(session: DayEditSession): Readonly<Record<string, number>> {
-    if (session.buffer === "") return session.draft;
-    const parsed = Number(session.buffer);
-    if (!Number.isFinite(parsed) || parsed < 0) return session.draft;
-    const iso = isoDate(cursor.year, cursor.month, cursor.day);
-    return { ...session.draft, [iso]: parsed };
-  }
-
-  function saveDayEdit(session: DayEditSession): void {
-    const draft = draftWithBufferCommitted(session);
-    const pool = poolForMonth(session.month);
-    const total = sumValues(draft);
-    if (Math.abs(total - pool) > 0.005) {
-      setDayEdit({
-        ...session,
-        buffer: "",
-        warning: `Adds up to ${money(total)}, needs to equal ${money(pool)} — not saved`,
-      });
-      return;
-    }
-    const prefix = monthPrefixOf(session.month);
-    const otherMonths = Object.fromEntries(
-      Object.entries(snapshot.usage.days).filter(([iso]) => !iso.startsWith(prefix)),
-    );
-    const usage = { ...snapshot.usage, days: { ...otherMonths, ...draft } };
-    saveUsage(accountKey(snapshot.account), usage);
-    setDayEdit(null);
-    refresh();
-  }
-
-  /** Applies `fn` to the live dayEdit session. The null branch can't actually occur — every call site is
-   * inside the `dayEdit !== null` guard below — but setDayEdit's updater always receives the true latest
-   * state (see the functional-update comment above), which is typed as possibly-null. */
-  function updateDayEdit(fn: (session: DayEditSession) => DayEditSession): void {
-    setDayEdit((prev) => {
-      /* v8 ignore next */
-      if (prev === null) return null;
-      return fn(prev);
-    });
-  }
-
-  useInput((input, key) => {
-    if (dayEdit !== null) {
-      if (key.escape) {
-        setDayEdit(null);
-        return;
-      }
-      if (input === "S") {
-        saveDayEdit(dayEdit);
-        return;
-      }
-      // Functional updates throughout below — a burst of keystrokes (fast typing, held arrow keys) can
-      // fire several of these before Ink re-renders once; reading the outer `dayEdit` closure directly
-      // would let a later event silently clobber an earlier one instead of stacking on top of it.
-      if (key.return) {
-        updateDayEdit((prev) => ({
-          ...prev,
-          draft: draftWithBufferCommitted(prev),
-          buffer: "",
-          warning: null,
-        }));
-        return;
-      }
-      if (key.backspace || key.delete) {
-        updateDayEdit((prev) => ({ ...prev, buffer: prev.buffer.slice(0, -1) }));
-        return;
-      }
-      if (/^[0-9.]$/.test(input)) {
-        updateDayEdit((prev) => ({ ...prev, buffer: prev.buffer + input, warning: null }));
-        return;
-      }
-      if (key.leftArrow || key.rightArrow || key.upArrow || key.downArrow) {
-        const delta = key.leftArrow ? -1 : key.rightArrow ? 1 : key.upArrow ? -7 : 7;
-        updateDayEdit((prev) => ({
-          ...prev,
-          draft: draftWithBufferCommitted(prev),
-          buffer: "",
-          // Stay in the month being edited — cross-month browse is for non-edit mode.
-          month: prev.month,
-        }));
-        setCursor((c) => {
-          const next = moveCursor(c, delta);
-          if (next.year !== dayEdit.month.year || next.month !== dayEdit.month.month) {
-            return { ...c, day: clampDay(c.day + delta, c.year, c.month) };
-          }
-          return next;
-        });
-      }
-      return;
-    }
-
-    if (capEdit !== null) {
-      if (key.escape) setCapEdit(null);
-      else if (key.return) {
-        const parsed = Number(capEdit);
-        if (Number.isFinite(parsed) && parsed >= 0) {
-          const config: Config = { ...snapshot.config, monthlyCap: parsed };
-          saveConfig(accountKey(snapshot.account), config);
-          refresh();
-        }
-        setCapEdit(null);
-      } else if (key.backspace || key.delete) setCapEdit(capEdit.slice(0, -1));
-      else if (/^[0-9.]$/.test(input)) setCapEdit(capEdit + input);
-      return;
-    }
-
-    if (input === "q" || key.escape || (key.ctrl && input === "c")) {
-      exit();
-      return;
-    }
-    // The cap follows Anthropic's monthly_limit on every render (cli.ts), so a manual edit would be overwritten.
-    if (input === "c" && snapshot.config.hasSpendCap !== false && !capFromAnthropic) {
-      setCapEdit(String(snapshot.config.monthlyCap));
-      return;
-    }
-    if (input === "u" && snapshot.config.hasSpendCap !== false) {
-      enterDayEdit();
-      return;
-    }
-    if (key.tab && key.shift) {
-      switchMonth(-1);
-      return;
-    }
-    if (key.tab) {
-      switchMonth(1);
-      return;
-    }
-    if (input === "[" || (key.leftArrow && key.shift)) {
-      switchYear(-1);
-      return;
-    }
-    if (input === "]" || (key.rightArrow && key.shift)) {
-      switchYear(1);
-      return;
-    }
-    if ((input === " " || key.return) && snapshot.config.hasSpendCap !== false) {
-      toggleCursorDay();
-      return;
-    }
-    if (key.leftArrow) setCursor((c) => moveCursor(c, -1));
-    if (key.rightArrow) setCursor((c) => moveCursor(c, 1));
-    if (key.upArrow) setCursor((c) => moveCursor(c, -7));
-    if (key.downArrow) setCursor((c) => moveCursor(c, 7));
-  });
-
-  // While editing, the focused month's cells reflect the in-progress draft (plus any not-yet-committed
-  // typed buffer) rather than the saved usage.days — pure display overlay, nothing is written until `S`.
-  const usageForCalendar: UsageState =
-    dayEdit === null
-      ? snapshot.usage
+function renderGrid(model: CalendarModel, style: RenderStyle): Array<string> {
+  const { year, month } = model.cursor;
+  const usage =
+    model.dayEdit === null
+      ? model.snapshot.usage
       : {
-          ...snapshot.usage,
-          days: { ...snapshot.usage.days, ...draftWithBufferCommitted(dayEdit) },
+          ...model.snapshot.usage,
+          days: { ...model.snapshot.usage.days, ...draftWithBufferCommitted(model, model.dayEdit) },
         };
+  const blank = " ".repeat(CELL_WIDTH);
+  const cells: Array<[string, string]> = [];
+  for (let i = 0; i < mondayFirstWeekday(year, month, 1); i++) cells.push([blank, blank]);
+  for (let day = 1; day <= daysInMonth(year, month); day++) {
+    cells.push(renderCell(model, usage, year, month, day, style));
+  }
+  const width = 7 * (CELL_WIDTH + 1) - 1;
+  const border = (text: string): string => sgr(style, "36", text);
+  const title = `${monthName(month)} ${String(year)}`;
+  const header = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    .map((name) => name.padEnd(CELL_WIDTH))
+    .join(" ");
+  const lines = [
+    border(`╭─ `) + sgr(style, "1", title) + border(` ${"─".repeat(width - title.length - 1)}╮`),
+    `${border("│")} ${sgr(style, "2", header)}${" ".repeat(width - header.length)} ${border("│")}`,
+  ];
+  for (let i = 0; i < cells.length; i += 7) {
+    const week = cells.slice(i, i + 7);
+    while (week.length < 7) week.push([blank, blank]);
+    lines.push(`${border("│")} ${week.map((cell) => cell[0]).join(" ")} ${border("│")}`);
+    lines.push(`${border("│")} ${week.map((cell) => cell[1]).join(" ")} ${border("│")}`);
+  }
+  lines.push(border(`╰${"─".repeat(width + 2)}╯`));
+  return lines;
+}
 
-  return React.createElement(
-    Box,
-    // No fixed width here — letting Ink size against the real terminal (stdout.columns) is what makes
-    // the month-card grid below actually flex-wrap responsively; 80 is only the *minimum* a terminal needs
-    // for a single card to fit, not a cap on how many fit side by side on a wider one.
-    { flexDirection: "column" },
-    renderStatsHeader(snapshot.config, snapshot.computed, cursor, new Date(), capFromAnthropic),
-    renderWarningBanner(snapshot.config, new Date()),
-    renderCreditGrantBanner(snapshot.account),
-    capEdit !== null
-      ? React.createElement(
-          Text,
-          { color: "cyan" },
-          `Monthly cap: $${capEdit}_ (Enter to save, Esc to cancel)`,
-        )
-      : null,
-    renderDayEditBanner(dayEdit, cursor, poolForMonth, draftWithBufferCommitted),
-    snapshot.config.hasSpendCap === false
-      ? null
-      : renderMonthCard(
-          cursor.year,
-          cursor.month,
-          snapshot.config,
-          usageForCalendar,
-          cursor,
-          today,
-          dayEdit,
-        ),
-    renderContextHint(snapshot.config, cursor, dayEdit, poolForMonth),
-    React.createElement(
-      Text,
-      { dimColor: true },
-      snapshot.config.hasSpendCap === false
-        ? "q quit"
-        : "←→↑↓ move  Tab month  [/] year  u edit $  c cap  q quit",
-    ),
+function renderHint(model: CalendarModel, style: RenderStyle): string {
+  const { year, month, day } = model.cursor;
+  if (model.notice !== null) return sgr(style, "33", model.notice);
+  if (model.dayEdit !== null) {
+    return sgr(
+      style,
+      "33",
+      isPastDay(model, year, month, day)
+        ? `Editing day ${String(day)} $ · type digits · Enter: commit cell · S: save if sum matches · Esc: cancel`
+        : `Day ${String(day)} is live (today or later) — move to a past day to edit`,
+    );
+  }
+  if (isPastDay(model, year, month, day)) {
+    return sgr(style, "2", `Day ${String(day)} · past · locked (use u to correct $)`);
+  }
+  const laboral = (model.snapshot.config.laboralDays[String(year)]?.[String(month)] ?? []).includes(
+    day,
+  );
+  return sgr(
+    style,
+    "33",
+    laboral
+      ? `Day ${String(day)} · laboral · Enter/Space: unmark laboral (remaining budget re-splits over fewer days)`
+      : `Day ${String(day)} · off · Enter/Space: mark as laboral (counts in daily pace)`,
   );
 }
+
+/** One full frame as lines. Pure. */
+export function renderCalendar(model: CalendarModel, style: RenderStyle): ReadonlyArray<string> {
+  return [
+    ...renderStats(model, style),
+    "",
+    ...renderBanners(model, style),
+    ...renderGrid(model, style),
+    renderHint(model, style),
+    sgr(style, "2", "←→↑↓ move  Tab month  [/] year  Space laboral  u edit $  c cap  q quit"),
+  ];
+}
+
+// ── IO loop ────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Opens the calendar; resolves once the user exits (q/Esc/Ctrl+C). Thin IO wrapper around ink's real render
- * against process.stdout/stdin — CalendarApp carries the actual logic and is covered directly via
- * ink-testing-library; this shim isn't meaningfully testable without a real terminal (same reasoning the
- * former usage-tui.ts's runUsageTui shim used).
+ * Opens the calendar; resolves once the user exits (q/Esc/Ctrl+C). First frame is drawn before anything
+ * else runs. Non-TTY stdin/stdout (pipe, CI) prints one frame and exits. Thin IO shell around the pure
+ * functions above, which carry the logic and the tests.
  */
 /* v8 ignore start */
-export async function runCalendarTui(): Promise<number> {
-  const { waitUntilExit } = render(React.createElement(CalendarApp));
-  await waitUntilExit();
-  return 0;
+export async function runCalendarTui(account: Account | null): Promise<number> {
+  const key = accountKey(account);
+  const style: RenderStyle = {
+    color: process.stdout.isTTY && process.env.NO_COLOR === undefined,
+  };
+  const effects: CalendarEffects = {
+    saveConfig: (config) => {
+      saveConfig(key, config);
+    },
+    saveUsage: (usage) => {
+      saveUsage(key, usage);
+    },
+    snapshot: () => computeSnapshot(account),
+  };
+  let model = initialModel(effects.snapshot());
+
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stdout.write(`${renderCalendar(model, style).join("\n")}\n`);
+    return 0;
+  }
+
+  const draw = (): void => {
+    const frame = renderCalendar(model, style)
+      .map((line) => `${line}\x1b[K`)
+      .join("\n");
+    process.stdout.write(`\x1b[H${frame}\x1b[J`);
+  };
+  process.stdout.write("\x1b[?1049h\x1b[?25l");
+  draw();
+  requestApiRefresh(key, new Date());
+
+  return new Promise<number>((resolve) => {
+    const finish = (): void => {
+      clearInterval(timer);
+      process.stdin.off("data", onData);
+      process.stdout.off("resize", draw);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write("\x1b[?25h\x1b[?1049l");
+      resolve(0);
+    };
+    const onData = (data: Buffer): void => {
+      for (const parsed of parseKeys(data.toString("utf8"))) {
+        const next = reduceKey(model, parsed, effects);
+        if (next === null) {
+          finish();
+          return;
+        }
+        model = next;
+      }
+      draw();
+    };
+    const timer = setInterval(() => {
+      requestApiRefresh(key, new Date());
+      model = { ...model, snapshot: effects.snapshot() };
+      draw();
+    }, POLL_MS);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on("data", onData);
+    process.stdout.on("resize", draw);
+  });
 }
 /* v8 ignore stop */

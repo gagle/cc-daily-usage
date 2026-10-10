@@ -1,738 +1,436 @@
-import { render } from "ink-testing-library";
-import React from "react";
+/* eslint-disable no-control-regex -- these tests assert on ANSI escape sequences */
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import type * as NodeOs from "node:os";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { Account, OverageCreditGrantInfo } from "./account.js";
 import type * as CalendarModule from "./calendar-tui.js";
+import type { CalendarEffects, CalendarModel, CalendarSnapshot, Key } from "./calendar-tui.js";
 import type { Config, UsageState } from "./interfaces/config.interface.js";
 
-const loadConfigMock = vi.fn();
-const loadUsageMock = vi.fn();
-const saveConfigMock = vi.fn();
-const saveUsageMock = vi.fn();
+let fakeHome: string;
 
-vi.mock("./config.js", () => ({
-  loadConfig: (k: unknown) => loadConfigMock(k) as unknown,
-  loadUsage: (k: unknown) => loadUsageMock(k) as unknown,
-  saveConfig: (k: unknown, c: unknown) => saveConfigMock(k, c),
-  saveUsage: (k: unknown, u: unknown) => saveUsageMock(k, u),
-}));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeOs>();
+  return { ...actual, homedir: () => fakeHome };
+});
 
-const resolveActiveAccountSyncMock = vi.fn((): Account | null => null);
-const readOverageCreditGrantCacheMock = vi.fn(
-  (_accountUuid: string | null): OverageCreditGrantInfo | null => null,
-);
-vi.mock("./account.js", () => ({
-  resolveActiveAccountSync: () => resolveActiveAccountSyncMock() as unknown,
-  accountKey: () => "default",
-  readOverageCreditGrantCache: (u: string | null) => readOverageCreditGrantCacheMock(u) as unknown,
-}));
+vi.mock("./refresh.js", () => ({ requestApiRefresh: vi.fn() }));
 
-/** Backs loadConfig/saveConfig with a real in-memory store (like config.json on disk) so a toggle's
- * saveConfig is visible to the very next loadConfig — matching real runtime behavior, where saveConfig
- * writes synchronously before the following read. */
-let configStore: Config;
-let usageStore: UsageState;
-
-const ESC = "\x1b";
-const KEY = {
-  up: `${ESC}[A`,
-  down: `${ESC}[B`,
-  left: `${ESC}[D`,
-  right: `${ESC}[C`,
-  tab: "\t",
-  shiftTab: `${ESC}[Z`,
-  enter: "\r",
-  escape: ESC,
-  space: " ",
-  backspace: "\x7f",
-  ctrlC: "\x03",
-};
-
-/** ink's useInput state updates are batched and only committed on the next microtask — flush that between
- * writes whenever a following assertion or write depends on the updated state (confirmed empirically: a
- * single `await Promise.resolve()` is enough for ink-testing-library's synchronous stdin.write). A lone ESC
- * byte is additionally held back by ink itself for 20ms in case it's the start of a longer escape sequence
- * (e.g. an arrow key) — advance the fake clock past that before flushing microtasks again. */
-async function flush(): Promise<void> {
-  await Promise.resolve();
-  vi.advanceTimersByTime(25);
-  await Promise.resolve();
-}
-
-function makeConfig(overrides: Partial<Config> = {}): Config {
-  return { monthlyCap: 650, laboralDays: { "2026": { "9": [1, 2, 3, 4] } }, ...overrides };
-}
-
-function makeUsage(overrides: Partial<UsageState> = {}): UsageState {
-  return {
-    monthlySpent: 80.94,
-    lastUpdated: "2026-09-03T00:00:00.000Z",
-    days: { "2026-09-01": 20, "2026-09-02": 15 },
-    sessions: {},
-    ...overrides,
-  };
-}
-
-async function freshCalendar(): Promise<typeof CalendarModule> {
+async function fresh(): Promise<typeof CalendarModule> {
   vi.resetModules();
   return import("./calendar-tui.js");
 }
 
+const plain = (lines: ReadonlyArray<string>): string =>
+  lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+
+const NOW = new Date("2026-10-07T10:00:00.000Z"); // Wednesday
+const ACCOUNT = {
+  email: "dev@example.com",
+  accountUuid: "uuid-1",
+  organizationType: "claude_enterprise",
+};
+const KEY = "dev_example_com";
+const WEEKDAYS = [1, 2, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 26, 27, 28, 29, 30];
+
+function accountDir(): string {
+  return path.join(fakeHome, ".config", "cc-daily-usage", "accounts", KEY);
+}
+
+function seed(config: Partial<Config>, usage: Partial<UsageState> = {}, api?: unknown): void {
+  mkdirSync(accountDir(), { recursive: true });
+  writeFileSync(
+    path.join(accountDir(), "config.json"),
+    JSON.stringify({
+      monthlyCap: 400,
+      laboralDays: { "2026": { "10": WEEKDAYS } },
+      hasSpendCap: true,
+      ...config,
+    }),
+  );
+  writeFileSync(
+    path.join(accountDir(), "usage.json"),
+    JSON.stringify({
+      schemaVersion: 2,
+      monthlySpent: 30,
+      periodFrozen: 25,
+      lastUpdated: NOW.toISOString(),
+      days: { "2026-10-01": 10, "2026-10-02": 15, "2026-09-30": 4 },
+      sessions: {
+        s1: { lastSeenCost: 1, lastSeenAt: NOW.toISOString(), cacheMissUsd: 0.5 },
+        s2: { lastSeenCost: 1, lastSeenAt: NOW.toISOString() },
+      },
+      ...usage,
+    }),
+  );
+  if (api !== undefined)
+    writeFileSync(path.join(accountDir(), "api-cache.json"), JSON.stringify(api));
+}
+
+const LEDGER = {
+  fetchedAt: NOW.getTime(),
+  extraUsage: {
+    usedCredits: 30,
+    monthlyLimit: 500,
+    utilizationPct: 6,
+    currency: "USD",
+    spendLimitReached: false,
+    disabledReason: null,
+  },
+  fiveHour: null,
+  sevenDay: null,
+};
+
+interface Harness {
+  readonly mod: typeof CalendarModule;
+  readonly effects: CalendarEffects & {
+    readonly saved: { config: Array<Config>; usage: Array<UsageState> };
+  };
+  model: CalendarModel;
+  press(...keys: Array<Key | string>): CalendarModel | null;
+}
+
+async function harness(): Promise<Harness> {
+  const mod = await fresh();
+  const config = await import("./config.js");
+  const saved = { config: [] as Array<Config>, usage: [] as Array<UsageState> };
+  const effects = {
+    saved,
+    saveConfig: (value: Config): void => {
+      saved.config.push(value);
+      config.saveConfig(KEY, value);
+    },
+    saveUsage: (value: UsageState): void => {
+      saved.usage.push(value);
+      config.saveUsage(KEY, value);
+    },
+    snapshot: (): CalendarSnapshot => mod.computeSnapshot(ACCOUNT, NOW),
+  };
+  const h: Harness = {
+    mod,
+    effects,
+    model: mod.initialModel(effects.snapshot()),
+    press(...keys) {
+      let result: CalendarModel | null = h.model;
+      for (const key of keys) {
+        const parsed = typeof key === "string" ? mod.parseKeys(key) : [key];
+        for (const k of parsed) {
+          if (result === null) return null;
+          result = mod.reduceKey(result, k, effects);
+        }
+      }
+      if (result !== null) h.model = result;
+      return result;
+    },
+  };
+  return h;
+}
+
+beforeEach(() => {
+  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-calendar-"));
+  vi.stubEnv("TZ", "UTC");
+});
+
+afterEach(() => {
+  rmSync(fakeHome, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+});
+
 describe("pure helpers", () => {
-  it("daysInMonth returns the correct count, including leap February", async () => {
-    const { daysInMonth } = await freshCalendar();
-    expect(daysInMonth(2026, 9)).toBe(30);
-    expect(daysInMonth(2028, 2)).toBe(29);
-  });
-
-  it("mondayFirstWeekday maps Sunday to 6 and Monday to 0", async () => {
-    const { mondayFirstWeekday } = await freshCalendar();
-    expect(mondayFirstWeekday(2026, 9, 1)).toBe(1); // 2026-09-01 is a Tuesday
-    expect(mondayFirstWeekday(2026, 9, 6)).toBe(6); // Sunday
-    expect(mondayFirstWeekday(2026, 9, 7)).toBe(0); // Monday
-  });
-
-  it("monthsToShow unions config months, usage-day months, and always the current month, sorted", async () => {
-    const { monthsToShow } = await freshCalendar();
-    const config = makeConfig({ laboralDays: { "2026": { "9": [1] }, "2027": { "1": [5] } } });
-    const usage = makeUsage({ days: { "2026-10-15": 3 } });
-    const now = new Date("2026-09-03T00:00:00.000Z");
-    expect(monthsToShow(config, usage, now)).toEqual([
-      { year: 2026, month: 9 },
-      { year: 2026, month: 10 },
-      { year: 2027, month: 1 },
-    ]);
-  });
-
-  it("monthsToShow dedupes when the current month already has configured laboral days", async () => {
-    const { monthsToShow } = await freshCalendar();
-    const config = makeConfig();
-    const usage = makeUsage({ days: {} });
-    const now = new Date("2026-09-03T00:00:00.000Z");
-    expect(monthsToShow(config, usage, now)).toEqual([{ year: 2026, month: 9 }]);
-  });
-
-  it("yearsAvailable unions config years, usage-day years, and the current year", async () => {
-    const { yearsAvailable } = await freshCalendar();
-    const now = new Date("2026-09-15T00:00:00.000Z");
-    const config = makeConfig({ laboralDays: { "2025": { "1": [1] }, "2026": { "9": [1] } } });
-    const usage = makeUsage({ days: { "2027-03-01": 10 } });
-    expect(yearsAvailable(config, usage, now)).toEqual([2025, 2026, 2027]);
-  });
-
-  it("moveCursor crosses month and year boundaries by whole UTC days", async () => {
-    const { moveCursor } = await freshCalendar();
-    expect(moveCursor({ year: 2026, month: 9, day: 1 }, -1)).toEqual({
-      year: 2026,
-      month: 8,
-      day: 31,
-    });
-    expect(moveCursor({ year: 2026, month: 12, day: 31 }, 1)).toEqual({
+  it("mondayFirstWeekday, moveCursor across months, yearsAvailable", async () => {
+    const mod = await fresh();
+    expect(mod.mondayFirstWeekday(2026, 10, 5)).toBe(0); // Monday
+    expect(mod.mondayFirstWeekday(2026, 10, 4)).toBe(6); // Sunday
+    expect(mod.moveCursor({ year: 2026, month: 12, day: 31 }, 1)).toEqual({
       year: 2027,
       month: 1,
       day: 1,
     });
-    expect(moveCursor({ year: 2026, month: 9, day: 3 }, -7)).toEqual({
-      year: 2026,
-      month: 8,
-      day: 27,
-    });
+    expect(mod.daysInMonth(2026, 2)).toBe(28);
+    const usage = { days: { "2024-05-01": 1, bad: 2 } } as unknown as UsageState;
+    expect(mod.yearsAvailable({ monthlyCap: 1, laboralDays: { "2028": {} } }, usage, NOW)).toEqual([
+      2024, 2026, 2028,
+    ]);
+  });
+
+  it("parseKeys understands arrows, shift-arrows, tab, enter, backspace, esc and chars", async () => {
+    const { parseKeys } = await fresh();
+    expect(
+      parseKeys("\x1b[A\x1b[B\x1b[C\x1b[D\x1bOA\x1bOB\x1bOC\x1bOD").map((k) => k.kind),
+    ).toEqual(["up", "down", "right", "left", "up", "down", "right", "left"]);
+    expect(parseKeys("\x1b[1;2C\x1b[1;2D\x1b[Z\t\r\n\x7f\b\x03").map((k) => k.kind)).toEqual([
+      "shift-right",
+      "shift-left",
+      "shift-tab",
+      "tab",
+      "enter",
+      "enter",
+      "backspace",
+      "backspace",
+      "ctrl-c",
+    ]);
+    expect(parseKeys("\x1b")).toEqual([{ kind: "escape" }]);
+    expect(parseKeys("\x1b[3~q")).toEqual([{ kind: "char", char: "q" }]); // unknown sequence dropped
+    expect(parseKeys("\x01")).toEqual([]); // other control bytes ignored
+    // Mouse wheel / clicks (SGR and legacy) are dropped, never read as arrows or chars.
+    expect(parseKeys("\x1b[<64;10;5M\x1b[<65;10;5M\x1b[<0;3;4mq")).toEqual([
+      { kind: "char", char: "q" },
+    ]);
+    expect(parseKeys("\x1b[M`!!x")).toEqual([{ kind: "char", char: "x" }]);
   });
 });
 
 describe("computeSnapshot", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-03T12:00:00.000Z"));
+  it("local cap without a ledger", async () => {
+    seed({});
+    const { computeSnapshot } = await fresh();
+    const snap = computeSnapshot(ACCOUNT, NOW);
+    expect(snap.capFromAnthropic).toBe(false);
+    expect(snap.computed.monthlyCap).toBe(400);
+    expect(snap.computed.todayUsage).toBe(5);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
+  it("the ledger's limit replaces the cap in memory (admin change shows without a session)", async () => {
+    seed({}, {}, LEDGER);
+    const { computeSnapshot } = await fresh();
+    const snap = computeSnapshot(ACCOUNT, NOW);
+    expect(snap.capFromAnthropic).toBe(true);
+    expect(snap.config.monthlyCap).toBe(500);
+    seed({}, {}, { ...LEDGER, extraUsage: { ...LEDGER.extraUsage, monthlyLimit: 0 } });
+    expect(computeSnapshot(ACCOUNT, NOW).capFromAnthropic).toBe(false);
   });
 
-  it("does not persist when every spent day is already laboral", async () => {
-    loadConfigMock.mockReturnValue(makeConfig());
-    loadUsageMock.mockReturnValue(makeUsage());
-    const { computeSnapshot } = await freshCalendar();
-    const snapshot = computeSnapshot();
-    expect(saveConfigMock).not.toHaveBeenCalled();
-    expect(snapshot.computed.monthlySpent).toBe(80.94);
-  });
-
-  it("never promotes a spent non-laboral day into config.laboralDays", async () => {
-    loadConfigMock.mockReturnValue(makeConfig({ laboralDays: { "2026": { "9": [1] } } }));
-    loadUsageMock.mockReturnValue(makeUsage({ days: { "2026-09-01": 20, "2026-09-06": 12.5 } }));
-    const { computeSnapshot } = await freshCalendar();
-    const snapshot = computeSnapshot();
-    expect(saveConfigMock).not.toHaveBeenCalled();
-    expect(snapshot.config.laboralDays["2026"]?.["9"]).toEqual([1]);
-  });
-
-  it("threads the resolved account into the returned snapshot and reads that account's own config/usage", async () => {
-    resolveActiveAccountSyncMock.mockReturnValue({
-      email: "a@b.com",
-      accountUuid: "uuid-1",
-      organizationType: "claude_pro",
-    });
-    loadConfigMock.mockReturnValue(makeConfig());
-    loadUsageMock.mockReturnValue(makeUsage());
-    const { computeSnapshot } = await freshCalendar();
-    const snapshot = computeSnapshot();
-    expect(snapshot.account?.email).toBe("a@b.com");
-    expect(loadConfigMock).toHaveBeenCalledWith("default");
-    expect(loadUsageMock).toHaveBeenCalledWith("default");
+  it("defaults to the current time", async () => {
+    seed({});
+    const { computeSnapshot } = await fresh();
+    expect(computeSnapshot(ACCOUNT).now).toBeInstanceOf(Date);
   });
 });
 
-describe("CalendarApp", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-03T12:00:00.000Z"));
-    configStore = makeConfig();
-    usageStore = makeUsage();
-    loadConfigMock.mockImplementation(() => configStore);
-    loadUsageMock.mockImplementation(() => usageStore);
-    saveConfigMock.mockImplementation((_k: string, c: Config) => {
-      configStore = c;
+describe("reduceKey", () => {
+  it("q / Esc / Ctrl+C exit", async () => {
+    seed({});
+    const h = await harness();
+    expect(h.press("q")).toBeNull();
+    expect(h.press({ kind: "escape" })).toBeNull();
+    expect(h.press({ kind: "ctrl-c" })).toBeNull();
+  });
+
+  it("arrows move, Tab/Shift-Tab change month (wrapping), [ ] and shift-arrows change year", async () => {
+    seed({});
+    const h = await harness();
+    h.press("\x1b[C", "\x1b[B", "\x1b[D", "\x1b[A");
+    expect(h.model.cursor).toEqual({ year: 2026, month: 10, day: 7 });
+    h.press("\t", "\t", "\t");
+    expect(h.model.cursor).toEqual({ year: 2026, month: 1, day: 7 });
+    h.press("\x1b[Z");
+    expect(h.model.cursor.month).toBe(12);
+    h.press("]");
+    expect(h.model.cursor.year).toBe(2027); // only one year has data → plain step
+    h.press({ kind: "shift-left" }, { kind: "shift-right" }, "[");
+    expect(h.model.cursor.year).toBe(2026);
+    h.press("x"); // unbound key: nothing but clears a notice
+    expect(h.model.notice).toBeNull();
+  });
+
+  it("year switching cycles through years that have data", async () => {
+    seed({ laboralDays: { "2026": { "10": WEEKDAYS }, "2024": { "2": [29] } } });
+    const h = await harness();
+    h.press("[");
+    expect(h.model.cursor).toEqual({ year: 2024, month: 10, day: 7 });
+    h.press("[");
+    expect(h.model.cursor.year).toBe(2026);
+  });
+
+  it("Space toggles a future day; a past day is locked", async () => {
+    seed({});
+    const h = await harness();
+    h.press("\x1b[C", " "); // Oct 8 → off
+    expect(h.effects.saved.config.at(-1)?.laboralDays["2026"]?.["10"]).not.toContain(8);
+    h.press("\r"); // back on, sorted
+    expect(h.effects.saved.config.at(-1)?.laboralDays["2026"]?.["10"]).toEqual(WEEKDAYS);
+    h.press("\x1b[D", "\x1b[D", " "); // Oct 6, past
+    expect(h.model.notice).toContain("locked");
+    h.press("\x1b[B", "\x1b[B", "\x1b[B", "\x1b[B", " "); // Nov 3 — month with no config yet
+    expect(h.effects.saved.config.at(-1)?.laboralDays["2026"]?.["11"]).toEqual([3]);
+  });
+
+  it("toggling keeps the local cap on disk even when Anthropic's cap is shown", async () => {
+    seed({}, {}, LEDGER);
+    const h = await harness();
+    h.press("\x1b[C", " ");
+    expect(h.effects.saved.config.at(-1)?.monthlyCap).toBe(400);
+  });
+
+  it("c edits the local cap; invalid input is rejected; Esc cancels", async () => {
+    seed({});
+    const h = await harness();
+    h.press("c");
+    expect(h.model.capEdit).toBe("400");
+    h.press("\x7f", "\x7f", "\x7f", "5", "0", "0", "x", "\r");
+    expect(h.effects.saved.config.at(-1)?.monthlyCap).toBe(500);
+    expect(h.model.notice).toBe("Cap saved.");
+    h.press("c", "\x7f", "\x7f", "\x7f", "\r");
+    expect(h.model.notice).toContain("not changed");
+    h.press("c", ".", ".", "\r");
+    expect(h.model.notice).toContain("not changed");
+    h.press("c", { kind: "escape" });
+    expect(h.model.capEdit).toBeNull();
+  });
+
+  it("c explains that Anthropic owns the cap", async () => {
+    seed({}, {}, LEDGER);
+    const h = await harness();
+    h.press("c");
+    expect(h.model.capEdit).toBeNull();
+    expect(h.model.notice).toContain("admin");
+  });
+
+  it("u redistributes past days; the sum must match; today/future are live", async () => {
+    seed({});
+    const h = await harness();
+    h.press("u");
+    expect(h.model.dayEdit?.draft).toEqual({ "2026-10-01": 10, "2026-10-02": 15 });
+    h.press("5"); // cursor on today
+    expect(h.model.dayEdit?.warning).toContain("only past days");
+    // go to Oct 1 (Thu), type 20 → sum 35 ≠ 25
+    h.press("\x1b[A"); // up leaves the month → cursor stays
+    expect(h.model.cursor.day).toBe(7);
+    h.press(...("\x1b[D".repeat(6).match(/\x1b\[D/g) ?? []), "2", "0", "\r");
+    expect(h.model.cursor.day).toBe(1);
+    h.press("S");
+    expect(h.model.dayEdit?.warning).toContain("needs to equal $25.00");
+    // fix Oct 2 to 5: type, then arrow auto-commits
+    h.press("\x1b[C", "9", "\x7f", "5", "\x1b[D");
+    expect(h.model.cursor).toMatchObject({ month: 10, day: 1 });
+    h.press("S");
+    expect(h.model.dayEdit).toBeNull();
+    expect(h.model.notice).toBe("Saved.");
+    expect(h.effects.saved.usage.at(-1)?.days).toEqual({
+      "2026-09-30": 4,
+      "2026-10-01": 20,
+      "2026-10-02": 5,
     });
-    resolveActiveAccountSyncMock.mockReturnValue(null);
-    readOverageCreditGrantCacheMock.mockReturnValue(null);
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
+  it("u: invalid buffer is dropped, Esc cancels, other keys are ignored", async () => {
+    seed({});
+    const h = await harness();
+    h.press("u", ...("\x1b[D".repeat(6).match(/\x1b\[D/g) ?? []), ".", ".", "\r");
+    expect(h.model.dayEdit?.draft["2026-10-01"]).toBe(10);
+    h.press("1", ...("\x1b[C".repeat(6).match(/\x1b\[C/g) ?? []), "2", "\r"); // live day: refused
+    h.press("z", "\t");
+    expect(h.model.dayEdit).not.toBeNull();
+    h.press({ kind: "escape" });
+    expect(h.model.dayEdit).toBeNull();
   });
 
-  it("renders the stats header and calendar grid with a laboral month", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { lastFrame } = render(React.createElement(CalendarApp));
-    const frame = lastFrame();
-    expect(frame).not.toContain("cc-daily-usage calendar");
-    expect(frame).toContain("Year 2026");
-    expect(frame).toContain("September");
-    expect(frame).toContain("Today:");
-    expect(frame).toContain("This month:");
-    expect(frame).toContain("September 2026");
-    expect(frame).not.toContain("No laboral days configured");
-    // Fixture marks the 3rd laboral — hint states what Enter will do.
-    expect(frame).toContain("Day 3 · laboral · Enter/Space: unmark laboral");
-    expect(frame).toContain("u edit $");
-    expect(frame).toMatch(/·\s+(Coast|Ahead|Steady|On pace|Hot|Over|Burn)/);
-    expect(frame).toContain("Day-1 max:");
-    expect(frame).toContain("(650 / 4)");
-    expect(frame).toContain("Real avg:");
+  it("u on a future month has nothing to edit; a past month is fully editable", async () => {
+    seed({});
+    const h = await harness();
+    h.press("\t", "u");
+    expect(h.model.notice).toContain("Nothing to edit");
+    h.press("\x1b[Z", "\x1b[Z", "u");
+    expect(h.model.dayEdit?.draft).toEqual({ "2026-09-30": 4 });
+    expect(h.mod.poolForMonth(h.model, { year: 2026, month: 9 })).toBe(4);
+  });
+});
+
+describe("renderCalendar", () => {
+  it("stats, today marker, past/laboral styling, hints and footer", async () => {
+    seed({});
+    const h = await harness();
+    const text = plain(h.mod.renderCalendar(h.model, { color: false }));
+    expect(text).toContain("Year 2026");
+    expect(text).toContain("Today:      $5.00 / $20.84  (24%)  ·  Coast");
+    expect(text).toContain("This month: $30.00 / $400.00  (8%)  cap: local");
+    expect(text).toContain("Day-1 max:  $18.19  (400 / 22)");
+    expect(text).toContain("Real avg:");
+    expect(text).toContain("Cache re-paid today: ~$0.50");
+    expect(text).toContain(" 7 today");
+    expect(text).toContain("•$5.00");
+    expect(text).toContain("Day 7 · laboral");
+    expect(text).toContain("q quit");
+    const colored = h.mod.renderCalendar(h.model, { color: true }).join("\n");
+    expect(colored).toContain("\x1b[1;4;36;7m"); // today + cursor
+    expect(colored).toContain("\x1b[2;32m"); // a past laboral day is dimmed
   });
 
-  it("still shows Day-1 max when the budget is exhausted (avg 0, no today pace pair)", async () => {
-    usageStore = makeUsage({ monthlySpent: 700, days: { "2026-09-01": 700 } });
-    const { CalendarApp } = await freshCalendar();
-    const { lastFrame } = render(React.createElement(CalendarApp));
-    const frame = lastFrame() ?? "";
-    expect(frame).not.toContain("Today:"); // no pace pair without avg
-    expect(frame).toContain("Day-1 max:"); // equal-split plan still available
-  });
-
-  it("shows the warning banner when the current month has zero laboral days", async () => {
-    configStore = makeConfig({ laboralDays: {} });
-    usageStore = makeUsage({ days: {} });
-    const { CalendarApp } = await freshCalendar();
-    const { lastFrame } = render(React.createElement(CalendarApp));
-    expect(lastFrame()).toContain("No laboral days configured for September 2026");
-  });
-
-  it("shows the credit-grant banner when eligible and not yet granted", async () => {
-    resolveActiveAccountSyncMock.mockReturnValue({
-      email: "a@b.com",
-      accountUuid: "uuid-1",
-      organizationType: "claude_pro",
-    });
-    readOverageCreditGrantCacheMock.mockReturnValue({
-      available: true,
-      eligible: true,
-      granted: false,
-      amount_minor_units: 2000,
-      currency: "USD",
-    });
-    const { CalendarApp } = await freshCalendar();
-    const { lastFrame } = render(React.createElement(CalendarApp));
-    expect(lastFrame()).toContain("$20.00 credit grant available");
-  });
-
-  it("hides the credit-grant banner once already granted", async () => {
-    resolveActiveAccountSyncMock.mockReturnValue({
-      email: "a@b.com",
-      accountUuid: "uuid-1",
-      organizationType: "claude_pro",
-    });
-    readOverageCreditGrantCacheMock.mockReturnValue({
-      available: true,
-      eligible: true,
-      granted: true,
-      amount_minor_units: 2000,
-      currency: "USD",
-    });
-    const { CalendarApp } = await freshCalendar();
-    const { lastFrame } = render(React.createElement(CalendarApp));
-    expect(lastFrame()).not.toContain("credit grant available");
-  });
-
-  it("shows today usage-only (no /$avg) on a non-laboral day", async () => {
-    // 3 Sep 2026 is the fixed system time; omit it from laboral days.
-    configStore = makeConfig({ laboralDays: { "2026": { "9": [1, 2, 4] } } });
-    const { CalendarApp } = await freshCalendar();
-    const { lastFrame } = render(React.createElement(CalendarApp));
-    const frame = lastFrame() ?? "";
-    expect(frame).toContain("Today:");
-    expect(frame).toContain("$45.94"); // todayUsage from fixture monthlySpent - days before
-    expect(frame).not.toMatch(/Today:\s+\$[\d.]+ \/ \$/);
-  });
-
-  it("quits on q", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    expect(lastFrame()).toContain("Year 2026");
-    stdin.write("q");
-    await flush();
-    expect(lastFrame()?.trim()).toBe("");
-  });
-
-  it("quits on Esc", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    stdin.write(KEY.escape);
-    await flush();
-    expect(lastFrame()?.trim()).toBe("");
-  });
-
-  it("quits on Ctrl+C instead of entering cap-edit mode", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    stdin.write(KEY.ctrlC);
-    await flush();
-    expect(lastFrame()?.trim()).toBe("");
-  });
-
-  it("moves the cursor with arrow keys and crosses into the previous month on up from day 1", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    stdin.write(KEY.left); // day 3 -> day 2
-    await flush();
-    stdin.write(KEY.left); // day 2 -> day 1
-    await flush();
-    stdin.write(KEY.up); // crosses into August
-    await flush();
-    expect(lastFrame()).toContain("August 2026");
-    stdin.write(KEY.down); // back toward September
-    await flush();
-    expect(lastFrame()).toBeDefined();
-  });
-
-  it("toggles the cursor day off when it's already laboral, then back on", async () => {
-    // Cursor starts on today (the 3rd, per the fixed system time), which the fixture config marks laboral.
-    const { CalendarApp } = await freshCalendar();
-    const { stdin } = render(React.createElement(CalendarApp));
-    stdin.write(KEY.space);
-    await flush();
-    expect(saveConfigMock).toHaveBeenLastCalledWith(
-      "default",
-      expect.objectContaining({ laboralDays: { "2026": { "9": [1, 2, 4] } } }),
-    );
-    stdin.write(KEY.enter);
-    await flush();
-    expect(saveConfigMock).toHaveBeenLastCalledWith(
-      "default",
-      expect.objectContaining({ laboralDays: { "2026": { "9": [1, 2, 3, 4] } } }),
-    );
-  });
-
-  it("toggles a non-laboral (e.g. weekend) cursor day on", async () => {
-    configStore = makeConfig({ laboralDays: { "2026": {} } });
-    usageStore = makeUsage({ days: {} }); // no recorded spend, so mount doesn't auto-reconcile any day
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    expect(lastFrame()).toContain("Day 3 · off · Enter/Space: mark as laboral");
-    stdin.write(KEY.space);
-    await flush();
-    expect(saveConfigMock).toHaveBeenLastCalledWith(
-      "default",
-      expect.objectContaining({ laboralDays: { "2026": { "9": [3] } } }),
-    );
-  });
-
-  it("switches the active month with Tab and Shift+Tab within the year", async () => {
-    configStore = makeConfig({ laboralDays: { "2026": { "9": [1, 2, 3, 4], "10": [1] } } });
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    stdin.write(KEY.tab);
-    await flush();
-    expect(lastFrame()).toContain("October 2026");
-    stdin.write(KEY.shiftTab);
-    await flush();
-    expect(lastFrame()).toContain("September 2026");
-    stdin.write(KEY.shiftTab); // August within the same year
-    await flush();
-    expect(lastFrame()).toContain("August 2026");
-  });
-
-  it("switches year with ] and [", async () => {
-    configStore = makeConfig({
-      laboralDays: { "2026": { "9": [1, 2, 3] }, "2027": { "9": [1] } },
-    });
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    stdin.write("]");
-    await flush();
-    expect(lastFrame()).toContain("Year 2027");
-    expect(lastFrame()).toContain("September 2027");
-    stdin.write("[");
-    await flush();
-    expect(lastFrame()).toContain("Year 2026");
-  });
-
-  it("wraps months Jan↔Dec with Tab and uses [ when the cursored year is outside yearsAvailable", async () => {
-    // Only 2026 is known; arrow across into 2027 so years.indexOf(cursor.year) === -1, then [.
-    configStore = makeConfig({ laboralDays: { "2026": { "9": [1, 2, 3] } } });
-    usageStore = makeUsage({ days: {} });
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    // September -> ... Tab to December
-    for (let i = 0; i < 3; i++) {
-      stdin.write(KEY.tab);
-      await flush();
-    }
-    expect(lastFrame()).toContain("December 2026");
-    stdin.write(KEY.tab); // wrap to January 2026
-    await flush();
-    expect(lastFrame()).toContain("January 2026");
-    stdin.write(KEY.shiftTab); // wrap back to December
-    await flush();
-    expect(lastFrame()).toContain("December 2026");
-    // Move into January 2027 via right from Dec 31
-    for (let day = 3; day < 31; day++) {
-      stdin.write(KEY.right);
-    }
-    await flush();
-    stdin.write(KEY.right); // Dec 31 -> Jan 1 2027
-    await flush();
-    expect(lastFrame()).toContain("January 2027");
-    stdin.write("["); // year not in yearsAvailable → c.year + direction
-    await flush();
-    expect(lastFrame()).toContain("Year 2026");
-  });
-
-  it("labels the cap as from Anthropic and blocks cap edit when the ledger supplies it", async () => {
-    configStore = makeConfig({ hasSpendCap: true });
-    usageStore = makeUsage({
-      extraUsageCache: {
-        fetchedAt: 0,
-        data: {
-          usedCredits: 80.94,
-          monthlyLimit: 650,
-          utilizationPct: 12,
-          currency: "USD",
-          spendLimitReached: false,
-          disabledReason: null,
+  it("off day, past-day hint, off-day hint, banners and edit states", async () => {
+    seed({ laboralDays: { "2026": { "10": [1, 2] } } }, { sessions: {} });
+    writeFileSync(
+      path.join(fakeHome, ".claude.json"),
+      JSON.stringify({
+        overageCreditGrantCache: {
+          "uuid-1": {
+            info: {
+              available: true,
+              eligible: true,
+              granted: false,
+              amount_minor_units: 2500,
+              currency: "USD",
+            },
+          },
         },
-      },
-    });
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    expect(lastFrame()).toContain("cap from Anthropic");
-    stdin.write("c");
-    await flush();
-    expect(lastFrame()).not.toContain("Monthly cap:");
-  });
-
-  it("enters cap-edit mode with 'c', accepts digits/backspace, and saves a valid cap on Enter", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    stdin.write("c");
-    await flush();
-    expect(lastFrame()).toContain("Monthly cap: $650");
-    stdin.write(KEY.backspace);
-    await flush();
-    expect(lastFrame()).toContain("Monthly cap: $65");
-    stdin.write("9");
-    await flush();
-    expect(lastFrame()).toContain("Monthly cap: $659");
-    stdin.write("x"); // non-digit, ignored
-    await flush();
-    expect(lastFrame()).toContain("Monthly cap: $659");
-    stdin.write(KEY.enter);
-    await flush();
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ monthlyCap: 659 }),
+      }),
     );
-    expect(lastFrame()).not.toContain("Monthly cap:");
+    const h = await harness();
+    let text = plain(h.mod.renderCalendar(h.model, { color: false }));
+    expect(text).toContain("Today:      $5.00  (off day)");
+    expect(text).toContain("No laboral days left this month");
+    expect(text).toContain("$25.00 credit grant available");
+    expect(text).toContain("Day 7 · off");
+    h.press("\x1b[D");
+    text = plain(h.mod.renderCalendar(h.model, { color: false }));
+    expect(text).toContain("Day 6 · past · locked");
+    h.press("c");
+    expect(plain(h.mod.renderCalendar(h.model, { color: false }))).toContain("Monthly cap: $400_");
+    h.press({ kind: "escape" }, "u", "1");
+    text = plain(h.mod.renderCalendar(h.model, { color: false }));
+    expect(text).toContain("Redistributing October 2026 past days: allocated $26.00 of $25.00");
+    expect(text).toContain("$1_");
+    expect(text).toContain("Editing day 6 $");
+    h.press("S");
+    text = plain(h.mod.renderCalendar(h.model, { color: false }));
+    expect(text).toContain("needs to equal");
+    h.press("\x1b[C");
+    expect(plain(h.mod.renderCalendar(h.model, { color: false }))).toContain("Day 7 is live");
   });
 
-  it("cancels cap-edit mode on Esc without saving", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    stdin.write("c");
-    await flush();
-    stdin.write(KEY.escape);
-    await flush();
-    expect(lastFrame()).not.toContain("Monthly cap:");
-    expect(saveConfigMock).not.toHaveBeenCalled();
+  it("Anthropic cap label, a notice line, and no OAuth account", async () => {
+    seed({}, {}, LEDGER);
+    const h = await harness();
+    h.press("c");
+    const text = plain(h.mod.renderCalendar(h.model, { color: false }));
+    expect(text).toContain("cap: Anthropic");
+    expect(text).toContain("an admin changes it there");
+    const snap = h.mod.computeSnapshot(null, NOW);
+    expect(plain(h.mod.renderCalendar(h.mod.initialModel(snap), { color: false }))).toContain(
+      "Year 2026",
+    );
   });
 
-  it("discards an invalid cap entry (bare '.') on Enter without saving", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { stdin } = render(React.createElement(CalendarApp));
-    stdin.write("c");
-    await flush();
-    stdin.write(KEY.backspace);
-    await flush();
-    stdin.write(KEY.backspace);
-    await flush();
-    stdin.write(KEY.backspace); // "650" -> ""
-    await flush();
-    stdin.write("."); // "." -> Number(".") is NaN, not finite
-    await flush();
-    stdin.write(KEY.enter);
-    await flush();
-    expect(saveConfigMock).not.toHaveBeenCalled();
+  it("Madrid, 01:00 on Oct 1: laboral locally, but the budget period is still September", async () => {
+    vi.stubEnv("TZ", "Europe/Madrid");
+    seed({});
+    const { computeSnapshot, initialModel, renderCalendar } = await fresh();
+    const snap = computeSnapshot(ACCOUNT, new Date("2026-09-30T23:00:00.000Z"));
+    const text = plain(renderCalendar(initialModel(snap), { color: false }));
+    expect(text).toMatch(/Today: {6}\$\d+\.\d{2}\n/); // no pace, not "off day"
+    expect(text).toContain("October 2026");
   });
 
-  it("clears the poll interval on unmount", async () => {
-    const { CalendarApp } = await freshCalendar();
-    const { unmount } = render(React.createElement(CalendarApp));
-    unmount();
-    vi.advanceTimersByTime(10_000);
-    expect(loadConfigMock.mock.calls.length).toBeLessThanOrEqual(1);
-  });
-
-  it("hides monthlyCap/laboralDays UI and disables their keys once the account has no spend cap", async () => {
-    configStore = makeConfig({ hasSpendCap: false, planType: "claude_pro" });
-    const { CalendarApp } = await freshCalendar();
-    const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-    const frame = lastFrame();
-    expect(frame).not.toContain("This month:");
-    expect(frame).not.toContain("September 2026");
-    expect(frame).toContain("No spend cap on this plan (claude_pro)");
-    expect(frame).not.toContain("c cap");
-
-    stdin.write("c");
-    await flush();
-    expect(lastFrame()).not.toContain("Monthly cap:");
-
-    stdin.write(KEY.space);
-    await flush();
-    expect(saveConfigMock).not.toHaveBeenCalled();
-  });
-
-  it("falls back to a generic plan label when hasSpendCap is false but planType wasn't resolved", async () => {
-    configStore = makeConfig({ hasSpendCap: false });
-    const { CalendarApp } = await freshCalendar();
-    const { lastFrame } = render(React.createElement(CalendarApp));
-    expect(lastFrame()).toContain("No spend cap on this plan (subscription)");
-  });
-
-  it("refreshes the snapshot on the poll interval", async () => {
-    const { CalendarApp } = await freshCalendar();
-    render(React.createElement(CalendarApp));
-    const callsBefore = loadConfigMock.mock.calls.length;
-    vi.advanceTimersByTime(2000);
-    expect(loadConfigMock.mock.calls.length).toBeGreaterThan(callsBefore);
-  });
-
-  describe("day-edit mode (u / S)", () => {
-    it("enters day-edit mode with the draft pre-seeded to the current month's pool", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      // day 3 (today, fixed system time) has no usage.days entry yet — seeded from the live todayUsage
-      // (monthlySpent 80.94 minus days 1+2's 20+15 = 45.94), so the draft already sums to the pool.
-      expect(lastFrame()).toContain("Redistributing September 2026 pool $80.94");
-      expect(lastFrame()).toContain("Allocated $80.94 of $80.94");
-      expect(lastFrame()).toContain("Editing day 3 $ (month pool $80.94)");
-      expect(lastFrame()).toContain("start clean next laboral day");
-      expect(lastFrame()).toContain("$_"); // auto $ prefix on the cursor cell
-    });
-
-    it("typing digits then Enter commits the value into the draft for the cursored day", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write("5");
-      stdin.write("0");
-      await flush();
-      expect(lastFrame()).toContain("$50_");
-      stdin.write(KEY.enter);
-      await flush();
-      expect(lastFrame()).toContain("$_");
-      expect(lastFrame()).toContain("Allocated $85.00 of $80.94"); // 20 + 15 + 50
-    });
-
-    it("arrow-key navigation auto-commits the in-progress buffer before moving", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write("5");
-      await flush();
-      stdin.write(KEY.left); // day 3 -> day 2, committing $5 to day 3 first
-      await flush();
-      expect(lastFrame()).toContain("Editing day 2 $");
-      expect(lastFrame()).toContain("Allocated $40.00 of $80.94"); // 20 + 15 + 5
-    });
-
-    it("right/up/down all move the cursor while in edit mode", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write(KEY.right); // day 3 -> day 4
-      await flush();
-      expect(lastFrame()).toContain("Editing day 4 $");
-      stdin.write(KEY.down); // day 4 -> day 11
-      await flush();
-      expect(lastFrame()).toContain("Editing day 11 $");
-      stdin.write(KEY.up); // day 11 -> day 4
-      await flush();
-      expect(lastFrame()).toContain("Editing day 4 $");
-    });
-
-    it("keeps edit-mode arrows inside the edited month at the boundary", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write(KEY.left); // day 3 -> 2
-      await flush();
-      stdin.write(KEY.left); // day 2 -> 1
-      await flush();
-      stdin.write(KEY.left); // would leave September — clamp stays on day 1
-      await flush();
-      expect(lastFrame()).toContain("Editing day 1 $");
-      expect(lastFrame()).toContain("September 2026");
-    });
-
-    it("ignores an unhandled key while in edit mode", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write("x");
-      await flush();
-      expect(lastFrame()).toContain("Editing day 3 $");
-      expect(lastFrame()).toContain("Allocated $80.94 of $80.94");
-    });
-
-    it("backspace edits the in-progress buffer", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write("5");
-      stdin.write("9");
-      await flush();
-      stdin.write(KEY.backspace);
-      await flush();
-      expect(lastFrame()).toContain("$5_");
-    });
-
-    it("S with a mismatched sum shows a warning and does not save", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write("1");
-      stdin.write("0");
-      await flush();
-      stdin.write("S");
-      await flush();
-      expect(saveUsageMock).not.toHaveBeenCalled();
-      expect(lastFrame()).toContain("not saved");
-      expect(lastFrame()).toContain("Redistributing September 2026"); // stays in edit mode
-    });
-
-    it("S with a matching sum saves and exits edit mode", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write("S");
-      await flush();
-      expect(saveUsageMock).toHaveBeenCalledWith(
-        "default",
-        expect.objectContaining({
-          days: { "2026-09-01": 20, "2026-09-02": 15, "2026-09-03": 45.94 },
-        }),
-      );
-      expect(lastFrame()).not.toContain("Redistributing September 2026");
-    });
-
-    it("Esc cancels day-edit mode without saving", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write("9");
-      await flush();
-      stdin.write(KEY.escape);
-      await flush();
-      expect(saveUsageMock).not.toHaveBeenCalled();
-      expect(lastFrame()).not.toContain("Redistributing September 2026");
-    });
-
-    it("silently drops a non-numeric buffer instead of corrupting the draft", async () => {
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write(".");
-      await flush();
-      stdin.write(KEY.enter);
-      await flush();
-      // "." alone parses to NaN — dropped, draft stays at its original seeded total.
-      expect(lastFrame()).toContain("Allocated $80.94 of $80.94");
-    });
-
-    it("only clears the saved month's own days, leaving other months' recorded spend untouched", async () => {
-      usageStore = makeUsage({
-        days: { "2026-08-10": 99, "2026-09-01": 20, "2026-09-02": 15 },
-      });
-      const { CalendarApp } = await freshCalendar();
-      const { stdin } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      stdin.write("S");
-      await flush();
-      expect(saveUsageMock).toHaveBeenCalledWith(
-        "default",
-        expect.objectContaining({
-          days: { "2026-08-10": 99, "2026-09-01": 20, "2026-09-02": 15, "2026-09-03": 45.94 },
-        }),
-      );
-    });
-
-    it("uses the sum of existing days (not monthlySpent) as the pool for a past, non-current month", async () => {
-      usageStore = makeUsage({
-        days: { "2026-08-15": 30, "2026-08-20": 10, "2026-09-01": 20, "2026-09-02": 15 },
-      });
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write(KEY.shiftTab); // September -> August within the year
-      await flush();
-      stdin.write("u");
-      await flush();
-      expect(lastFrame()).toContain("Redistributing August 2026");
-      expect(lastFrame()).toContain("Allocated $40.00 of $40.00");
-    });
-
-    it("does nothing when hasSpendCap is false — no dollar tracking to edit", async () => {
-      configStore = makeConfig({ hasSpendCap: false });
-      const { CalendarApp } = await freshCalendar();
-      const { stdin, lastFrame } = render(React.createElement(CalendarApp));
-      stdin.write("u");
-      await flush();
-      expect(lastFrame()).not.toContain("Editing");
-    });
+  it("over-budget laboral day and a month with no laboral days", async () => {
+    seed({ monthlyCap: 10 }, { periodFrozen: 25 });
+    const h = await harness();
+    expect(plain(h.mod.renderCalendar(h.model, { color: false }))).toContain("/ $0.00  (over)");
+    seed({ laboralDays: {} });
+    const empty = await harness();
+    const text = plain(empty.mod.renderCalendar(empty.model, { color: false }));
+    expect(text).toContain("No laboral days configured for October 2026");
+    expect(text).not.toContain("Day-1 max");
   });
 });

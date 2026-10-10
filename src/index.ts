@@ -9,9 +9,11 @@ export type { ExtraUsage, OauthProfile, ResolvedToken } from "./anthropic-usage.
 export {
   fetchExtraUsage,
   fetchOauthProfile,
-  getCachedExtraUsage,
+  fetchUsage,
   resolveOAuthAccessToken,
 } from "./anthropic-usage.js";
+export type { CacheForecast } from "./cache-forecast.js";
+export { forecastCache } from "./cache-forecast.js";
 export {
   applyLedgerReading,
   captureSessionCost,
@@ -19,11 +21,13 @@ export {
   computeAvgPerDay,
   computeRealAvgPerDay,
   computeToday,
+  freshUsage,
   getLaboralDays,
   isLaboralDay,
   paceLabel,
   pruneStaleSessions,
   rolloverIfNeeded,
+  upgradeUsage,
   utcDateString,
 } from "./calc.js";
 export {
@@ -34,11 +38,17 @@ export {
   saveConfig,
   saveUsage,
 } from "./config.js";
-export type { ComputedUsage, StatuslineJson } from "./interfaces/calc.interface.js";
+export type { ComputedUsage } from "./interfaces/calc.interface.js";
 export type {
+  ApiCache,
   Config,
   ExtraUsageCacheEntry,
   SessionCost,
   UsageState,
 } from "./interfaces/config.interface.js";
-export type { InitPayload } from "./interfaces/init.interface.js";
+export type {
+  HookPayload,
+  StatuslineState as StatuslineJson,
+  StatuslineState,
+} from "./interfaces/statusline.interface.js";
+export { normalizeModelId, ratesFor } from "./pricing.js";

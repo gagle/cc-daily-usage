@@ -14,7 +14,7 @@ decision tree.
    `pnpm vitest run src/<file>.spec.ts`.
 2. Before calling ANY change done, run:
    ```
-   pnpm lint && pnpm typecheck && pnpm format:check && pnpm test && pnpm run test:e2e && pnpm build
+   pnpm lint && pnpm typecheck && pnpm format:check && pnpm docs:check && pnpm test && pnpm build && pnpm run test:e2e
    ```
 3. After that build (and after any earlier build during the change), always
    refresh the machine install:
@@ -33,6 +33,6 @@ decision tree.
    `pnpm test`. Don't reach for a v8-ignore comment to dodge this; only use
    the existing inline convention for genuinely untestable branches (see
    existing use sites in `src/*.ts`).
-6. Steps 2's lint→test→e2e→build sequence is what `.github/workflows/ci.yml`
-   runs (3 parallel jobs) — passing it locally means CI passes too, not an
+6. Step 2's sequence is what `.github/workflows/ci.yml` runs (parallel jobs;
+   e2e builds first, on Linux/macOS/Windows) — passing it locally means CI passes too, not an
    approximation. Step 3 is local-machine only (not CI).

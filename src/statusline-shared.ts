@@ -89,12 +89,105 @@ export function readJsonFile(filePath: string): Record<string, unknown> {
   return raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
 }
 
+/** Re-run interval while a session is idle. Each run is local-only (see statusline.ts) and the usage API
+ * is throttled by its own TTL, so this costs no tokens; it is what turns a stale ⏱ fresh without a message. */
+export const STATUSLINE_REFRESH_SECONDS = 30;
+/** While the prompt cache has under a minute left, re-render every second so the countdown is live. */
+export const STATUSLINE_FAST_REFRESH_SECONDS = 1;
+export const FAST_REFRESH_BELOW_SECONDS = 60;
+
+/**
+ * Switches our statusLine.refreshInterval between the idle and the fast value. Writes only on a change (at
+ * most twice per cache cycle) and only when the interval is one of ours — a user-chosen value is left alone.
+ * # ponytail: relies on Claude Code re-reading settings.json live; read-modify-write could race a manual edit
+ * of settings.json in the same millisecond. Upgrade path: a native dynamic-interval API if Claude Code adds one.
+ */
+export function syncRefreshInterval(seconds: number): void {
+  const settings = readJsonFile(SETTINGS_FILE);
+  const statusLine = settings.statusLine as Record<string, unknown> | undefined;
+  if (statusLine?.command !== `node ${JSON.stringify(STATUSLINE_FILE)}`) return;
+  const current = statusLine.refreshInterval;
+  if (current === seconds) return;
+  if (current !== STATUSLINE_REFRESH_SECONDS && current !== STATUSLINE_FAST_REFRESH_SECONDS) return;
+  settings.statusLine = { ...statusLine, refreshInterval: seconds };
+  writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
+
 /** Merges (never overwrites other keys) a `statusLine` block pointing at our managed script. An explicit
  * `node` prefix, not a bare path relying on a shebang + exec bit: Windows resolves neither. `node` itself
- * is guaranteed on PATH — it's what runs Claude Code / cc-daily-usage in the first place. */
+ * is guaranteed on PATH — it's what runs Claude Code / cc-daily-usage in the first place. A user-set
+ * refreshInterval/padding on our own block is kept. Skips the write when nothing changes. */
 export function ensureSettingsStatusLine(): void {
   ensureClaudeDir();
   const settings = readJsonFile(SETTINGS_FILE);
-  settings.statusLine = { type: "command", command: `node ${JSON.stringify(STATUSLINE_FILE)}` };
+  const command = `node ${JSON.stringify(STATUSLINE_FILE)}`;
+  const current = settings.statusLine as Record<string, unknown> | undefined;
+  const ours = current?.command === command ? current : {};
+  const next = {
+    ...ours,
+    type: "command",
+    command,
+    refreshInterval: ours.refreshInterval ?? STATUSLINE_REFRESH_SECONDS,
+  };
+  if (JSON.stringify(current) === JSON.stringify(next)) return;
+  settings.statusLine = next;
   writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
+
+/** Our hooks: the Claude Code event, and the hidden flag that runs it (also how we recognise our own entry). */
+const MANAGED_HOOKS = [
+  { event: "UserPromptSubmit", flag: "--prompt-gate" },
+  { event: "PreModelSwitch", flag: "--model-switch" },
+] as const;
+
+/** The command one of our hooks runs; recognised (and replaced/removed) by its flag. */
+export function hookCommand(binPath: string, flag: string): string {
+  return `node ${JSON.stringify(binPath)} ${flag}`;
+}
+
+interface HookGroup {
+  readonly matcher?: string;
+  readonly hooks?: ReadonlyArray<{ readonly type?: string; readonly command?: string }>;
+}
+
+function isOurs(group: HookGroup, flag: string): boolean {
+  return (group.hooks ?? []).some((hook) => hook.command?.includes(flag) === true);
+}
+
+/** Adds (or re-points) our hooks (prompt gate, model-switch cost) in settings.json, keeping every other
+ * hook. `null` removes them. Skips the write when nothing changes. */
+export function ensureManagedHooks(binPath: string | null): void {
+  ensureClaudeDir();
+  const settings = readJsonFile(SETTINGS_FILE);
+  const hooks = new Map(
+    Object.entries((settings.hooks as Record<string, Array<HookGroup>> | undefined) ?? {}),
+  );
+  for (const { event, flag } of MANAGED_HOOKS) {
+    const others = (hooks.get(event) ?? []).filter((group) => !isOurs(group, flag));
+    const next =
+      binPath === null
+        ? others
+        : [
+            ...others,
+            { hooks: [{ type: "command", command: hookCommand(binPath, flag), timeout: 10 }] },
+          ];
+    if (next.length > 0) hooks.set(event, next);
+    else hooks.delete(event);
+  }
+  const nextSettings: Record<string, unknown> = { ...settings, hooks: Object.fromEntries(hooks) };
+  if (hooks.size === 0) delete nextSettings.hooks;
+  if (JSON.stringify(nextSettings) === JSON.stringify(settings)) return;
+  writeFileSync(SETTINGS_FILE, JSON.stringify(nextSettings, null, 2));
+}
+
+/** `promptCacheTtl` from ~/.claude/settings.json (Claude Code v2.1.242+), undefined when unset. */
+export function promptCacheTtl(): string | undefined {
+  const value = readJsonFile(SETTINGS_FILE).promptCacheTtl;
+  return typeof value === "string" ? value : undefined;
+}
+
+export function setPromptCacheTtl(ttl: "5m" | "1h"): void {
+  ensureClaudeDir();
+  const settings = readJsonFile(SETTINGS_FILE);
+  writeFileSync(SETTINGS_FILE, JSON.stringify({ ...settings, promptCacheTtl: ttl }, null, 2));
 }

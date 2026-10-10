@@ -2,50 +2,46 @@
 
 ## Coverage policy
 
-100% coverage is enforced — `vitest.config.ts` sets
-`coverage.thresholds = { statements: 100, branches: 100, functions: 100, lines: 100 }`.
-A change without a matching spec update fails `pnpm test`.
-
-Untestable branches use the standard v8 ignore convention inline at the use site
-(`/* v8 ignore next */` or `/* v8 ignore start */` … `/* v8 ignore stop */`) — look
-at the existing use sites in `src/*.ts` rather than inventing a new pattern.
+100% statements/branches/functions/lines over `src/**` (`vitest.config.ts`).
+The IO-only shell of the calendar (`runCalendarTui`) is the one
+`/* v8 ignore start */` block; everything it calls is covered through the
+pure functions. Do not add v8-ignore comments to dodge a branch — restructure
+or test it.
 
 ## Verification commands
 
-Run before calling any change done, scoped to what changed where practical:
-
 ```
-pnpm lint && pnpm typecheck && pnpm format:check && pnpm test && pnpm run test:e2e && pnpm build
+pnpm lint && pnpm typecheck && pnpm format:check && pnpm docs:check && pnpm test && pnpm build && pnpm run test:e2e
 ```
 
-For a single affected spec while iterating:
+`test:e2e` runs the built binary, so it comes after `build`. While iterating:
+`pnpm vitest run src/<file>.spec.ts`.
 
-```
-pnpm vitest run src/<file>.spec.ts
-```
+## Test layout
 
-`test:e2e` (built-binary smoke tests, `e2e/cli.spec.ts`) and `build` only need
-re-running when `bin/`, `dist/` output, or the CLI's built entrypoint behavior
-changed — not for a docs-only or single-unit-test change.
+- Pure modules (`calc`, `clock`, `pricing`, `cache-forecast`,
+  `statusline-render`, `notice`) — plain input/output assertions.
+  `src/calc.spec.ts` is the exemplar, including the time-zone matrix
+  (`vi.stubEnv("TZ", …)`: UTC, Europe/Madrid, America/Los_Angeles; DST days in
+  `src/clock.spec.ts`).
+- File-backed modules (`config`, `account`, `refresh`, `statusline`,
+  `calendar-tui`, `cli`, installers) — a temp HOME via a mocked
+  `node:os` `homedir`; no real `~/.claude` is touched.
+- `e2e/cli.spec.ts` — the built binary in a temp HOME: help/errors, a
+  first-run render (fast, no history written), garbage stdin, calendar notice
+  and non-TTY frame. No network: the refresher finds no token.
 
-## Exemplar test
+## Docs gate
 
-`src/calc.spec.ts` is the exemplar to model new tests on — it exercises every
-branch of `calc.ts`'s pure functions (see `docs/calculations.md`) with plain
-input/output assertions, no mocking needed since `calc.ts` has no I/O.
+`pnpm docs:check` (`scripts/doc-drift.mjs check`): every backticked repo path
+in a doc resolves, no `:line` citations, every doc is mapped or exempt, every
+source area is documented. `pnpm docs:drift` lists docs whose sources changed
+in the current diff; the Stop hook `.claude/hooks/doc-drift-check.sh` runs it
+once per session.
 
 ## CI
 
-`.github/workflows/ci.yml` mirrors the verification commands above — this is
-the real merge gate, not an approximation:
-
-| Job                       | Runs                                                                        | When          |
-| ------------------------- | --------------------------------------------------------------------------- | ------------- |
-| `lint`                    | `pnpm run lint` → `pnpm run typecheck` → `pnpm run format:check`            | every push/PR |
-| `build`                   | `pnpm run build`                                                            | every push/PR |
-| `test`                    | `pnpm run test` → `pnpm run test:e2e`, uploads `coverage/` artifact         | every push/PR |
-| `coverage` (needs `test`) | posts the coverage report as a PR comment (`vitest-coverage-report-action`) | PR only       |
-
-`lint`, `build`, `test` run in parallel, not sequentially — all three must
-pass for a merge. The commands above (single combined line) are the same
-checks, just run locally in one shot instead of three parallel jobs.
+`.github/workflows/ci.yml` runs the same checks: `lint` (lint, typecheck,
+format, docs), `build`, `test` (unit, 100% coverage), `e2e` (build, then the
+built binary on Linux, macOS and Windows); `coverage` comments on PRs. The
+build script is cross-platform (no `rm -rf`).

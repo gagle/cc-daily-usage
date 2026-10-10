@@ -1,111 +1,117 @@
 # Architecture
 
-How `cc-daily-usage` is put together: module map, data flow, multi-account model,
-and the `hasSpendCap` branch that decides whether dollar-cap tracking runs at all.
+How `cc-daily-usage` is put together: module map, data flow, multi-account
+model, and the `hasSpendCap` branch that decides whether dollar-cap tracking
+runs at all. Runtime dependencies: none (Node built-ins only).
 
-## System context (C4 L1)
+## System context
 
 ```
                  +-----------------------------+
-   +--------+    |        cc-daily-usage        |    +----------------+
-   |  User  |<-->|  CLI + statusline + Ink TUI  |<-->| Anthropic API  |
-   +--------+    +-----------------------------+    | (/api/oauth/    |
-                    ^                    |          |  usage)         |
-                    |                    v          +----------------+
-             +-------------+     +----------------+
-             | Claude Code |     |  Filesystem    |
-             | (hook stdin,|     | ~/.config/cc-  |
-             |  statusline |     | daily-usage/,  |
-             |  render)    |     | ~/.claude/     |
-             +-------------+     +----------------+
+   +--------+    |        cc-daily-usage       |    +-------------------+
+   |  User  |<-->| CLI + statusline + terminal |<-->| Anthropic API     |
+   +--------+    |          calendar           |    | /api/oauth/usage  |
+                 +-----------------------------+    | /api/oauth/profile|
+                    ^                    |          +-------------------+
+                    |                    v               ^ (detached
+             +-------------+     +----------------+      |  refresher only)
+             | Claude Code |     |  Filesystem    |------+
+             | statusline  |     | ~/.config/cc-  |
+             | stdin JSON  |     | daily-usage/,  |
+             +-------------+     | ~/.claude/     |
+                                 +----------------+
 ```
 
-User runs the CLI or reads the statusline; Claude Code drives the hook that
-triggers every statusline render; `cc-daily-usage` reads/writes its own
-config+usage files under `~/.config/`, manages the installed statusline
-script under `~/.claude/`, and calls Anthropic's usage API directly for
-extra-usage credit reconciliation.
+The render path never touches the network. A detached `--refresh` process
+fetches `/api/oauth/usage` (read-only, no model call, no tokens) and writes
+`api-cache.json`; renders read it.
 
 ## Why these decisions
 
-- **`calc.ts` mutates `UsageState` in place, never returns a new object.**
-  The hook path re-reads/re-writes the same JSON file every render; a
-  copy-on-write style would just add allocation and diffing work for no
-  benefit, since there's only ever one writer per account and no concurrent
-  readers to protect against.
-- **`avgPerDay`/`safeMonthTotal` are derived, not stored.**
-  `computeAvgPerDay` uses only the days before today, so the value is stable
-  through the UTC day without a frozen copy, and it follows a `monthlyCap`
-  change at once. See `docs/calculations.md`.
-- **`hasSpendCap` starts `undefined` and self-heals, instead of requiring
-  explicit config.** It gates this tool's fabricated dollar monthlyCap
-  budget only. Seat-window `rate_limits` (5h/7d) are separate — Team and
-  Enterprise seats have them too. `organizationType` wins when known;
-  `rate_limits` may demote an _unrecognized_ org's dollar guess to false,
-  never a known enterprise/team classification.
+- **One process per render, no network on it.** The installed shim imports
+  `src/statusline.ts` in-process. Branch comes from `.git/HEAD`
+  (`src/git.ts`), not a `git` spawn. See `docs/performance.md`.
+- **Stale-while-revalidate for API data.** `requestApiRefresh` in
+  `src/refresh.ts` spawns at most one refresher per account per TTL (lock
+  file). The fresh reading shows on the next render; `statusLine.refreshInterval`
+  makes that next render happen while idle. ADR:
+  `adrs/2026-10-10-session-start-usage-refresh.md`.
+- **Two clocks.** Days are local; the budget period is the UTC month (the
+  ledger's). See `docs/time-model.md` and
+  `adrs/2026-10-10-two-clock-day-model.md`.
+- **`calc.ts` mutates `UsageState` in place.** One writer per render; a
+  copy-on-write style only adds allocation.
+- **Derived, not stored:** today's max (`computeAvgPerDay`) is computed every
+  call, so a cap change or a laboral-day change applies at once.
+- **`hasSpendCap` self-heals.** `organizationType` wins when known;
+  `rate_limits` may demote an _unrecognized_ org's dollar guess to false, never
+  a known enterprise/team classification.
+- **Atomic writes.** Every JSON file goes through `writeFileAtomic` in
+  `src/config.ts` (temp file + rename). A killed render (Claude Code cancels
+  in-flight statusline runs) never leaves a half-written file.
 
 ## Module map
 
 ```
-account.ts            identity/token resolution (OAuth account, keychain/plaintext token)
-anthropic-usage.ts     Anthropic API calls (oauth profile, extra-usage credits, cached)
-calc.ts                pure math, mutates its UsageState argument in place
-config.ts              per-account JSON persistence, legacy single-account migration
-cli.ts                 operation dispatch + hidden `--statusline` hook path
-calendar-tui.ts       Ink TUI app (calendar, cap edit, day edit)
-statusline-shared.ts   installer utilities shared by both install paths below
-statusline-install.ts        idempotent full install of assets/statusline.mjs
-statusline-capture-install.ts  fallback capture-only install (no full statusline)
-init-server.ts         loopback HTTP server backing assets/init-calendar.html
-http-utils.ts          security utilities used by init-server.ts
+cli.ts                 operation dispatch; every operation lazy-imports its modules
+statusline.ts          render pipeline: account → config/usage → calc → state (hot path)
+statusline-render.ts   pure (payload, state, branch) → ANSI line
+refresh.ts             lock + detached --refresh spawn; the refresher body
+anthropic-usage.ts     token resolution, /api/oauth/usage + profile fetch, cache helpers
+account.ts             identity (~/.claude.json, token-override profile cache), accountKey()
+config.ts              per-account JSON persistence, atomic writes, legacy migration
+calc.ts                pure budget math (rollover, ledger, pace)
+clock.ts               local-day / UTC-period helpers
+cache-forecast.ts      prompt-cache next-prompt cost prediction
+pricing.ts             per-model $/MTok table and cache multipliers
+git.ts                 branch from .git/HEAD
+calendar-tui.ts        dependency-free terminal calendar (pure render + reducer + IO loop)
+notice.ts              boxed terminal notices (calendar on Pro/Max)
+statusline-install.ts  install / upgrade / uninstall of the shim
+statusline-shared.ts   installer helpers, settings.json statusLine merge
+statusline-capture-install.ts  capture-only fallback for a foreign statusline
 ```
-
-`account.ts` → `anthropic-usage.ts` → `calc.ts` → `config.ts` is the read/compute/write
-chain the statusline hook runs on every render. `cli.ts` is the entrypoint that wires
-all of the above into the three user-facing operations.
 
 ## Data flow
 
-**Statusline hook (every Claude Code render):**
+**Statusline render (every Claude Code statusline update):**
 
 ```
-Claude Code hook (stdin JSON)
-  -> assets/statusline.mjs (installed into ~/.claude/statusline.mjs)
-       spawns: cc-daily-usage --statusline
-         -> runStatuslineHidden() in cli.ts
-              -> resolveActiveAccount() (account.ts) -> accountKey()
-              -> reads ~/.config/cc-daily-usage/accounts/<key>/{config,usage}.json
-              -> rolloverIfNeeded(), getCachedExtraUsage(), captureSessionCost(), applyLedgerReading() (calc.ts)
-              -> dollar-cap account + ledger: monthlyCap synced from extra_usage.monthly_limit
-              -> writes usage.json back
-              -> prints one JSON line to stdout
-  <- statusline.mjs renders the ANSI line (bar, cost, rate limits, cc-daily-usage segments)
+Claude Code (stdin JSON)
+  -> node ~/.claude/statusline.mjs          (shim from assets/statusline.mjs)
+       import(<package>/dist/statusline.js) (same process)
+       runStatuslineLine()
+         -> parsePayload (garbage → {})
+         -> resolveActiveAccount() -> accountKey()
+         -> loadConfig / loadUsage (upgradeUsage) / loadApiCache
+         -> classify hasSpendCap, merge hook rate_limits (seenAt)
+         -> rolloverIfNeeded -> captureSessionCost -> applyLedgerReading
+         -> forecastCache (prompt_cache) ; saveUsage (skipped when unchanged)
+         -> requestApiRefresh (detached, at most once per TTL)
+         -> renderStatusline(payload, state, readGitBranch(cwd))
+  <- ANSI on stdout: row 1, prompt-cache row 2
 ```
 
-`calendar-tui.ts` polls the same `config.json`/`usage.json` files independently every
-2000ms — it does not talk to `cli.ts` or the hook path at all, just the filesystem.
+Shims installed by older versions still spawn `cc-daily-usage --statusline`
+and render the JSON themselves; that mode is kept.
 
-**`init` operation:**
-
-```
-cc-daily-usage init
-  -> runInit() starts a loopback-only HTTP server (init-server.ts)
-  -> opens assets/init-calendar.html in the default browser
-  -> user picks laboral days + monthly cap
-  -> browser POSTs an InitPayload to the loopback server
-  -> written to config.json
-```
-
-**`statusline` operation (installer):**
+**Refresher (`cc-daily-usage --refresh <key>`, detached):**
 
 ```
-cc-daily-usage statusline
-  -> installStatusline() (statusline-install.ts)
-       stamps assets/statusline.mjs (content-hash version) into ~/.claude/statusline.mjs
-       patches ~/.claude/settings.json to point statusLine.command at it
-       idempotent: re-running detects the `// cc-daily-usage:managed v<hash>` marker
-       and no-ops/upgrades instead of prompting or backing up again
+resolveOAuthAccessToken (env → macOS Keychain → ~/.claude/.credentials.json)
+  -> GET /api/oauth/usage -> nextApiCache (failure keeps last reading, stale)
+  -> accounts/<key>/api-cache.json ; remove refresh.lock
 ```
+
+**`init`:** statusline install prompt → (Team/Enterprise) offer Mon–Fri for
+this and next month → open the calendar on a TTY. Pro/Max stop after the
+statusline.
+
+**`calendar`:** plan gate (`classifyHasSpendCap`, else the hook's cached
+`hasSpendCap`) → Pro/Max/unknown print a notice from `src/notice.ts` and
+exit → Team/Enterprise open `runCalendarTui`. The calendar re-reads files every
+poll, applies the ledger in memory and requests a refresh, so an admin limit
+change shows without a running session.
 
 ## Multi-account model
 
@@ -114,35 +120,19 @@ Every account is scoped by `accountKey()` under
 
 - `accountKey()` sanitizes the OAuth account's email into a filesystem-safe key.
 - `"default"` is used when there is no OAuth account at all.
-- A one-time migration moves any pre-existing single-account state into
-  `accounts/legacy/` the first time multi-account support runs.
-
-Never assume `"default"` — always resolve the key via `accountKey()`.
+- A `CLAUDE_CODE_OAUTH_TOKEN` override resolves its account through
+  `/api/oauth/profile` once per token; the result is cached in
+  `~/.config/cc-daily-usage/profiles.json` under a token hash.
+- A one-time migration moves pre-multi-account files into `accounts/legacy/`.
 
 ## `hasSpendCap` branching
 
-`classifyHasSpendCap(organizationType)` (from `~/.claude.json`'s `oauthAccount.organizationType`):
+| `organizationType`                 | `hasSpendCap` (dollar self-budget)        |
+| ---------------------------------- | ----------------------------------------- |
+| `claude_enterprise`, `claude_team` | `true`                                    |
+| `claude_pro`, `claude_max`         | `false`                                   |
+| anything else / unknown            | guessed: `true`, demoted by `rate_limits` |
 
-| `organizationType`                 | `hasSpendCap` (dollar self-budget) |
-| ---------------------------------- | ---------------------------------- |
-| `claude_enterprise`, `claude_team` | `true`                             |
-| `claude_pro`, `claude_max`         | `false`                            |
-| anything else / unknown            | `undefined` (unresolved)           |
-
-Seat windows (`rate_limits` 5h/7d) still arrive on the hook for subscription seats,
-but the **statusline display** splits by `hasSpendCap`: Pro/Max show `⏱` (+ `🎫`
-when usage credits exist); enterprise shows `$` self-budget only (no `⏱`, no `🎫`).
-`$today` is omitted on non-laboral days; off-day spend still updates `monthlySpent`
-and lowers the next laboral day's max — see `docs/calculations.md`.
-
-## Security model
-
-`init-server.ts` (backing the `init` calendar picker) is loopback-only and hardened,
-via `http-utils.ts`:
-
-- `isAllowedHost()` — Host-header allowlist, loopback addresses only.
-- `constantTimeEquals()` — constant-time token comparison (no timing side-channel).
-- `readRequestBody()` / `BodyTooLargeError` — 256KB request body cap.
-- Hardened response headers on every response.
-
-See `docs/use-cases.md` for the full request flow this protects.
+Statusline display: Pro/Max show `⏱` (+ `🎫` when usage credits exist);
+budget plans show `$today/$max` and `$month/$cap`. Both show the `🔥`/`❄` cache
+segment and the gateway `💳` spend limit when present.

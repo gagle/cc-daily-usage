@@ -1,38 +1,57 @@
 # cc-daily-usage
 
-Know exactly where your Claude Code spend stands — without lifting a finger.
+Know where your Claude Code spend stands, and what your next prompt costs.
 
 ## What it does
 
-Drops a live spend bar into your Claude Code statusline, tracks daily/monthly
-totals automatically, and warns you before you blow the budget. On a
-Pro/Max plan? It shows your real 5h/7d rate limits instead — no fake dollar
-numbers.
+- A fast live statusline (one Node process, no network on the render path).
+- **Team / Enterprise:** a monthly $ budget spread over your work days —
+  `$today/$max` and `$month/$cap`. The cap follows your org's Anthropic spend
+  limit automatically; take a day off and the rest re-splits evenly.
+- **Pro / Max:** real 5h/7d limits, fresh at session start without sending a
+  message, when you can continue after hitting a limit, plus usage credits.
+- **Everyone:** the prompt-cache cost of each message and of a miss, a live
+  countdown, when to `/compact` (while warm, before a break) or `/clear` (once cold), and a
+  gate that stops a costly cold-cache prompt before it is sent.
+
+```
+(🌿 main) | ████████░░ ⚡ 42% | $1.80 | 🤖 Opus 5.5 | 🔥 cold in 4m · $0.04/msg · if cold +$1.20 | $12.40/$30.00 (41%) | $210.00/$650.00 (32%)
+```
 
 ## Install
 
 ```sh
 npm install -g cc-daily-usage
+cc-daily-usage init
 ```
 
-## Use it
+`init` installs the statusline and, on Team/Enterprise, offers Monday–Friday
+as work days and opens the calendar to set holidays and the cap. Requires
+Node 24+.
+
+## Commands
 
 ```sh
-cc-daily-usage init         # pick a monthly budget + working days (one-time, browser calendar)
-cc-daily-usage statusline   # turn on the live statusline
-cc-daily-usage calendar     # open the terminal calendar
+cc-daily-usage init         # first-run setup (terminal only)
+cc-daily-usage statusline   # install / update the statusline
+cc-daily-usage calendar     # work days, daily max, history (Team/Enterprise)
+cc-daily-usage settings     # arrange the statusline: parts, order, lines
+cc-daily-usage uninstall    # remove it and restore your previous statusline
 ```
 
-Spend is captured automatically from Claude Code's own hooks — nothing to
-log by hand. Everything lives in `~/.config/cc-daily-usage/`. Logged into
-multiple Claude accounts? Each one gets its own tracking, automatically.
+Spend is captured from Claude Code's own statusline data — nothing to log by
+hand. Each Claude account gets its own tracking under
+`~/.config/cc-daily-usage/`.
+
+## Privacy
+
+No server, no analytics. The only network calls go to Anthropic's own
+read-only endpoints Claude Code already uses (`/api/oauth/usage`,
+`/api/oauth/profile`), with your existing Claude Code login, from a background
+process.
 
 ## Development
 
 ```sh
 pnpm install && pnpm build && pnpm test
 ```
-
-No real credentials needed — the whole test suite runs offline. See
-`docs/testing-and-verification.md` for the full verification command and
-coverage policy.

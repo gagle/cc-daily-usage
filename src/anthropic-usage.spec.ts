@@ -6,7 +6,6 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as AnthropicUsageModule from "./anthropic-usage.js";
-import type { UsageState } from "./interfaces/config.interface.js";
 
 let fakeHome: string;
 
@@ -209,188 +208,93 @@ describe("anthropic-usage.ts", () => {
     });
   });
 
-  describe("getCachedExtraUsage", () => {
-    function makeUsage(): UsageState {
-      return {
-        monthlySpent: 0,
-        lastUpdated: "2026-09-01T00:00:00.000Z",
-        days: {},
-        sessions: {},
-      };
-    }
-
-    it("fetches and caches when there's no prior cache entry", async () => {
+  describe("fetchUsage", () => {
+    it("parses seat windows (ISO resets → epoch seconds) next to extra_usage", async () => {
       vi.stubGlobal(
         "fetch",
         vi.fn().mockResolvedValue({
           ok: true,
           json: () =>
             Promise.resolve({
-              extra_usage: {
-                is_enabled: true,
-                used_credits: 100,
-                monthly_limit: 1000,
-                utilization: 10,
-              },
+              five_hour: { utilization: 42, resets_at: "2026-10-10T15:00:00Z" },
+              seven_day: { utilization: 7, resets_at: null },
+              extra_usage: { is_enabled: false },
             }),
         }),
       );
-      const { getCachedExtraUsage } = await freshModule();
-      const usage = makeUsage();
-      const now = new Date("2026-09-10T00:00:00.000Z");
-      const data = await getCachedExtraUsage(usage, "t", now);
-      expect(data).toEqual({
-        usedCredits: 1,
-        monthlyLimit: 10,
-        utilizationPct: 10,
-        currency: "USD",
-        spendLimitReached: false,
-        disabledReason: null,
+      const { fetchUsage } = await freshModule();
+      expect(await fetchUsage("t")).toEqual({
+        extraUsage: null,
+        fiveHour: { pct: 42, resetsAt: Date.parse("2026-10-10T15:00:00Z") / 1000 },
+        sevenDay: { pct: 7, resetsAt: null },
       });
-      expect(usage.extraUsageCache).toEqual({ fetchedAt: now.getTime(), data });
     });
 
-    it("serves the cached value without refetching within the TTL", async () => {
-      const fetchMock = vi.fn();
-      vi.stubGlobal("fetch", fetchMock);
-      const { getCachedExtraUsage } = await freshModule();
-      const cached = {
-        usedCredits: 5,
-        monthlyLimit: 50,
-        utilizationPct: 10,
-        currency: "USD",
-        spendLimitReached: false,
-        disabledReason: null,
-      };
-      const usage = makeUsage();
-      usage.extraUsageCache = {
-        fetchedAt: new Date("2026-09-10T00:00:00.000Z").getTime(),
-        data: cached,
-      };
-      const data = await getCachedExtraUsage(usage, "t", new Date("2026-09-10T00:00:30.000Z"));
-      expect(data).toEqual(cached);
-      expect(fetchMock).not.toHaveBeenCalled();
-    });
-
-    it("refetches once the cache entry is older than the TTL", async () => {
+    it("windows without utilization or with a bad date degrade per field", async () => {
       vi.stubGlobal(
         "fetch",
         vi.fn().mockResolvedValue({
           ok: true,
           json: () =>
-            Promise.resolve({
-              extra_usage: {
-                is_enabled: true,
-                used_credits: 200,
-                monthly_limit: 1000,
-                utilization: 20,
-              },
-            }),
+            Promise.resolve({ five_hour: { utilization: 5, resets_at: "nope" }, seven_day: {} }),
         }),
       );
-      const { getCachedExtraUsage } = await freshModule();
-      const usage = makeUsage();
-      usage.extraUsageCache = {
-        fetchedAt: new Date("2026-09-10T00:00:00.000Z").getTime(),
-        data: {
-          usedCredits: 1,
-          monthlyLimit: 10,
-          utilizationPct: 10,
-          currency: "USD",
-          spendLimitReached: false,
-          disabledReason: null,
-        },
-      };
-      const data = await getCachedExtraUsage(usage, "t", new Date("2026-09-10T00:02:00.000Z"));
-      expect(data).toEqual({
-        usedCredits: 2,
-        monthlyLimit: 10,
-        utilizationPct: 20,
-        currency: "USD",
-        spendLimitReached: false,
-        disabledReason: null,
+      const { fetchUsage } = await freshModule();
+      expect(await fetchUsage("t")).toEqual({
+        extraUsage: null,
+        fiveHour: { pct: 5, resetsAt: null },
+        sevenDay: null,
       });
     });
 
-    it("keeps the last good reading, marked stale, when the refetch fails", async () => {
+    it("null on failure or a non-object body", async () => {
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
-      const { getCachedExtraUsage } = await freshModule();
-      const usage = makeUsage();
-      const good = {
-        usedCredits: 7,
-        monthlyLimit: 80,
-        utilizationPct: 9,
-        currency: "USD",
-        spendLimitReached: false,
-        disabledReason: null,
-      };
-      usage.extraUsageCache = {
-        fetchedAt: new Date("2026-09-10T00:00:00.000Z").getTime(),
-        data: good,
-      };
-      const now = new Date("2026-09-10T00:02:00.000Z");
-      const data = await getCachedExtraUsage(usage, "t", now);
-      expect(data).toEqual({ ...good, stale: true });
-      expect(usage.extraUsageCache.fetchedAt).toBe(now.getTime());
-    });
-
-    it("caches null when the fetch fails and there is no prior good reading", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
-      const { getCachedExtraUsage } = await freshModule();
-      const usage = makeUsage();
-      const data = await getCachedExtraUsage(usage, "t", new Date("2026-09-10T00:00:00.000Z"));
-      expect(data).toBeNull();
-    });
-
-    it("parses decimal_places, currency, limit-reached and disabled reason", async () => {
+      const { fetchUsage } = await freshModule();
+      expect(await fetchUsage("t")).toBeNull();
       vi.stubGlobal(
         "fetch",
-        vi.fn().mockResolvedValue({
-          ok: true,
-          json: () =>
-            Promise.resolve({
-              extra_usage: {
-                is_enabled: true,
-                used_credits: 80000,
-                monthly_limit: 80000,
-                utilization: 100,
-                currency: "EUR",
-                decimal_places: 3,
-                spend_limit_reached: true,
-                disabled_reason: "limit",
-              },
-            }),
-        }),
+        vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(3) }),
       );
-      const { fetchExtraUsage } = await freshModule();
-      expect(await fetchExtraUsage("t")).toEqual({
-        usedCredits: 80,
-        monthlyLimit: 80,
-        utilizationPct: 100,
-        currency: "EUR",
-        spendLimitReached: true,
-        disabledReason: "limit",
-      });
+      expect(await fetchUsage("t")).toBeNull();
     });
   });
 
-  describe("fetchOauthProfile", () => {
-    it("returns the parsed profile on success", async () => {
-      vi.stubGlobal(
-        "fetch",
-        vi.fn().mockResolvedValue({
-          ok: true,
-          json: () => Promise.resolve({ account: { email_address: "a@b.com" } }),
-        }),
-      );
-      const { fetchOauthProfile } = await freshModule();
-      expect(await fetchOauthProfile("t")).toEqual({ account: { email_address: "a@b.com" } });
+  describe("nextApiCache / isApiCacheFresh", () => {
+    const now = new Date("2026-10-10T10:00:00.000Z");
+    const reading = {
+      extraUsage: null,
+      fiveHour: { pct: 1, resetsAt: null },
+      sevenDay: null,
+    };
+
+    it("a good fetch replaces the cache", async () => {
+      const { nextApiCache } = await freshModule();
+      expect(nextApiCache(null, reading, now)).toEqual({ fetchedAt: now.getTime(), ...reading });
     });
 
-    it("returns null on failure", async () => {
-      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("boom")));
-      const { fetchOauthProfile } = await freshModule();
-      expect(await fetchOauthProfile("t")).toBeNull();
+    it("a failed fetch keeps the last good reading, marked stale", async () => {
+      const { nextApiCache } = await freshModule();
+      const previous = { fetchedAt: 1, ...reading };
+      expect(nextApiCache(previous, null, now)).toEqual({
+        fetchedAt: now.getTime(),
+        ...reading,
+        stale: true,
+      });
+      expect(nextApiCache(null, null, now)).toEqual({
+        fetchedAt: now.getTime(),
+        extraUsage: null,
+        fiveHour: null,
+        sevenDay: null,
+        stale: true,
+      });
+    });
+
+    it("fresh for 60s", async () => {
+      const { isApiCacheFresh } = await freshModule();
+      const cache = { fetchedAt: now.getTime() - 59_000, ...reading };
+      expect(isApiCacheFresh(cache, now)).toBe(true);
+      expect(isApiCacheFresh({ ...cache, fetchedAt: now.getTime() - 60_000 }, now)).toBe(false);
+      expect(isApiCacheFresh(null, now)).toBe(false);
     });
   });
 });

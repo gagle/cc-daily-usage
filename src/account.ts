@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
@@ -44,24 +45,54 @@ function readGlobalOauthAccount(): Account | null {
   }
 }
 
+// Profile lookups for a CLAUDE_CODE_OAUTH_TOKEN override, keyed by a token hash (never the token itself) —
+// the network call then happens once per token instead of once per statusline render.
+const PROFILE_CACHE_FILE = path.join(homedir(), ".config", "cc-daily-usage", "profiles.json");
+
+function tokenHash(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
+}
+
+function readProfileCache(): Record<string, Account> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(PROFILE_CACHE_FILE, "utf8"));
+    return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, Account>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeProfileCache(cache: Record<string, Account>): void {
+  try {
+    mkdirSync(path.dirname(PROFILE_CACHE_FILE), { recursive: true });
+    writeFileSync(PROFILE_CACHE_FILE, JSON.stringify(cache, null, 2), { mode: 0o600 });
+  } catch {
+    // A read-only home only costs the cache, not the lookup.
+  }
+}
+
 /**
  * Resolves whichever account is active for THIS process. A per-session `CLAUDE_CODE_OAUTH_TOKEN` override
  * — a different terminal may be logged into a different account than the global login — takes precedence
- * over `~/.claude.json`'s `oauthAccount`, resolved instead via a live `/api/oauth/profile` call using that
- * token (see anthropic-usage.ts). Falls back to the global file otherwise, or when the profile fetch fails.
- * Runs fresh on every call (no caching here) — cheap in the common no-override case (one local file read);
- * callers wanting to throttle the network path should cache around this. Never throws.
+ * over `~/.claude.json`'s `oauthAccount`, resolved via `/api/oauth/profile` once per token and cached in
+ * profiles.json. Falls back to the global file otherwise, or when the profile fetch fails. Never throws.
  */
 export async function resolveActiveAccount(): Promise<Account | null> {
   const envToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
   if (envToken) {
+    const hash = tokenHash(envToken);
+    const cache = readProfileCache();
+    const cached = cache[hash];
+    if (cached) return cached;
     const profile = await fetchOauthProfile(envToken);
     if (profile) {
-      return {
+      const account: Account = {
         email: profile.account?.email_address ?? null,
         accountUuid: profile.organization?.uuid ?? null,
         organizationType: profile.organization?.organization_type ?? null,
       };
+      writeProfileCache({ ...cache, [hash]: account });
+      return account;
     }
     // Override present but the fetch failed (offline, expired, ...) — fall through to the global file
     // rather than losing account scoping entirely.

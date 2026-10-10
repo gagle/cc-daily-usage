@@ -1,9 +1,17 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-import type { Config, UsageState } from "./interfaces/config.interface.js";
-import { DEFAULT_CONFIG, DEFAULT_USAGE } from "./interfaces/config.interface.js";
+import { freshUsage, upgradeUsage } from "./calc.js";
+import type { ApiCache, Config, UsageState } from "./interfaces/config.interface.js";
+import { DEFAULT_CONFIG } from "./interfaces/config.interface.js";
 
 export const CONFIG_ROOT_DIR = path.join(homedir(), ".config", "cc-daily-usage");
 export const ACCOUNTS_DIR = path.join(CONFIG_ROOT_DIR, "accounts");
@@ -12,7 +20,7 @@ export const ACCOUNTS_DIR = path.join(CONFIG_ROOT_DIR, "accounts");
 const LEGACY_CONFIG_FILE = path.join(CONFIG_ROOT_DIR, "config.json");
 const LEGACY_USAGE_FILE = path.join(CONFIG_ROOT_DIR, "usage.json");
 
-function accountDir(accountKey: string): string {
+export function accountDir(accountKey: string): string {
   return path.join(ACCOUNTS_DIR, accountKey);
 }
 
@@ -22,6 +30,10 @@ function configFile(accountKey: string): string {
 
 function usageFile(accountKey: string): string {
   return path.join(accountDir(accountKey), "usage.json");
+}
+
+export function apiCacheFile(accountKey: string): string {
+  return path.join(accountDir(accountKey), "api-cache.json");
 }
 
 function ensureAccountDir(accountKey: string): void {
@@ -50,68 +62,114 @@ function migrateLegacyFilesIfNeeded(): void {
   }
 }
 
-/** Empty or unparseable account JSON must not crash the statusline hook — self-heal to null so callers
- * can re-seed defaults. A non-object JSON value (array/null/number) is also treated as corrupt. */
-function readObjectFile(file: string): Record<string, unknown> | null {
+/** Write-to-temp + rename: a crash or a concurrent reader never sees a half-written file (rename is atomic on
+ * one filesystem). The pid suffix keeps two concurrent writers from sharing a temp file.
+ * # ponytail: concurrent read-modify-write can still lose one render's update (last writer wins); the next
+ * render re-captures it from the session baseline or the ledger. Upgrade path: a lockfile around load→save. */
+export function writeFileAtomic(file: string, content: string): void {
+  const temp = `${file}.${String(process.pid)}.tmp`;
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(temp, content, { mode: 0o600 });
+  renameSync(temp, file);
+}
+
+type ReadResult =
+  | { readonly kind: "missing" }
+  | { readonly kind: "corrupt" }
+  | { readonly kind: "ok"; readonly value: Record<string, unknown>; readonly raw: string };
+
+/** Empty or unparseable account JSON must not crash the statusline hook. A non-object JSON value
+ * (array/null/number) is also treated as corrupt. */
+function readObjectFile(file: string): ReadResult {
+  let raw: string;
   try {
-    const raw = readFileSync(file, "utf8");
-    if (raw.trim() === "") return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    return parsed as Record<string, unknown>;
+    raw = readFileSync(file, "utf8");
   } catch {
-    return null;
+    return { kind: "missing" };
+  }
+  try {
+    if (raw.trim() === "") return { kind: "corrupt" };
+    const parsed: unknown = JSON.parse(raw);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { kind: "corrupt" };
+    }
+    return { kind: "ok", value: parsed as Record<string, unknown>, raw };
+  } catch {
+    return { kind: "corrupt" };
   }
 }
 
-// Transparent first-run seeding (decision 3): the tool must never crash on a clean machine. `init` is the
-// real, user-facing way to author laboralDays — this is just the silent default so nothing else has to guard
+/** Keeps a copy of a corrupt file before it is re-seeded, so history is recoverable by hand. */
+function quarantine(file: string): void {
+  try {
+    copyFileSync(file, `${file}.corrupt-${String(Date.now())}`);
+  } catch {
+    // Best effort — never block the re-seed.
+  }
+}
+
+function serialize(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+// Transparent first-run seeding: the tool must never crash on a clean machine. `init` is the real,
+// user-facing way to author laboralDays — this is just the silent default so nothing else has to guard
 // against a missing file.
 export function loadConfig(accountKey: string): Config {
   migrateLegacyFilesIfNeeded();
-  ensureAccountDir(accountKey);
   const file = configFile(accountKey);
-  if (!existsSync(file)) {
-    saveConfig(accountKey, DEFAULT_CONFIG);
-    return DEFAULT_CONFIG;
-  }
-  const parsed = readObjectFile(file);
-  if (parsed === null) {
-    // Empty/corrupt file (e.g. a truncated write) — rewrite defaults so the next --statusline call works.
-    saveConfig(accountKey, DEFAULT_CONFIG);
-    return DEFAULT_CONFIG;
+  const result = readObjectFile(file);
+  if (result.kind !== "ok") {
+    if (result.kind === "corrupt") quarantine(file);
+    const config = structuredClone(DEFAULT_CONFIG);
+    saveConfig(accountKey, config);
+    return config;
   }
   // Merged under DEFAULT_CONFIG rather than returned raw: a hasSpendCap:false account's monthlyCap/
-  // laboralDays are meaningless and may be absent from the file entirely (see cli.ts's hasSpendCap gate) —
-  // every caller still gets a complete Config in memory, so an unguarded read (e.g. calendar-tui.ts's
-  // rolloverIfNeeded call) fills in the empty default instead of crashing on undefined. Never rewrites the
-  // file for a valid partial object — purely an in-memory fill.
-  return { ...DEFAULT_CONFIG, ...(parsed as Partial<Config>) };
+  // laboralDays are meaningless and may be absent from the file entirely — every caller still gets a
+  // complete Config in memory. Never rewrites the file for a valid partial object — purely an in-memory fill.
+  const merged = { ...structuredClone(DEFAULT_CONFIG), ...(result.value as Partial<Config>) };
+  return typeof merged.monthlyCap === "number" && Number.isFinite(merged.monthlyCap)
+    ? merged
+    : { ...merged, monthlyCap: DEFAULT_CONFIG.monthlyCap };
 }
 
 export function saveConfig(accountKey: string, config: Config): void {
-  ensureAccountDir(accountKey);
-  writeFileSync(configFile(accountKey), JSON.stringify(config, null, 2), { mode: 0o600 });
+  writeFileAtomic(configFile(accountKey), serialize(config));
 }
 
-export function loadUsage(accountKey: string): UsageState {
+// Raw text of the last usage.json read per account, so saveUsage can skip a write that changes nothing —
+// most renders inside one session only move lastUpdated by a few seconds, but many renders change nothing.
+const lastUsageRaw = new Map<string, string>();
+
+export function loadUsage(accountKey: string, now: Date = new Date()): UsageState {
   migrateLegacyFilesIfNeeded();
-  ensureAccountDir(accountKey);
   const file = usageFile(accountKey);
-  if (!existsSync(file)) {
-    saveUsage(accountKey, DEFAULT_USAGE);
-    return DEFAULT_USAGE;
+  const result = readObjectFile(file);
+  if (result.kind !== "ok") {
+    if (result.kind === "corrupt") quarantine(file);
+    const usage = freshUsage(now);
+    saveUsage(accountKey, usage);
+    return usage;
   }
-  const parsed = readObjectFile(file);
-  if (parsed === null) {
-    // Same self-heal as loadConfig: an empty usage.json was taking down the whole Pro statusline path.
-    saveUsage(accountKey, DEFAULT_USAGE);
-    return DEFAULT_USAGE;
-  }
-  return parsed as unknown as UsageState;
+  lastUsageRaw.set(accountKey, result.raw);
+  return upgradeUsage(result.value, now);
 }
 
 export function saveUsage(accountKey: string, usage: UsageState): void {
-  ensureAccountDir(accountKey);
-  writeFileSync(usageFile(accountKey), JSON.stringify(usage, null, 2), { mode: 0o600 });
+  const content = serialize(usage);
+  if (lastUsageRaw.get(accountKey) === content) return;
+  writeFileAtomic(usageFile(accountKey), content);
+  lastUsageRaw.set(accountKey, content);
+}
+
+/** null when the refresher has never written one (or it is unreadable — the next refresh rewrites it). */
+export function loadApiCache(accountKey: string): ApiCache | null {
+  const result = readObjectFile(apiCacheFile(accountKey));
+  if (result.kind !== "ok" || typeof result.value.fetchedAt !== "number") return null;
+  return result.value as unknown as ApiCache;
+}
+
+export function saveApiCache(accountKey: string, cache: ApiCache): void {
+  writeFileAtomic(apiCacheFile(accountKey), serialize(cache));
 }

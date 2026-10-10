@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
 
-import type { UsageState } from "./interfaces/config.interface.js";
+import type { ApiCache, ApiWindow } from "./interfaces/config.interface.js";
 import { CLAUDE_DIR } from "./statusline-shared.js";
 
 const BASE_API_URL = "https://api.anthropic.com";
@@ -103,7 +103,14 @@ export interface ExtraUsage {
   readonly stale?: boolean; // last good reading served after a failed fetch
 }
 
+interface RawWindow {
+  readonly utilization?: number | null; // 0-100
+  readonly resets_at?: string | null; // ISO 8601
+}
+
 interface RawUsageResponse {
+  readonly five_hour?: RawWindow | null;
+  readonly seven_day?: RawWindow | null;
   readonly extra_usage?: {
     readonly is_enabled?: boolean;
     readonly monthly_limit?: number | null;
@@ -156,33 +163,55 @@ function parseExtraUsage(raw: RawUsageResponse | null): ExtraUsage | null {
   };
 }
 
-/** `GET /api/oauth/usage` — same endpoint that already backs Claude Code's own `⏱ 5h/7d` rate-limit display;
- * this reads its `extra_usage` field (Anthropic's server-side "Usage credits" ledger). Returns null when
- * extra usage isn't enabled for this account, or on any fetch/parse failure. */
-export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null> {
-  return parseExtraUsage(
-    await fetchJson<RawUsageResponse>(`${BASE_API_URL}/api/oauth/usage`, token),
-  );
+function parseWindow(raw: RawWindow | null | undefined): ApiWindow | null {
+  if (typeof raw?.utilization !== "number") return null;
+  const resetsMs = raw.resets_at ? Date.parse(raw.resets_at) : Number.NaN;
+  return {
+    pct: raw.utilization,
+    resetsAt: Number.isNaN(resetsMs) ? null : Math.floor(resetsMs / 1000),
+  };
 }
 
-const EXTRA_USAGE_CACHE_TTL_MS = 60_000;
-
-/** Throttles the usage fetch to at most once per TTL window, cached on the per-account usage.json — a
- * statusline can redraw on every keystroke; this keeps that from hammering Anthropic's endpoint on every
- * single render. A failed fetch (network, 401, 429) keeps the last good reading, marked `stale`, instead of
- * caching null — null would drop the caller onto session-delta accumulation, which can count phantom spend.
- * Mutates `usage.extraUsageCache` in place, matching calc.ts's mutation style. */
-export async function getCachedExtraUsage(
-  usage: UsageState,
+/** `GET /api/oauth/usage` — the same read-only endpoint Claude Code's own `/usage` calls (no model request, no
+ * tokens). Returns null on any fetch/parse failure. `extra_usage` is Anthropic's server-side "Usage credits"
+ * ledger; `five_hour`/`seven_day` are the seat windows Claude Code only learns from a model response. */
+export async function fetchUsage(
   token: string,
-  nowUtc: Date,
-): Promise<ExtraUsage | null> {
-  const cache = usage.extraUsageCache;
-  if (cache && nowUtc.getTime() - cache.fetchedAt < EXTRA_USAGE_CACHE_TTL_MS) {
-    return cache.data;
-  }
+): Promise<Omit<ApiCache, "fetchedAt" | "stale"> | null> {
   const raw = await fetchJson<RawUsageResponse>(`${BASE_API_URL}/api/oauth/usage`, token);
-  const data = raw === null && cache?.data ? { ...cache.data, stale: true } : parseExtraUsage(raw);
-  usage.extraUsageCache = { fetchedAt: nowUtc.getTime(), data };
-  return data;
+  if (raw === null || typeof raw !== "object") return null;
+  return {
+    extraUsage: parseExtraUsage(raw),
+    fiveHour: parseWindow(raw.five_hour),
+    sevenDay: parseWindow(raw.seven_day),
+  };
+}
+
+/** Back-compat wrapper (exported API): just the usage-credits part of fetchUsage. */
+export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null> {
+  return (await fetchUsage(token))?.extraUsage ?? null;
+}
+
+export const API_CACHE_TTL_MS = 60_000;
+
+/** Next cache after one fetch attempt: a failure keeps the previous good reading marked `stale` instead of
+ * dropping to null — null would put the caller on session-delta accumulation, which can count phantom
+ * spend. */
+export function nextApiCache(
+  previous: ApiCache | null,
+  fetched: Omit<ApiCache, "fetchedAt" | "stale"> | null,
+  now: Date,
+): ApiCache {
+  if (fetched !== null) return { fetchedAt: now.getTime(), ...fetched };
+  return {
+    fetchedAt: now.getTime(),
+    extraUsage: previous?.extraUsage ?? null,
+    fiveHour: previous?.fiveHour ?? null,
+    sevenDay: previous?.sevenDay ?? null,
+    stale: true,
+  };
+}
+
+export function isApiCacheFresh(cache: ApiCache | null, now: Date): boolean {
+  return cache !== null && now.getTime() - cache.fetchedAt < API_CACHE_TTL_MS;
 }

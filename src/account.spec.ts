@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -84,6 +84,31 @@ describe("account.ts", () => {
         organizationType: "claude_enterprise",
       });
       expect(fetchOauthProfileMock).toHaveBeenCalledWith("session-token");
+    });
+
+    it("caches the override's profile by token hash — one network call per token", async () => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = "session-token";
+      fetchOauthProfileMock.mockResolvedValue({ account: { email_address: "o@example.com" } });
+      const { resolveActiveAccount } = await freshAccountModule();
+      await resolveActiveAccount();
+      const again = await resolveActiveAccount();
+      expect(again?.email).toBe("o@example.com");
+      expect(fetchOauthProfileMock).toHaveBeenCalledTimes(1);
+      const cacheFile = path.join(fakeHome, ".config", "cc-daily-usage", "profiles.json");
+      expect(readFileSync(cacheFile, "utf8")).not.toContain("session-token");
+    });
+
+    it("an unreadable or non-object profile cache is ignored; a failed cache write is harmless", async () => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = "session-token";
+      const dir = path.join(fakeHome, ".config", "cc-daily-usage");
+      mkdirSync(path.join(dir, "profiles.json"), { recursive: true }); // a directory: read and write both fail
+      fetchOauthProfileMock.mockResolvedValue({ account: { email_address: "o@example.com" } });
+      const { resolveActiveAccount } = await freshAccountModule();
+      expect((await resolveActiveAccount())?.email).toBe("o@example.com");
+      rmSync(path.join(dir, "profiles.json"), { recursive: true });
+      writeFileSync(path.join(dir, "profiles.json"), "null");
+      expect((await resolveActiveAccount())?.email).toBe("o@example.com");
+      expect(fetchOauthProfileMock).toHaveBeenCalledTimes(2);
     });
 
     it("falls back to the global file when the env override's profile fetch fails", async () => {
