@@ -107,8 +107,7 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 5. `🤖` model.
 6. `💪` effort.
 7. `🔥`/`❄` prompt-cache forecast, color fading with the TTL (see `docs/prompt-cache.md`).
-8. Pro/Max: `⏱ 5h/7d` (hook, else the newer of cache and API; placeholder `—/5h —/7d`),
-   then `· 1%/7d≈$X` once the $ per 1% of the week is known (`docs/history-and-feed.md`).
+8. Pro/Max: `⏱ 5h/7d` (hook, else the newer of cache and API; placeholder `—/5h —/7d`).
 9. Pro/Max: `⚠ 5h resets HH:MM (in 1h 12m)` at ≥ 90%,
    `⛔ 5h limit · continue at HH:MM (in …)` at the limit (same for weekly).
    Under 90%, `⚠ 5h runs out ~HH:MM (in …)` when the burn rate empties the window before reset.
@@ -118,5 +117,5 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
     `$today` on off days.
 12. Budget plans: `$month/$cap (pct)`.
 13. `💳 pct` — Claude apps gateway spend limit, when present.
-14. `💡 <tip> ~$X/week` — the top coach finding (`docs/coach.md`), on its own
+14. `» <tip> ~$X/week` — the top coach finding (`docs/coach.md`), on its own
     line by default.

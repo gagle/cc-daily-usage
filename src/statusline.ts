@@ -34,7 +34,7 @@ import type {
   ResolvedRateLimits,
   StatuslineState,
 } from "./interfaces/statusline.interface.js";
-import { appendSample, computeRunway, type Runway, usdPerPercentWeek } from "./limits-history.js";
+import { appendSample, computeRunway, type Runway } from "./limits-history.js";
 import { requestApiRefresh } from "./refresh.js";
 import { recordSession } from "./sessions-map.js";
 import { loadLayout } from "./statusline-layout.js";
@@ -152,15 +152,12 @@ function trackLimits(
   api: ApiCache | null,
   apiEqTotal: number,
   now: Date,
-): Pick<StatuslineState, "runway" | "usdPerPctWeek"> {
+): Pick<StatuslineState, "runway"> {
   const samples = loadLimitSamples(key);
   const five = api?.fiveHour ?? null;
   const seven = api?.sevenDay ?? null;
   if (api === null || api.stale === true || (five === null && seven === null)) {
-    return {
-      runway: { fiveHour: null, sevenDay: null },
-      usdPerPctWeek: usdPerPercentWeek(samples, now),
-    };
+    return { runway: { fiveHour: null, sevenDay: null } };
   }
   const last = samples.at(-1);
   const next =
@@ -179,10 +176,7 @@ function trackLimits(
     reading === null
       ? null
       : computeRunway(next, window, reading.pct, reading.resetsAt, api.fetchedAt, now);
-  return {
-    runway: { fiveHour: runway("fiveHour", five), sevenDay: runway("sevenDay", seven) },
-    usdPerPctWeek: usdPerPercentWeek(next, now),
-  };
+  return { runway: { fiveHour: runway("fiveHour", five), sevenDay: runway("sevenDay", seven) } };
 }
 
 /** The first non-snoozed finding of feed.json (written by the refresher), or null. */

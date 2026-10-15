@@ -495,7 +495,6 @@ describe("history tracking", () => {
     const second = await buildStatuslineState(idleHook, later);
     expect(second.runway?.fiveHour).toMatchObject({ ratePctPerHour: 40, verdict: "at-risk" });
     expect(second.runway?.sevenDay?.verdict).toBe("comfortable");
-    expect(second.usdPerPctWeek).toBeNull();
     await buildStatuslineState(idleHook, later); // same reading: no new sample
     apiAt(NOW, 99); // older than the last sample: ignored
     await buildStatuslineState(idleHook, later);

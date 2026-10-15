@@ -58,7 +58,6 @@ export interface StatuslineState {
   readonly spendLimitPct: number | null; // Claude apps gateway spend limit, 0-100+
   readonly cache: CacheForecast | null;
   readonly runway?: { readonly fiveHour: Runway | null; readonly sevenDay: Runway | null };
-  readonly usdPerPctWeek?: number | null; // API-equivalent $ per 1% of the 7-day window
   readonly coach?: {
     readonly title: string;
     readonly usd: number | null;

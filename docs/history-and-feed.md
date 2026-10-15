@@ -15,7 +15,7 @@ its % holds until the next sample.
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
 | stale   | reading older than 15 min → `stale`                                                                                                  |
 | full    | `usedPct ≥ 100` → `at-risk`, `exhaustsAt = now`                                                                                      |
-| anchor  | the sample in force 2 h ago, else the first one after; a drop in % (reset) or a missing % restarts                                   |
+| anchor  | the sample in force 2 h ago, else the first one after; a reset or a missing % restarts                                               |
 | guard   | under 15 min from anchor to now → `insufficient-data`                                                                                |
 | rate    | `(usedPct − anchor %) / hours`, never negative                                                                                       |
 | runway  | `exhaustsAt = now + (100 − used) / rate`; null when the rate is 0                                                                    |
@@ -23,7 +23,12 @@ its % holds until the next sample.
 
 `usdPerPercentWeek`: between samples where the 7d % rose at least one point,
 Δ `apiEqTotal` ÷ Δ%. Median over 14 days, at least 3 rises, else null. It counts
-only spend this statusline saw, so use on other devices makes it read low.
+only spend this statusline saw, so use on other devices makes it read low. Only
+`feed.json` carries it; the statusline does not show it.
+
+Reset rule (both functions): a drop in % is a reset only when the window's
+reset time moved forward by more than a minute (the API jitters it by a second)
+or is unknown. A drop with the same reset time is a bad reading and is skipped.
 
 ## Session map (`src/sessions-map.ts`)
 

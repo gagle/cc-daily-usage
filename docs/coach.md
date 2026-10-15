@@ -1,4 +1,4 @@
-# Coach: findings, `insights` and the 💡 part
+# Coach: findings, `insights` and the coach part
 
 Pure rules in `src/rules.ts` turn the index rollups (`docs/transcript-index.md`)
 and the usage history (`docs/history-and-feed.md`) into findings with an
@@ -32,7 +32,7 @@ Ranking (`coach`): not snoozed first, then $ descending, a finding with no $
   catches the index up, rewrites `feed.json`, prints each finding with its
   evidence and fix. `--snooze R1 0d` clears a snooze. Snoozes live in
   `config.json` `snoozed` (rule → ISO end).
-- Statusline part 14 `coach`: `💡 <title> ~$X/<window>` from the first
+- Statusline part 14 `coach`: `» <title> ~$X/<window>` from the first
   non-snoozed finding in `feed.json` (one small file read per render). On by
   default, on its own row.
 - `feed.json.advice`: the week's findings for the `/cost-tracker` mod. The CLI

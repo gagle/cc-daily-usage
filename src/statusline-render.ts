@@ -116,8 +116,7 @@ function limitsPart(state: StatuslineState): string {
   const parts: Array<string> = [];
   if (fiveHourPct !== null) parts.push(`${String(Math.round(fiveHourPct))}%/5h`);
   if (sevenDayPct !== null) parts.push(`${String(Math.round(sevenDayPct))}%/7d`);
-  const usdPerPct = state.usdPerPctWeek == null ? "" : ` · 1%/7d≈${money(state.usdPerPctWeek)}`;
-  return rgb("100;180;255", `⏱ ${parts.length > 0 ? parts.join(" ") : "—/5h —/7d"}${usdPerPct}`);
+  return rgb("100;180;255", `⏱ ${parts.length > 0 ? parts.join(" ") : "—/5h —/7d"}`);
 }
 
 function warningsPart(state: StatuslineState, now: Date): string {
@@ -215,10 +214,10 @@ function cacheSegment(state: StatuslineState): string {
   return rgb(color, parts.join(" · "));
 }
 
-/** `💡 Subagents on a premium model ~$12.40/week`; details in `cc-daily-usage insights`. */
+/** `» Subagents on a premium model ~$12.40/week`; details in `cc-daily-usage insights`. */
 function coachPart(coach: NonNullable<StatuslineState["coach"]>): string {
   const usd = coach.usd === null ? "" : ` ~${money(coach.usd)}/${coach.window}`;
-  return rgb("255;215;0", `💡 ${coach.title}${usd}`);
+  return rgb("255;215;0", `» ${coach.title}${usd}`);
 }
 
 /**

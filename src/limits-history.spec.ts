@@ -29,6 +29,15 @@ function sample(
   };
 }
 
+/** A sample with both windows' reset times set (epoch s). */
+function withResets(
+  base: LimitSample,
+  fiveHourResetsAt: number,
+  sevenDayResetsAt: number,
+): LimitSample {
+  return { ...base, fiveHourResetsAt, sevenDayResetsAt };
+}
+
 const sec = (msFromNow: number): number => Math.round((NOW.getTime() + msFromNow) / 1000);
 
 afterEach(() => {
@@ -96,6 +105,25 @@ describe("computeRunway", () => {
     expect(computeRunway(dropped, "fiveHour", 12, sec(4 * HOUR), now, NOW).ratePctPerHour).toBe(6);
     const gap = [sample(200, 50), sample(150, null), sample(60, 10)];
     expect(computeRunway(gap, "fiveHour", 12, sec(4 * HOUR), now, NOW).ratePctPerHour).toBe(2);
+  });
+
+  it("skips a drop whose reset time stayed put; restarts when it moved", () => {
+    const reset = sec(4 * HOUR);
+    const jitter = [
+      withResets(sample(100, 40), reset, reset),
+      withResets(sample(90, 10), reset - 1, reset), // bad reading: resets_at only jittered
+      withResets(sample(30, 46), reset, reset),
+    ];
+    expect(computeRunway(jitter, "fiveHour", 52, reset, now, NOW).ratePctPerHour).toBeCloseTo(
+      12 / (100 / 60),
+    );
+    const moved = [
+      withResets(sample(100, 90), sec(-HOUR), reset),
+      withResets(sample(90, 2), reset, reset),
+    ];
+    expect(computeRunway(moved, "fiveHour", 14, reset, now, NOW).ratePctPerHour).toBeCloseTo(
+      12 / 1.5,
+    );
   });
 
   it("reads the 7-day side on its own", () => {
@@ -169,6 +197,22 @@ describe("usdPerPercentWeek", () => {
       sample(40, 0, 5, 9),
       sample(30, 0, 6, 11),
     ];
+    expect(usdPerPercentWeek(samples, NOW)).toBe(2);
+  });
+
+  it("ignores interleaved bad readings that drop without a reset", () => {
+    const reset = sec(3 * 24 * HOUR);
+    const samples = [
+      [60, 25, 0],
+      [59, 15, 0], // bad: same reset time, not a reset
+      [58, 26, 2],
+      [57, 15, 2],
+      [50, 27, 4],
+      [45, 15, 4],
+      [40, 28, 6],
+    ].map(([ago, pct, usd]) =>
+      withResets(sample(ago as number, 0, pct as number, usd as number), reset, reset),
+    );
     expect(usdPerPercentWeek(samples, NOW)).toBe(2);
   });
 });

@@ -367,13 +367,10 @@ describe("history parts", () => {
     ).not.toMatch(/runs out/);
   });
 
-  it("shows $ per 1% of the week; no miss cause or hint in the cache part", () => {
-    const line = sub({
-      rateLimits: { ...NO_LIMITS, sevenDayPct: 20 },
-      usdPerPctWeek: 0.85,
-      cache: forecast(),
-    });
-    expect(line).toContain("⏱ 20%/7d · 1%/7d≈$0.85");
+  it("shows no $ per 1% of the week; no miss cause or hint in the cache part", () => {
+    const line = sub({ rateLimits: { ...NO_LIMITS, sevenDayPct: 20 }, cache: forecast() });
+    expect(line).toContain("⏱ 20%/7d");
+    expect(line).not.toContain("1%/7d");
     expect(line).not.toContain("miss:");
     expect(line).not.toContain("→");
   });
@@ -384,10 +381,10 @@ describe("coach part", () => {
     const line = (coach: StatuslineState["coach"]): string =>
       plain(renderStatusline(payload, state({ coach }), "", NOW, [["coach"]]));
     expect(line({ title: "Fast mode", usd: 12.4, window: "week" })).toBe(
-      "💡 Fast mode ~$12.40/week",
+      "» Fast mode ~$12.40/week",
     );
     expect(line({ title: "Running out early", usd: null, window: "week" })).toBe(
-      "💡 Running out early",
+      "» Running out early",
     );
     expect(line(null)).toBe("");
     expect(plain(renderStatusline(payload, null, "", NOW, [["coach"]]))).toBe("");

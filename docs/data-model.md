@@ -96,7 +96,7 @@ with `stale: true`. TTL 60 s (`API_CACHE_TTL_MS` in `src/anthropic-usage.ts`).
 What `cc-daily-usage --statusline` prints and `renderStatusline` consumes:
 budget fields (absent on Pro/Max), `capSource`, `extraUsage` (Pro/Max only),
 resolved `rateLimits` with their `source` and `readingAt`, `runway` per window,
-`usdPerPctWeek`, `coach` (top finding), `rateLimitsCache` (old shims),
+`coach` (top finding), `rateLimitsCache` (old shims),
 `spendLimitPct`, `cache` (a `CacheForecast`), `hasSpendCap`, `planType`.
 
 ## Managed-file markers

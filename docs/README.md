@@ -14,7 +14,7 @@ keeps Claude Code spend predictable.
 | [data-model.md](./data-model.md)                             | files on disk, every persisted field, managed markers                          | schema, api-cache, uninstall           |
 | [history-and-feed.md](./history-and-feed.md)                 | limit history, burn rate, $ per 1%, session map, `feed.json` for the mod       | runway, feed, cost-tracker             |
 | [transcript-index.md](./transcript-index.md)                 | transcript reader, rollups, `report`, Node-free shared modules                 | transcripts, subagent, report          |
-| [coach.md](./coach.md)                                       | coaching rules, `insights`, snooze, the 💡 part                                | advice, findings, savings              |
+| [coach.md](./coach.md)                                       | coaching rules, `insights`, snooze, the coach part                             | advice, findings, savings              |
 | [use-cases.md](./use-cases.md)                               | each operation end-to-end, calendar keys, statusline segments                  | init, calendar, segments               |
 | [performance.md](./performance.md)                           | measured timings and what keeps the hot paths fast                             | latency, startup                       |
 | [testing-and-verification.md](./testing-and-verification.md) | coverage policy, commands, test layout, docs gate, CI                          | vitest, e2e, CI                        |

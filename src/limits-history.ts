@@ -16,6 +16,8 @@ const COMFORTABLE_PACE = 0.8;
 /** $ per 1% of the week: last 14 days, at least 3 measured rises (antiburn uses the same floor). */
 const USD_PER_PCT_WINDOW_MS = 14 * 24 * HOUR_MS;
 const USD_PER_PCT_MIN_SAMPLES = 3;
+/** The API's resets_at moves by a second between readings of the same window; a real reset moves it hours. */
+const RESET_JITTER_S = 60;
 
 export type RunwayVerdict = "comfortable" | "on-track" | "at-risk" | "insufficient-data" | "stale";
 
@@ -31,6 +33,35 @@ type Window = "fiveHour" | "sevenDay";
 
 function pctOf(sample: LimitSample, window: Window): number | null {
   return window === "fiveHour" ? sample.fiveHourPct : sample.sevenDayPct;
+}
+
+function resetsAtOf(sample: LimitSample, window: Window): number | null {
+  return window === "fiveHour" ? sample.fiveHourResetsAt : sample.sevenDayResetsAt;
+}
+
+/**
+ * Drops readings whose % falls while the window's reset time stays put: that is not a reset but a bad
+ * reading (two writers with different readings interleaved once and read as resets and 10-point rises).
+ * A drop with an unknown reset time on either side is trusted as a reset.
+ */
+function withoutFalseDrops(
+  samples: ReadonlyArray<LimitSample>,
+  window: Window,
+): Array<LimitSample> {
+  const kept: Array<LimitSample> = [];
+  let last: LimitSample | null = null;
+  for (const sample of samples) {
+    const pct = pctOf(sample, window);
+    if (pct !== null && last !== null) {
+      const from = resetsAtOf(last, window);
+      const to = resetsAtOf(sample, window);
+      const moved = from === null || to === null || to - from > RESET_JITTER_S;
+      if (pct < (pctOf(last, window) as number) && !moved) continue;
+    }
+    kept.push(sample);
+    if (pct !== null) last = sample;
+  }
+  return kept;
 }
 
 /**
@@ -70,13 +101,14 @@ export function computeRunway(
   if (nowMs - readingAt > STALE_READING_MS) return { ...base, verdict: "stale" };
   if (usedPct >= 100) return { ...base, exhaustsAt: Math.floor(nowMs / 1000), verdict: "at-risk" };
 
+  const trusted = withoutFalseDrops(samples, window);
   let start = 0;
-  for (let i = 1; i < samples.length; i++) {
-    const previous = pctOf(samples[i - 1] as LimitSample, window);
-    const current = pctOf(samples[i] as LimitSample, window);
+  for (let i = 1; i < trusted.length; i++) {
+    const previous = pctOf(trusted[i - 1] as LimitSample, window);
+    const current = pctOf(trusted[i] as LimitSample, window);
     if (previous === null || current === null || current < previous) start = i;
   }
-  const segment = samples.slice(start).filter((sample) => pctOf(sample, window) !== null);
+  const segment = trusted.slice(start).filter((sample) => pctOf(sample, window) !== null);
   const windowStart = nowMs - RATE_WINDOW_MS;
   // Samples are in time order: the last one at or before the window start, else the first inside it.
   const inside = segment.findIndex((sample) => sample.t > windowStart);
@@ -105,15 +137,17 @@ export function computeRunway(
 
 /**
  * API-equivalent $ per 1% of the 7-day window: between readings where the 7d % rose at least one point,
- * Δ apiEqTotal ÷ Δ%. Median of the last 14 days; null under 3 measured rises. A drop (reset) restarts.
+ * Δ apiEqTotal ÷ Δ%. Median of the last 14 days; null under 3 measured rises. A reset restarts; a drop
+ * without one is a bad reading and is skipped.
  * Counts only spend this statusline saw, so use from other devices makes it read low — label it an estimate.
  */
 export function usdPerPercentWeek(samples: ReadonlyArray<LimitSample>, now: Date): number | null {
   const ratios: Array<number> = [];
   let from: { pct: number; usd: number } | null = null;
-  for (const sample of samples) {
+  const recent = samples.filter((sample) => sample.t >= now.getTime() - USD_PER_PCT_WINDOW_MS);
+  for (const sample of withoutFalseDrops(recent, "sevenDay")) {
     const pct = sample.sevenDayPct;
-    if (sample.t < now.getTime() - USD_PER_PCT_WINDOW_MS || pct === null) continue;
+    if (pct === null) continue;
     if (from === null || pct < from.pct) {
       from = { pct, usd: sample.apiEqTotal };
       continue;
