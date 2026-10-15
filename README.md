@@ -54,9 +54,10 @@ process.
 
 `report` and the background process read your Claude Code transcripts in
 `~/.claude/projects` on this machine to total tokens and $ by model, project
-and subagent. Only token counts, model, project folder, branch and session id
-are kept (in `~/.config/cc-daily-usage/`); no message text is stored, and
-nothing is sent anywhere.
+and subagent. Only token counts, model, project folder, branch, session id and
+name, turn and thinking times, hook-run counts and how the session started are
+kept (in `~/.config/cc-daily-usage/`); no message text is stored, and nothing
+is sent anywhere.
 
 ## Development
 

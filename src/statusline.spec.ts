@@ -134,6 +134,16 @@ describe("resolveRateLimits", () => {
     });
   });
 
+  it("a stale API reading never beats a hook snapshot, but stands in when there is none", async () => {
+    const { resolveRateLimits } = await fresh();
+    const stale = { ...api, fetchedAt: NOW.getTime(), stale: true };
+    expect(resolveRateLimits(false, cache, stale, NOW)).toMatchObject({ source: "cache" });
+    expect(resolveRateLimits(false, undefined, stale, NOW)).toMatchObject({
+      fiveHourPct: 33,
+      source: "api",
+    });
+  });
+
   it("without hook data the newer of cache and API wins (fresh at session start)", async () => {
     const { resolveRateLimits } = await fresh();
     expect(resolveRateLimits(false, cache, api, NOW)).toMatchObject({
@@ -327,6 +337,21 @@ describe("buildStatuslineState", () => {
     };
     const state = await buildStatuslineState(payload, NOW);
     expect(state.spendLimitPct).toBe(61);
+    expect(state.spendLimitUsd).toBeNull();
+    const withUsd = await buildStatuslineState(
+      { rate_limits: { spend_limit: { used_percentage: 61, used_usd: 6.1, limit_usd: 10 } } },
+      NOW,
+    );
+    expect(withUsd.spendLimitUsd).toEqual({ used: 6.1, limit: 10, period: null });
+    const withPeriod = await buildStatuslineState(
+      {
+        rate_limits: {
+          spend_limit: { used_percentage: 61, used_usd: 6.1, limit_usd: 10, period: "weekly" },
+        },
+      },
+      NOW,
+    );
+    expect(withPeriod.spendLimitUsd?.period).toBe("weekly");
     expect(state.rateLimitsCache).toMatchObject({
       fiveHourPct: 40,
       sevenDayPct: 5,
@@ -387,35 +412,31 @@ describe("buildStatuslineState", () => {
     expect(requestApiRefreshMock).toHaveBeenCalledWith("default", NOW);
   });
 
-  it("switches to 1s refresh while the cache has under a minute left; an unreadable settings.json is harmless", async () => {
+  it("never writes settings.json on render", async () => {
     writeAccount("claude_pro");
     const settingsFile = path.join(fakeHome, ".claude", "settings.json");
     mkdirSync(path.dirname(settingsFile), { recursive: true });
     const command = `node ${JSON.stringify(path.join(fakeHome, ".claude", "statusline.mjs"))}`;
-    writeFileSync(
-      settingsFile,
-      JSON.stringify({ statusLine: { type: "command", command, refreshInterval: 30 } }),
-    );
+    const before = JSON.stringify({
+      statusLine: { type: "command", command, refreshInterval: 30 },
+    });
+    writeFileSync(settingsFile, before);
     const { buildStatuslineState } = await fresh();
     const nowSec = NOW.getTime() / 1000;
-    const payload = (expires: number) => ({
-      session_id: "s1",
-      model: { id: "claude-opus-5-5" },
-      prompt_cache: { warm: true, ttl: "5m", expires_at: expires, recache_tokens_if_cold: 1000 },
-    });
-    await buildStatuslineState(payload(nowSec + 45), NOW);
-    const interval = (): unknown =>
-      (
-        JSON.parse(readFileSync(settingsFile, "utf8")) as {
-          statusLine: { refreshInterval: unknown };
-        }
-      ).statusLine.refreshInterval;
-    expect(interval()).toBe(1);
-    await buildStatuslineState(payload(nowSec - 5), NOW);
-    expect(interval()).toBe(30);
-    rmSync(settingsFile);
-    mkdirSync(settingsFile);
-    await expect(buildStatuslineState(payload(nowSec + 45), NOW)).resolves.toBeDefined();
+    await buildStatuslineState(
+      {
+        session_id: "s1",
+        model: { id: "claude-opus-5-5" },
+        prompt_cache: {
+          warm: true,
+          ttl: "5m",
+          expires_at: nowSec + 45,
+          recache_tokens_if_cold: 1000,
+        },
+      },
+      NOW,
+    );
+    expect(readFileSync(settingsFile, "utf8")).toBe(before);
   });
 
   it("stores the session's cache-miss cost when the forecast changes", async () => {
@@ -476,13 +497,13 @@ describe("history tracking", () => {
     writeAccount("claude_max");
     const { buildStatuslineState } = await fresh();
     const nowSec = NOW.getTime() / 1000;
-    const apiAt = (at: Date, five: number, stale = false): void => {
+    const apiAt = (at: Date, five: number, stale: { readAt?: number } | null = null): void => {
       writeJson("api-cache.json", {
         fetchedAt: at.getTime(),
         extraUsage: null,
         fiveHour: { pct: five, resetsAt: nowSec + 3 * 3600 },
         sevenDay: { pct: 10, resetsAt: nowSec + 86_400 },
-        ...(stale ? { stale } : {}),
+        ...(stale ? { stale: true, ...stale } : {}),
       });
     };
     // An idle session's old hook reading never becomes a sample.
@@ -500,7 +521,14 @@ describe("history tracking", () => {
     await buildStatuslineState(idleHook, later);
     const samples = readJson("limits.json").samples as Array<{ fiveHourPct: number }>;
     expect(samples.map((sample) => sample.fiveHourPct)).toEqual([40, 60]);
-    apiAt(later, 70, true); // a failed fetch: no runway, no sample
+    // A failed fetch mid-turn keeps the last good reading at its own time: the runway stays.
+    const retry = new Date(later.getTime() + 2 * 60_000);
+    apiAt(retry, 60, { readAt: later.getTime() });
+    expect((await buildStatuslineState(idleHook, retry)).runway?.fiveHour).toMatchObject({
+      ratePctPerHour: 40,
+      verdict: "at-risk",
+    });
+    apiAt(later, 70, {}); // stale with no known reading time (an older cache): no runway, no sample
     expect((await buildStatuslineState(idleHook, later)).runway).toEqual({
       fiveHour: null,
       sevenDay: null,
@@ -545,11 +573,17 @@ describe("history tracking", () => {
           costUsd: 2,
           linesAdded: 10,
           linesRemoved: 3,
+          name: null,
+          claudeVersion: null,
           firstSeenAt: NOW.toISOString(),
           lastSeenAt: NOW.toISOString(),
         },
       },
     });
+    await buildStatuslineState({ ...payload, session_name: "fix login", version: "2.1.293" }, NOW);
+    expect(
+      (readJson("sessions-map.json").sessions as Record<string, { name: unknown }>).s,
+    ).toMatchObject({ name: "fix login", claudeVersion: "2.1.293" });
     await buildStatuslineState({ session_id: "s", cost: { total_cost_usd: 3 } }, NOW);
     const entry = (
       readJson("sessions-map.json").sessions as Record<string, { transcriptPath: unknown }>

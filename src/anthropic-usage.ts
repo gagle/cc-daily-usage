@@ -3,7 +3,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
 
-import type { ApiCache, ApiWindow } from "./interfaces/config.interface.js";
+import type {
+  ApiCache,
+  ApiExtraWindow,
+  ApiPlan,
+  ApiWindow,
+} from "./interfaces/config.interface.js";
 import { CLAUDE_DIR } from "./statusline-shared.js";
 
 const BASE_API_URL = "https://api.anthropic.com";
@@ -90,6 +95,8 @@ export interface OauthProfile {
     readonly billing_type?: string;
     readonly has_extra_usage_enabled?: boolean;
     readonly subscription_created_at?: string;
+    readonly subscription_status?: string | null;
+    readonly claude_code_trial_ends_at?: string | null;
   };
 }
 
@@ -106,11 +113,22 @@ export interface ExtraUsage {
 interface RawWindow {
   readonly utilization?: number | null; // 0-100
   readonly resets_at?: string | null; // ISO 8601
+  readonly used_dollars?: number | null;
+  readonly limit_dollars?: number | null;
 }
 
+/** Observed 2026-10-15 on a Pro account; the endpoint is undocumented, so every field is optional. */
 interface RawUsageResponse {
+  readonly [key: string]: unknown;
   readonly five_hour?: RawWindow | null;
   readonly seven_day?: RawWindow | null;
+  readonly limits?: ReadonlyArray<{
+    readonly kind?: string;
+    readonly severity?: string | null;
+  }> | null;
+  readonly seven_day_breakdown?: {
+    readonly rows?: ReadonlyArray<{ readonly key?: string; readonly percent?: number }>;
+  } | null;
   readonly extra_usage?: {
     readonly is_enabled?: boolean;
     readonly monthly_limit?: number | null;
@@ -163,13 +181,42 @@ function parseExtraUsage(raw: RawUsageResponse | null): ExtraUsage | null {
   };
 }
 
-function parseWindow(raw: RawWindow | null | undefined): ApiWindow | null {
-  if (typeof raw?.utilization !== "number") return null;
-  const resetsMs = raw.resets_at ? Date.parse(raw.resets_at) : Number.NaN;
+const numberOrNull = (value: unknown): number | null => (typeof value === "number" ? value : null);
+
+function parseWindow(raw: unknown, severity: string | null = null): ApiWindow | null {
+  const window = raw as RawWindow | null | undefined;
+  if (typeof window?.utilization !== "number") return null;
+  const resetsMs = window.resets_at ? Date.parse(window.resets_at) : Number.NaN;
   return {
-    pct: raw.utilization,
+    pct: window.utilization,
     resetsAt: Number.isNaN(resetsMs) ? null : Math.floor(resetsMs / 1000),
+    usedDollars: numberOrNull(window.used_dollars),
+    limitDollars: numberOrNull(window.limit_dollars),
+    severity,
   };
+}
+
+/** `limits[]` severity for one kind (`session` = 5h, `weekly_all` = 7d). */
+function severityOf(raw: RawUsageResponse, kind: string): string | null {
+  const severity = raw.limits?.find((limit) => limit.kind === kind)?.severity;
+  return typeof severity === "string" ? severity : null;
+}
+
+/** Every other `seven_day_<key>` window that carries a reading (opus, sonnet, cowork, …). */
+function parseExtraWindows(raw: RawUsageResponse): Array<ApiExtraWindow> {
+  const windows: Array<ApiExtraWindow> = [];
+  for (const [name, value] of Object.entries(raw)) {
+    if (!name.startsWith("seven_day_")) continue;
+    const window = parseWindow(value);
+    if (window !== null) windows.push({ key: name.slice("seven_day_".length), ...window });
+  }
+  return windows;
+}
+
+/** Claude Code's share (0-1) of this week's use, from `seven_day_breakdown.rows`; null when absent. */
+function parseClaudeCodeShare(raw: RawUsageResponse): number | null {
+  const percent = raw.seven_day_breakdown?.rows?.find((row) => row.key === "claude_code")?.percent;
+  return typeof percent === "number" ? Math.min(1, Math.max(0, percent / 100)) : null;
 }
 
 /** `GET /api/oauth/usage` — the same read-only endpoint Claude Code's own `/usage` calls (no model request, no
@@ -182,10 +229,28 @@ export async function fetchUsage(
   if (raw === null || typeof raw !== "object") return null;
   return {
     extraUsage: parseExtraUsage(raw),
-    fiveHour: parseWindow(raw.five_hour),
-    sevenDay: parseWindow(raw.seven_day),
+    fiveHour: parseWindow(raw.five_hour, severityOf(raw, "session")),
+    sevenDay: parseWindow(raw.seven_day, severityOf(raw, "weekly_all")),
+    extraWindows: parseExtraWindows(raw),
+    claudeCodeShare: parseClaudeCodeShare(raw),
   };
 }
+
+/** Plan facts from `/api/oauth/profile`, or null on failure. */
+export async function fetchPlan(token: string, now: Date): Promise<ApiPlan | null> {
+  const organization = (await fetchOauthProfile(token))?.organization;
+  if (!organization) return null;
+  return {
+    fetchedAt: now.getTime(),
+    rateLimitTier: organization.rate_limit_tier ?? null,
+    subscriptionStatus: organization.subscription_status ?? null,
+    billingType: organization.billing_type ?? null,
+    trialEndsAt: organization.claude_code_trial_ends_at ?? null,
+  };
+}
+
+/** The plan is re-read once a day: it changes on an upgrade or a lapse, not by the minute. */
+export const PLAN_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** Back-compat wrapper (exported API): just the usage-credits part of fetchUsage. */
 export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null> {
@@ -193,25 +258,40 @@ export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null>
 }
 
 export const API_CACHE_TTL_MS = 60_000;
+/** After failures the wait doubles per failure, up to 2^4 × the TTL (16 min): a 429 or a dead token is not
+ * hammered every minute. # ponytail: ignores Retry-After; upgrade path: return the status from fetchJson. */
+const MAX_BACKOFF_DOUBLINGS = 4;
+
+/** When the reading a stale cache keeps was taken; absent when no good reading is known. */
+function readAtOf(previous: ApiCache | null): { readAt?: number } {
+  const readAt = previous?.stale === true ? previous.readAt : previous?.fetchedAt;
+  return readAt === undefined ? {} : { readAt };
+}
 
 /** Next cache after one fetch attempt: a failure keeps the previous good reading marked `stale` instead of
  * dropping to null — null would put the caller on session-delta accumulation, which can count phantom
- * spend. */
+ * spend. The plan survives either way; the caller replaces it when it re-reads the profile. */
 export function nextApiCache(
   previous: ApiCache | null,
   fetched: Omit<ApiCache, "fetchedAt" | "stale"> | null,
   now: Date,
 ): ApiCache {
-  if (fetched !== null) return { fetchedAt: now.getTime(), ...fetched };
+  const plan = previous?.plan === undefined ? {} : { plan: previous.plan };
+  if (fetched !== null) return { fetchedAt: now.getTime(), ...plan, ...fetched };
   return {
+    extraUsage: null,
+    fiveHour: null,
+    sevenDay: null,
+    ...previous,
     fetchedAt: now.getTime(),
-    extraUsage: previous?.extraUsage ?? null,
-    fiveHour: previous?.fiveHour ?? null,
-    sevenDay: previous?.sevenDay ?? null,
     stale: true,
+    ...readAtOf(previous),
+    failures: (previous?.failures ?? 0) + 1,
   };
 }
 
 export function isApiCacheFresh(cache: ApiCache | null, now: Date): boolean {
-  return cache !== null && now.getTime() - cache.fetchedAt < API_CACHE_TTL_MS;
+  if (cache === null) return false;
+  const doublings = Math.min(cache.failures ?? 0, MAX_BACKOFF_DOUBLINGS);
+  return now.getTime() - cache.fetchedAt < API_CACHE_TTL_MS * 2 ** doublings;
 }

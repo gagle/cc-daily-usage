@@ -27,6 +27,7 @@ const DOC_MAP = {
     "src/statusline-install.ts",
     "src/statusline-shared.ts",
     "src/statusline-capture-install.ts",
+    "src/subagent-line.ts",
     "assets/statusline.mjs",
     "bin/**",
   ],

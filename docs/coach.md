@@ -34,6 +34,6 @@ Ranking (`coach`): not snoozed first, then $ descending, a finding with no $
   `config.json` `snoozed` (rule → ISO end).
 - Statusline part 14 `coach`: `» <title> ~$X/<window>` from the first
   non-snoozed finding in `feed.json` (one small file read per render). On by
-  default, on its own row.
+  default, on the second row before the limit warnings.
 - `feed.json.advice`: the week's findings for the `/cost-tracker` mod. The CLI
   never writes Claude Code settings; a fix is text to copy.

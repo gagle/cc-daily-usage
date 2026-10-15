@@ -36,6 +36,10 @@ vi.mock("./prompt-gate.js", () => ({ runPromptGate: () => runPromptGateMock() as
 
 const runModelSwitchMock = vi.fn().mockResolvedValue(0);
 vi.mock("./model-switch.js", () => ({ runModelSwitch: () => runModelSwitchMock() as unknown }));
+const runSubagentMock = vi.fn().mockResolvedValue(0);
+vi.mock("./subagent-line.js", () => ({
+  runSubagentStatusline: () => runSubagentMock() as unknown,
+}));
 
 const runRefreshMock = vi.fn().mockResolvedValue(0);
 const writeFeedMock = vi.fn().mockResolvedValue(undefined);
@@ -153,6 +157,8 @@ describe("hidden modes", () => {
     await runCli(["--refresh", "k"]);
     await runCli(["--prompt-gate"]);
     await runCli(["--model-switch"]);
+    await runCli(["--subagent-statusline"]);
+    expect(runSubagentMock).toHaveBeenCalled();
     expect(runPromptGateMock).toHaveBeenCalled();
     expect(runModelSwitchMock).toHaveBeenCalled();
     expect(runStatuslineLineMock).toHaveBeenCalled();

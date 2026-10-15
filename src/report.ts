@@ -77,6 +77,31 @@ export interface Report {
   readonly subagentUsd: number;
   readonly unattributedUsd: number; // same range, sessions no account claimed
   readonly gaps: ReadonlyArray<string>; // self-check notes
+  readonly activity: ReportActivity;
+}
+
+/** Time and hook totals of the sessions last active in the range (from Claude Code's system lines). */
+export interface ReportActivity {
+  readonly turnMs: number;
+  readonly thinkingMs: number;
+  readonly hookRuns: number;
+  readonly entrypoints: Readonly<Record<string, number>>; // how sessions started → session count
+}
+
+export function activityOf(sessions: ReadonlyArray<SessionTotals>): ReportActivity {
+  const entrypoints: Record<string, number> = {};
+  let turnMs = 0;
+  let thinkingMs = 0;
+  let hookRuns = 0;
+  for (const session of sessions) {
+    turnMs += session.turnMs ?? 0;
+    thinkingMs += session.thinkingMs ?? 0;
+    hookRuns += session.hookRuns ?? 0;
+    if (session.entrypoint) {
+      entrypoints[session.entrypoint] = (entrypoints[session.entrypoint] ?? 0) + 1;
+    }
+  }
+  return { turnMs, thinkingMs, hookRuns, entrypoints };
 }
 
 /** Rollups of `owner` inside `range`, keyed by row key. */
@@ -146,19 +171,19 @@ export function buildReport(owner: string, range: DayRange, by: Dimension): Repo
     groups.set(label, group);
   }
   const totals = loadSessionTotals(owner);
+  const names = owner === UNATTRIBUTED ? {} : loadSessionsMap(owner);
+  const inRange = Object.entries(totals).filter(([, session]) => {
+    const day = localDateKey(new Date(session.lastAt));
+    return day >= range.from && day <= range.to;
+  });
   let rows: Array<ReportRow>;
   if (by === "component") {
     rows = COMPONENTS.map(([label, field]) => ({ label, rollup: componentRollup(total, field) }));
   } else if (by === "session") {
-    rows = Object.entries(totals)
-      .filter(([, session]) => {
-        const day = localDateKey(new Date(session.lastAt));
-        return day >= range.from && day <= range.to;
-      })
-      .map(([id, session]) => ({
-        label: `${id.slice(0, 8)} ${path.basename(session.project)}`,
-        rollup: { ...emptyRollup(), turns: session.turns, usdInput: session.usd },
-      }));
+    rows = inRange.map(([id, session]) => ({
+      label: `${id.slice(0, 8)} ${names[id]?.name ?? path.basename(session.project)}`,
+      rollup: { ...emptyRollup(), turns: session.turns, usdInput: session.usd },
+    }));
   } else {
     rows = [...groups].map(([label, rollup]) => ({ label, rollup }));
   }
@@ -175,7 +200,8 @@ export function buildReport(owner: string, range: DayRange, by: Dimension): Repo
     total,
     subagentUsd,
     unattributedUsd: unattributed,
-    gaps: owner === UNATTRIBUTED ? [] : selfCheck(totals, loadSessionsMap(owner), range),
+    gaps: owner === UNATTRIBUTED ? [] : selfCheck(totals, names, range),
+    activity: activityOf(inRange.map(([, session]) => session)),
   };
 }
 
@@ -186,6 +212,32 @@ export function hasUnpricedTurns(owner: string, now: Date): boolean {
 }
 
 const money = (usd: number): string => `$${usd.toFixed(2)}`;
+
+/** `3h12m` / `40m` / `<1m`. */
+function hoursMinutes(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "<1m";
+  const hours = Math.floor(minutes / 60);
+  return hours === 0 ? `${String(minutes)}m` : `${String(hours)}h${String(minutes % 60)}m`;
+}
+
+/** `Turn time 3h12m (thinking 40m) · 123 hook runs · started from cli 12, sdk-ts 2`, or null when empty. */
+function activityNote(activity: ReportActivity): string | null {
+  const parts: Array<string> = [];
+  if (activity.turnMs > 0 || activity.thinkingMs > 0) {
+    parts.push(
+      `Turn time ${hoursMinutes(activity.turnMs)} (thinking ${hoursMinutes(activity.thinkingMs)})`,
+    );
+  }
+  if (activity.hookRuns > 0) parts.push(`${String(activity.hookRuns)} hook runs`);
+  const starts = Object.entries(activity.entrypoints).sort(([, a], [, b]) => b - a);
+  if (starts.length > 0) {
+    parts.push(
+      `started from ${starts.map(([name, count]) => `${name} ${String(count)}`).join(", ")}`,
+    );
+  }
+  return parts.length === 0 ? null : parts.join(" · ");
+}
 
 /** The report as a terminal table. */
 export function formatReport(report: Report): string {
@@ -219,6 +271,8 @@ export function formatReport(report: Report): string {
     `${report.range.label} (${report.range.from} → ${report.range.to}), by ${report.by}. API-equivalent estimate, not a bill.`,
     `Subagents ${money(report.subagentUsd)} (${String(share)}%) · thinking ${money(report.total.usdThinking)} · web searches ${String(report.total.webSearches)}`,
   ];
+  const activity = activityNote(report.activity);
+  if (activity !== null) notes.push(activity);
   if (report.total.unpricedTurns > 0) {
     notes.push(
       `${String(report.total.unpricedTurns)} turns on models with no price: totals are a floor.`,

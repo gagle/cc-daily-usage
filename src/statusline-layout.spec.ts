@@ -38,11 +38,11 @@ describe("parseLayout", () => {
     expect(parseLayout(null)).toBe(DEFAULT_LAYOUT);
   });
 
-  it("the default is every part on one row, the coach tip on its own", async () => {
+  it("the default is every part on one row, the coach tip then the limit warnings on a second", async () => {
     const { DEFAULT_LAYOUT, PARTS } = await fresh();
     expect(DEFAULT_LAYOUT).toEqual([
-      PARTS.map((part) => part.id).filter((id) => id !== "coach"),
-      ["coach"],
+      PARTS.map((part) => part.id).filter((id) => id !== "coach" && id !== "warnings"),
+      ["coach", "warnings"],
     ]);
   });
 });

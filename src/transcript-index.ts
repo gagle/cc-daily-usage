@@ -23,6 +23,7 @@ import {
   addTurn,
   emptyRollup,
   mergeRollup,
+  parseActivity,
   parseTurn,
   priceTurn,
   type Rollup,
@@ -73,6 +74,10 @@ export interface SessionTotals {
   usd: number;
   unpricedTurns: number;
   subagentUsd: number;
+  turnMs?: number; // absent in files written before 2026-10-15
+  thinkingMs?: number;
+  hookRuns?: number;
+  entrypoint?: string | null;
 }
 
 export interface PassResult {
@@ -174,10 +179,20 @@ function sessionOwners(): Map<string, string> {
 
 interface OwnerDelta {
   readonly months: Map<string, Map<string, Rollup>>; // YYYY-MM → row key → delta
-  readonly sessions: Map<
-    string,
-    { turns: Array<Turn>; usd: number; unpriced: number; subagentUsd: number }
-  >;
+  readonly sessions: Map<string, SessionDelta>;
+}
+
+interface SessionDelta {
+  turns: Array<Turn>;
+  usd: number;
+  unpriced: number;
+  subagentUsd: number;
+  turnMs: number;
+  hookRuns: number;
+}
+
+function emptySessionDelta(): SessionDelta {
+  return { turns: [], usd: 0, unpriced: 0, subagentUsd: 0, turnMs: 0, hookRuns: 0 };
 }
 
 function applyDelta(owner: string, delta: OwnerDelta): void {
@@ -195,11 +210,22 @@ function applyDelta(owner: string, delta: OwnerDelta): void {
   const file = path.join(dir, "sessions.json");
   const sessions = readVersioned(file, "sessions") as Record<string, SessionTotals>;
   for (const [sessionId, add] of delta.sessions) {
+    const prior = sessions[sessionId];
+    const timing = {
+      turnMs: (prior?.turnMs ?? 0) + add.turnMs,
+      thinkingMs:
+        (prior?.thinkingMs ?? 0) + add.turns.reduce((total, turn) => total + turn.thinkingMs, 0),
+      hookRuns: (prior?.hookRuns ?? 0) + add.hookRuns,
+    };
+    if (add.turns.length === 0) {
+      // Only system lines this pass: they extend a session the index already has, never start one.
+      if (prior) sessions[sessionId] = { ...prior, ...timing };
+      continue;
+    }
     // The session's project is where it started; its branch is the latest one.
     const ordered = [...add.turns].sort((a, b) => a.timestamp.localeCompare(b.timestamp));
     const first = ordered[0] as Turn;
     const last = ordered.at(-1) as Turn;
-    const prior = sessions[sessionId];
     const models = new Set([...(prior?.models ?? []), ...add.turns.map((turn) => turn.model)]);
     sessions[sessionId] = {
       firstAt: prior?.firstAt ?? first.timestamp,
@@ -211,6 +237,8 @@ function applyDelta(owner: string, delta: OwnerDelta): void {
       usd: (prior?.usd ?? 0) + add.usd,
       unpricedTurns: (prior?.unpricedTurns ?? 0) + add.unpriced,
       subagentUsd: (prior?.subagentUsd ?? 0) + add.subagentUsd,
+      ...timing,
+      entrypoint: prior?.entrypoint ?? first.entrypoint,
     };
   }
   writeVersioned(file, "sessions", sessions);
@@ -278,7 +306,19 @@ export function runIndexPass(
       const scope = scopeOf(file);
       for (const line of lines) {
         const turn = parseTurn(line);
-        if (turn === null || recent.includes(turn.key)) continue;
+        if (turn === null) {
+          const activity = parseActivity(line);
+          if (activity === null) continue;
+          const owner = owners.get(activity.sessionId) ?? UNATTRIBUTED;
+          const delta: OwnerDelta = deltas.get(owner) ?? { months: new Map(), sessions: new Map() };
+          deltas.set(owner, delta);
+          const session = delta.sessions.get(activity.sessionId) ?? emptySessionDelta();
+          delta.sessions.set(activity.sessionId, session);
+          session.turnMs += activity.turnMs;
+          session.hookRuns += activity.hookRuns;
+          continue;
+        }
+        if (recent.includes(turn.key)) continue;
         recent.push(turn.key);
         if (recent.length > RECENT_KEYS) recent.shift();
         const key = turnRowKey(turn, scope);
@@ -297,12 +337,7 @@ export function runIndexPass(
         const cost = priceTurn(turn);
         addTurn(row, turn, cost);
         const usd = cost === null ? 0 : cost.input + cost.output + cost.cacheRead + cost.cacheWrite;
-        const session = delta.sessions.get(turn.sessionId) ?? {
-          turns: [],
-          usd: 0,
-          unpriced: 0,
-          subagentUsd: 0,
-        };
+        const session = delta.sessions.get(turn.sessionId) ?? emptySessionDelta();
         delta.sessions.set(turn.sessionId, session);
         session.turns.push(turn);
         session.usd += usd;

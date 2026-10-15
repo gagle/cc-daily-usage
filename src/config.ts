@@ -281,7 +281,8 @@ export function limitsFile(accountKey: string): string {
 
 export function loadLimitSamples(accountKey: string): ReadonlyArray<LimitSample> {
   const samples = loadHistoryRecord(limitsFile(accountKey), "samples");
-  return Array.isArray(samples) ? (samples as ReadonlyArray<LimitSample>) : [];
+  // Two renders racing on load → append → save can leave samples out of time order; every reader assumes it.
+  return Array.isArray(samples) ? (samples as Array<LimitSample>).sort((a, b) => a.t - b.t) : [];
 }
 
 export function saveLimitSamples(accountKey: string, samples: ReadonlyArray<LimitSample>): void {

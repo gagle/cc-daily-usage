@@ -11,20 +11,23 @@ its % holds until the next sample.
 
 `computeRunway(samples, window, usedPct, resetsAt, readingAt, now)`:
 
-| Step    | Rule                                                                                                                                 |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| stale   | reading older than 15 min → `stale`                                                                                                  |
-| full    | `usedPct ≥ 100` → `at-risk`, `exhaustsAt = now`                                                                                      |
-| anchor  | the sample in force 2 h ago, else the first one after; a reset or a missing % restarts                                               |
-| guard   | under 15 min from anchor to now → `insufficient-data`                                                                                |
-| rate    | `(usedPct − anchor %) / hours`, never negative                                                                                       |
-| runway  | `exhaustsAt = now + (100 − used) / rate`; null when the rate is 0                                                                    |
-| verdict | exhausts before reset → `at-risk`; rate ÷ (left ÷ hours to reset) ≤ 0.8 → `comfortable`; else `on-track` (also without a reset time) |
+| Step    | Rule                                                                                                                                       |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| stale   | reading older than 15 min → `stale`                                                                                                        |
+| full    | `usedPct ≥ 100` → `at-risk`, `exhaustsAt = now`                                                                                            |
+| anchor  | the sample in force 2 h before the reading, else the first one after; a reset or a missing % restarts                                      |
+| guard   | under 15 min from anchor to the reading → `insufficient-data`                                                                              |
+| rate    | `(usedPct − anchor %) / hours`, never negative                                                                                             |
+| runway  | `exhaustsAt = reading + (100 − used) / rate`; null when the rate is 0. Measured to the reading, not now: the verdict holds between fetches |
+| verdict | exhausts before reset → `at-risk`; rate ÷ (left ÷ hours to reset) ≤ 0.8 → `comfortable`; else `on-track` (also without a reset time)       |
 
 `usdPerPercentWeek`: between samples where the 7d % rose at least one point,
-Δ `apiEqTotal` ÷ Δ%. Median over 14 days, at least 3 rises, else null. It counts
-only spend this statusline saw, so use on other devices makes it read low. Only
-`feed.json` carries it; the statusline does not show it.
+Δ `apiEqTotal` ÷ (Δ% × `claudeCodeShare`). The share is Claude Code's part of
+the week from the API's `seven_day_breakdown` (chat and Cowork use raise the %
+but not our $); no share counts as 1, a share under 5% skips the rise. Median
+over 14 days, at least 3 rises, else null. It counts only spend this
+statusline saw, so use on other devices makes it read low. Only `feed.json`
+carries it; the statusline does not show it.
 
 Reset rule (both functions): a drop in % is a reset only when the window's
 reset time moved forward by more than a minute (the API jitters it by a second)
@@ -43,16 +46,16 @@ Written by the detached refresher after each API call (`writeFeed` in
 `src/refresh.ts`), never by the render, so it is as fresh as `api-cache.json`.
 Accounts without an OAuth login get no refresher and so no feed.
 
-| Field                     | Content                                                                                                                          |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`           | `FEED_SCHEMA_VERSION` (1). Add a field freely; remove or change one → bump                                                       |
-| `writtenAt`, `accountKey` | ISO time, account folder                                                                                                         |
-| `plan`                    | `{ organizationType, hasSpendCap }`                                                                                              |
-| `sessionIds`              | sessions seen in the last 7 days, newest first (the mod finds its account by these)                                              |
-| `limits`                  | `fiveHour`/`sevenDay`: `{ usedPct, resetsAt, ratePctPerHour, exhaustsAt, verdict }` or null with no reading; `usdPerPercentWeek` |
-| `budget`                  | dollar-cap plans only: `{ todaySpent, todayMax, monthSpent, monthCap, paceLabel }`                                               |
-| `spend`                   | API-equivalent `today`, `week` (rolling 7 local days), `monthToDate` (local month), `last30Days`, `isFloor`                      |
-| `advice`                  | coaching findings, ranked; empty until the coach runs                                                                            |
+| Field                     | Content                                                                                                                                                           |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`           | `FEED_SCHEMA_VERSION` (1). Add a field freely; remove or change one → bump                                                                                        |
+| `writtenAt`, `accountKey` | ISO time, account folder                                                                                                                                          |
+| `plan`                    | `{ organizationType, hasSpendCap }`                                                                                                                               |
+| `sessionIds`              | sessions seen in the last 7 days, newest first (the mod finds its account by these)                                                                               |
+| `limits`                  | `fiveHour`/`sevenDay`: `{ usedPct, resetsAt, ratePctPerHour, exhaustsAt, verdict }` or null with no reading; `usdPerPercentWeek`; `claudeCodeShare` (0-1 or null) |
+| `budget`                  | dollar-cap plans only: `{ todaySpent, todayMax, monthSpent, monthCap, paceLabel }`                                                                                |
+| `spend`                   | API-equivalent `today`, `week` (rolling 7 local days), `monthToDate` (local month), `last30Days`, `isFloor`                                                       |
+| `advice`                  | coaching findings, ranked; empty until the coach runs                                                                                                             |
 
 A window reading comes from the fresh API reading, else the newest sample (with
 its own time, so an old one is `stale`).

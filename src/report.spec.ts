@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -182,6 +182,26 @@ describe("buildReport / formatReport", () => {
       "cache write",
     ]);
     expect(buildReport("acct", week, "session").rows[0]?.label).toBe("s1 app");
+    expect(byModel.activity).toEqual({ turnMs: 0, thinkingMs: 0, hookRuns: 0, entrypoints: {} });
+    expect(text).not.toContain("Turn time");
+    const busy = formatReport({
+      ...byModel,
+      activity: {
+        turnMs: 11_520_000,
+        thinkingMs: 30_000,
+        hookRuns: 12,
+        entrypoints: { cli: 3, "sdk-ts": 5 },
+      },
+    });
+    expect(busy).toContain(
+      "Turn time 3h12m (thinking <1m) · 12 hook runs · started from sdk-ts 5, cli 3",
+    );
+    expect(
+      formatReport({
+        ...byModel,
+        activity: { turnMs: 0, thinkingMs: 2_400_000, hookRuns: 0, entrypoints: {} },
+      }),
+    ).toContain("Turn time <1m (thinking 40m)");
 
     const month = resolveRange("30d", NOW);
     if (!month) throw new Error("range");
@@ -191,6 +211,64 @@ describe("buildReport / formatReport", () => {
     expect(stray.rows[0]?.rollup.unpricedTurns).toBe(1);
     expect(stray.gaps).toEqual([]);
     expect(formatReport(stray)).toContain("totals are a floor");
+  });
+
+  it("a session row uses Claude Code's session name; activity counts sessions in range", async () => {
+    sessionsMap({ s1: 1 });
+    const mapFile = path.join(
+      fakeHome,
+      ".config",
+      "cc-daily-usage",
+      "accounts",
+      "acct",
+      "sessions-map.json",
+    );
+    const map = JSON.parse(readFileSync(mapFile, "utf8")) as {
+      sessions: Record<string, Record<string, unknown>>;
+    };
+    map.sessions.s1 = { ...map.sessions.s1, name: "fix login" };
+    writeFileSync(mapFile, JSON.stringify(map));
+    const dir = path.join(fakeHome, ".claude", "projects", "-work-app");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, "s1.jsonl"),
+      line("a", { entrypoint: "cli", thinkingDurationMs: 60_000 }) +
+        `${JSON.stringify({ type: "system", subtype: "turn_duration", sessionId: "s1", durationMs: 120_000 })}\n`,
+    );
+    const { runIndexPass } = await import("./transcript-index.js");
+    runIndexPass({ now: NOW });
+    const { buildReport, resolveRange } = await fresh();
+    const week = resolveRange("week", NOW);
+    if (!week) throw new Error("range");
+    const report = buildReport("acct", week, "session");
+    expect(report.rows[0]?.label).toBe("s1 fix login");
+    expect(report.activity).toEqual({
+      turnMs: 120_000,
+      thinkingMs: 60_000,
+      hookRuns: 0,
+      entrypoints: { cli: 1 },
+    });
+  });
+
+  it("activityOf counts a session from an older index as zero time", async () => {
+    const { activityOf } = await fresh();
+    const legacy = {
+      firstAt: "",
+      lastAt: "",
+      project: "",
+      branch: "",
+      models: [],
+      turns: 1,
+      usd: 0,
+      unpricedTurns: 0,
+      subagentUsd: 0,
+    };
+    expect(activityOf([legacy])).toEqual({
+      turnMs: 0,
+      thinkingMs: 0,
+      hookRuns: 0,
+      entrypoints: {},
+    });
   });
 
   it("flags a price gap over 5% and names its models; sessions out of range are ignored", async () => {

@@ -26,10 +26,11 @@ export type PartId = (typeof PARTS)[number]["id"];
 /** Rows top to bottom, parts left to right. A part in no row is hidden. */
 export type Layout = ReadonlyArray<ReadonlyArray<PartId>>;
 
-/** Everything on one row in `PARTS` order, and the coach tip on a row of its own (it is long). */
+/** Everything on one row in `PARTS` order; the coach tip and the limit warnings (both long) on a second. */
+const SECOND_ROW: ReadonlyArray<PartId> = ["coach", "warnings"];
 export const DEFAULT_LAYOUT: Layout = [
-  PARTS.map((part) => part.id).filter((id) => id !== "coach"),
-  ["coach"],
+  PARTS.map((part) => part.id).filter((id) => !SECOND_ROW.includes(id)),
+  SECOND_ROW,
 ];
 
 /** Global, not per account: the layout is how the user likes the line, whatever the plan. */

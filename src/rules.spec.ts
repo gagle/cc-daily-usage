@@ -30,6 +30,8 @@ const BASE_TURN: Turn = {
   webSearches: 0,
   webFetches: 0,
   effort: null,
+  thinkingMs: 0,
+  entrypoint: null,
 };
 
 function row(turn: Partial<Turn>, scope = "main"): readonly [string, Rollup] {
@@ -214,6 +216,7 @@ describe("coach rules", () => {
           fiveHour: window,
           sevenDay: { ...window, exhaustsAt: null },
           usdPerPercentWeek: null,
+          claudeCodeShare: null,
         },
         budget: { todaySpent: 12, todayMax: 10, monthSpent: 0, monthCap: 0, paceLabel: null },
       }),
@@ -267,6 +270,7 @@ describe("coach rules", () => {
             verdict: "at-risk",
           },
           usdPerPercentWeek: null,
+          claudeCodeShare: null,
         },
       }),
     );

@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -154,32 +162,20 @@ describe("defaultConfirm", () => {
     const readSettings = (file: string): Record<string, unknown> =>
       JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
 
-    it("syncRefreshInterval toggles only our own 30s/1s values, writing only on change", async () => {
-      const { ensureSettingsStatusLine, syncRefreshInterval, SETTINGS_FILE } = await freshModule();
-      syncRefreshInterval(1); // no statusLine of ours yet → nothing
-      expect(existsSync(SETTINGS_FILE)).toBe(false);
+    it("ensureSettingsStatusLine puts the legacy live 1s interval back to 30, keeps a user value, keeps the mode", async () => {
+      const { ensureSettingsStatusLine, STATUSLINE_FILE, SETTINGS_FILE } = await freshModule();
+      const interval = (): unknown =>
+        (readSettings(SETTINGS_FILE).statusLine as { refreshInterval: unknown }).refreshInterval;
+      const command = `node ${JSON.stringify(STATUSLINE_FILE)}`;
+      mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ statusLine: { command, refreshInterval: 1 } }));
+      chmodSync(SETTINGS_FILE, 0o640);
       ensureSettingsStatusLine();
-      syncRefreshInterval(1);
-      expect(
-        (readSettings(SETTINGS_FILE).statusLine as { refreshInterval: number }).refreshInterval,
-      ).toBe(1);
-      syncRefreshInterval(1);
-      syncRefreshInterval(30);
-      expect(
-        (readSettings(SETTINGS_FILE).statusLine as { refreshInterval: number }).refreshInterval,
-      ).toBe(30);
-      const settings = readSettings(SETTINGS_FILE);
-      writeFileSync(
-        SETTINGS_FILE,
-        JSON.stringify({
-          ...settings,
-          statusLine: { ...(settings.statusLine as object), refreshInterval: 7 },
-        }),
-      );
-      syncRefreshInterval(1);
-      expect(
-        (readSettings(SETTINGS_FILE).statusLine as { refreshInterval: number }).refreshInterval,
-      ).toBe(7);
+      expect(interval()).toBe(30);
+      expect(statSync(SETTINGS_FILE).mode & 0o777).toBe(0o640);
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ statusLine: { command, refreshInterval: 7 } }));
+      ensureSettingsStatusLine();
+      expect(interval()).toBe(7);
     });
 
     it("ensureManagedHooks adds, re-points and removes only our hooks", async () => {
@@ -214,6 +210,23 @@ describe("defaultConfirm", () => {
       hooks = readSettings(SETTINGS_FILE).hooks as Record<string, Array<unknown>>;
       expect(hooks.UserPromptSubmit).toEqual([theirs, bare]);
       expect(hooks.PreModelSwitch).toBeUndefined();
+    });
+
+    it("ensureManagedHooks installs our subagentStatusLine, keeps a user's own, removes only ours", async () => {
+      const { ensureManagedHooks, hookCommand, SETTINGS_FILE } = await freshModule();
+      mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+      writeFileSync(SETTINGS_FILE, "{}");
+      ensureManagedHooks("/a/bin.js");
+      expect(readSettings(SETTINGS_FILE).subagentStatusLine).toEqual({
+        type: "command",
+        command: hookCommand("/a/bin.js", "--subagent-statusline"),
+      });
+      ensureManagedHooks(null);
+      expect(readSettings(SETTINGS_FILE).subagentStatusLine).toBeUndefined();
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ subagentStatusLine: { command: "mine" } }));
+      ensureManagedHooks("/a/bin.js");
+      ensureManagedHooks(null);
+      expect(readSettings(SETTINGS_FILE).subagentStatusLine).toEqual({ command: "mine" });
     });
 
     it("removing our only hooks drops empty hook keys", async () => {

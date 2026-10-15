@@ -18,7 +18,12 @@ that exercises all of this: `adrs/2026-10-10-manual-test-plan.md`.
 
 Installs or upgrades `~/.claude/statusline.mjs` and merges `statusLine` into
 `~/.claude/settings.json` with `refreshInterval: 30` (a user-set value on our
-own block is kept). Idempotent; a foreign script is backed up first.
+own block is kept; the 1 s value older versions switched to goes back to 30).
+Also installs both managed hooks and a `subagentStatusLine` (agent-panel rows:
+`Explore · find endpoints · 🤖 Sonnet 5.5 high · 41k (4%)`, a premium model
+drawn orange; a user's own `subagentStatusLine` is kept). Every
+`settings.json` write goes through a temp file and a rename. Idempotent; a
+foreign script is backed up first.
 
 ## `cc-daily-usage uninstall`
 
@@ -69,9 +74,12 @@ month vs cap with `cap: Anthropic` or `cap: local`, Day-1 max, real average,
 One line per check (`src/doctor.ts`), `✔` ok, `⚠` warn, `✖` fail; exit 1 when
 any check fails. Checks: Node ≥ 24, package version, `claude --version` (a
 warn when missing), the shim's version vs the shipped one, `settings.json`
-`statusLine`, both managed hooks, then per account each file's
-`schemaVersion` (garbled or newer files fail), a dead `refresh.lock`, and the
-age of the last usage reading and `feed.json`.
+`statusLine` (a warn for the old 1 s `refreshInterval`), both managed hooks,
+the subagent line, then per account each file's `schemaVersion` (garbled or
+newer files fail), a dead `refresh.lock`, the age of the last usage reading
+and `feed.json`, and the plan (tier, subscription status, trial end; a warn
+when the subscription is not active) with the Claude Code version of the
+newest session.
 
 ## `cc-daily-usage report`
 
@@ -96,8 +104,8 @@ Ranked findings with $ and the exact fix; see `docs/coach.md`.
 Each is guarded on its own data; a missing field hides one part, and a line
 with nothing to show is dropped. `renderStatusline` places the parts by the
 layout from `statusline.json` (`loadLayout`, see `cc-daily-usage settings`);
-the default is every part but the coach tip on one line, in this order, and
-the coach tip on a second line (`DEFAULT_LAYOUT`).
+the default is every part but the coach tip and the limit warnings on one
+line, in this order, and those two on a second line (`DEFAULT_LAYOUT`).
 Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 
 1. `(🌿 branch)` when in a git repo (no repo name — Claude Code already shows the project).
@@ -107,15 +115,22 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 5. `🤖` model.
 6. `💪` effort.
 7. `🔥`/`❄` prompt-cache forecast, color fading with the TTL (see `docs/prompt-cache.md`).
-8. Pro/Max: `⏱ 5h/7d` (hook, else the newer of cache and API; placeholder `—/5h —/7d`).
-9. Pro/Max: `⚠ 5h resets HH:MM (in 1h 12m)` at ≥ 90%,
-   `⛔ 5h limit · continue at HH:MM (in …)` at the limit (same for weekly).
-   Under 90%, `⚠ 5h runs out ~HH:MM (in …)` when the burn rate empties the window before reset.
+8. Pro/Max: `⏱ 5h/7d` (hook, else the newer of cache and API; a stale API
+   reading only when there is no hook snapshot; placeholder `—/5h —/7d`).
+   A dollar-metered window adds `($used/$limit)`; Opus and Sonnet weekly
+   windows add `NN%/7d-opus`, `NN%/7d-sonnet` when the API sends them.
+9. Pro/Max: both windows behind one icon, e.g.
+   `⚠ 5h out ~5:22pm (1h13m) · 7d resets Tue 7pm (5d3h)`. Per window:
+   `resets` at ≥ 90% (or when the API's `limits[]` severity is not "normal"),
+   `full → <when>` at the limit (icon `⛔`, red), `out ~<when>` under that when
+   the burn rate empties it before reset. `<when>` is a time today, weekday +
+   time within a week, else a date.
 10. Pro/Max: `🎫` usage credits.
 11. Budget plans: `⚠ run: cc-daily-usage init` before any laboral day exists;
     else `$today/$max (pct)` on laboral days (`(over)` when the max is 0),
     `$today` on off days.
 12. Budget plans: `$month/$cap (pct)`.
-13. `💳 pct` — Claude apps gateway spend limit, when present.
+13. `💳 pct` — Claude apps gateway spend limit, when present; `💳 63% $62.80/$100/mo`
+    once Claude Code (v2.1.284+) sends the dollar amounts and period.
 14. `» <tip> ~$X/week` — the top coach finding (`docs/coach.md`), on its own
     line by default.

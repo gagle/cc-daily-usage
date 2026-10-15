@@ -143,6 +143,14 @@ describe("computeRunway", () => {
     expect(computeRunway(samples, "fiveHour", 52, sec(HOUR), now, NOW).verdict).toBe("comfortable");
   });
 
+  it("measures to the reading, so time passing before the next fetch keeps the verdict", () => {
+    const samples = [sample(60, 50)];
+    const later = new Date(now + 10 * MIN); // still inside STALE_READING_MS
+    expect(computeRunway(samples, "fiveHour", 70, sec(2 * HOUR), now, later)).toEqual(
+      computeRunway(samples, "fiveHour", 70, sec(2 * HOUR), now, NOW),
+    );
+  });
+
   it("has no exhaust time while flat, and no pace without a reset time", () => {
     const flat = computeRunway([sample(60, 50)], "fiveHour", 50, sec(HOUR), now, NOW);
     expect(flat).toMatchObject({ ratePctPerHour: 0, exhaustsAt: null, verdict: "comfortable" });
@@ -213,6 +221,21 @@ describe("usdPerPercentWeek", () => {
     ].map(([ago, pct, usd]) =>
       withResets(sample(ago as number, 0, pct as number, usd as number), reset, reset),
     );
+    expect(usdPerPercentWeek(samples, NOW)).toBe(2);
+  });
+
+  it("divides by Claude Code's share of the week; skips a share too small to trust", () => {
+    const withShare = (base: LimitSample, claudeCodeShare: number | null): LimitSample => ({
+      ...base,
+      claudeCodeShare,
+    });
+    const samples = [
+      sample(60, 0, 10, 0),
+      withShare(sample(50, 0, 11, 1), 0.5), // 1 point, $1, half of it Claude Code → $2 per CC point
+      withShare(sample(40, 0, 12, 3), 0.5),
+      withShare(sample(30, 0, 13, 5), null), // no share → whole point
+      withShare(sample(20, 0, 14, 9), 0.01), // too small: skipped
+    ];
     expect(usdPerPercentWeek(samples, NOW)).toBe(2);
   });
 });

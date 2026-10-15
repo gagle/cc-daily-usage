@@ -216,17 +216,43 @@ describe("anthropic-usage.ts", () => {
           ok: true,
           json: () =>
             Promise.resolve({
-              five_hour: { utilization: 42, resets_at: "2026-10-10T15:00:00Z" },
+              five_hour: {
+                utilization: 42,
+                resets_at: "2026-10-10T15:00:00Z",
+                used_dollars: 1.2,
+                limit_dollars: 5,
+              },
               seven_day: { utilization: 7, resets_at: null },
+              seven_day_opus: { utilization: 30, resets_at: null },
+              seven_day_cowork: null,
+              seven_day_breakdown: {
+                rows: [
+                  { key: "claude_code", percent: 80 },
+                  { key: "chat", percent: 20 },
+                ],
+              },
+              limits: [
+                { kind: "session", severity: "warning" },
+                { kind: "weekly_all", severity: 3 },
+              ],
               extra_usage: { is_enabled: false },
             }),
         }),
       );
       const { fetchUsage } = await freshModule();
+      const window = { usedDollars: null, limitDollars: null, severity: null };
       expect(await fetchUsage("t")).toEqual({
         extraUsage: null,
-        fiveHour: { pct: 42, resetsAt: Date.parse("2026-10-10T15:00:00Z") / 1000 },
-        sevenDay: { pct: 7, resetsAt: null },
+        fiveHour: {
+          pct: 42,
+          resetsAt: Date.parse("2026-10-10T15:00:00Z") / 1000,
+          usedDollars: 1.2,
+          limitDollars: 5,
+          severity: "warning",
+        },
+        sevenDay: { ...window, pct: 7, resetsAt: null },
+        extraWindows: [{ ...window, key: "opus", pct: 30, resetsAt: null }],
+        claudeCodeShare: 0.8,
       });
     });
 
@@ -242,9 +268,39 @@ describe("anthropic-usage.ts", () => {
       const { fetchUsage } = await freshModule();
       expect(await fetchUsage("t")).toEqual({
         extraUsage: null,
-        fiveHour: { pct: 5, resetsAt: null },
+        fiveHour: { pct: 5, resetsAt: null, usedDollars: null, limitDollars: null, severity: null },
         sevenDay: null,
+        extraWindows: [],
+        claudeCodeShare: null,
       });
+    });
+
+    it("fetchPlan maps the profile's organization; null without one", async () => {
+      const fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            organization: {
+              rate_limit_tier: "default_claude_ai",
+              subscription_status: "active",
+              billing_type: "stripe_subscription",
+            },
+          }),
+      });
+      vi.stubGlobal("fetch", fetch);
+      const { fetchPlan } = await freshModule();
+      const now = new Date("2026-10-10T10:00:00.000Z");
+      expect(await fetchPlan("t", now)).toEqual({
+        fetchedAt: now.getTime(),
+        rateLimitTier: "default_claude_ai",
+        subscriptionStatus: "active",
+        billingType: "stripe_subscription",
+        trialEndsAt: null,
+      });
+      fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ organization: {} }) });
+      expect(await fetchPlan("t", now)).toMatchObject({ rateLimitTier: null, billingType: null });
+      fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+      expect(await fetchPlan("t", now)).toBeNull();
     });
 
     it("null on failure or a non-object body", async () => {
@@ -275,26 +331,56 @@ describe("anthropic-usage.ts", () => {
     it("a failed fetch keeps the last good reading, marked stale", async () => {
       const { nextApiCache } = await freshModule();
       const previous = { fetchedAt: 1, ...reading };
-      expect(nextApiCache(previous, null, now)).toEqual({
+      const failed = nextApiCache(previous, null, now);
+      expect(failed).toEqual({
         fetchedAt: now.getTime(),
         ...reading,
         stale: true,
+        readAt: 1,
+        failures: 1,
       });
+      // The reading time survives further failures; a stale cache without one stays without one.
+      expect(nextApiCache(failed, null, now)).toMatchObject({ readAt: 1, failures: 2 });
+      expect(nextApiCache({ ...previous, stale: true }, null, now)).not.toHaveProperty("readAt");
       expect(nextApiCache(null, null, now)).toEqual({
         fetchedAt: now.getTime(),
         extraUsage: null,
         fiveHour: null,
         sevenDay: null,
         stale: true,
+        failures: 1,
       });
     });
 
-    it("fresh for 60s", async () => {
+    it("a good fetch clears the failures and keeps the plan", async () => {
+      const { nextApiCache } = await freshModule();
+      const plan = {
+        fetchedAt: 1,
+        rateLimitTier: "t",
+        subscriptionStatus: "active",
+        billingType: null,
+        trialEndsAt: null,
+      };
+      const previous = { fetchedAt: 1, ...reading, stale: true, failures: 3, plan };
+      expect(nextApiCache(previous, reading, now)).toEqual({
+        fetchedAt: now.getTime(),
+        ...reading,
+        plan,
+      });
+    });
+
+    it("fresh for 60s, doubling per failure up to 16 min", async () => {
       const { isApiCacheFresh } = await freshModule();
       const cache = { fetchedAt: now.getTime() - 59_000, ...reading };
       expect(isApiCacheFresh(cache, now)).toBe(true);
       expect(isApiCacheFresh({ ...cache, fetchedAt: now.getTime() - 60_000 }, now)).toBe(false);
       expect(isApiCacheFresh(null, now)).toBe(false);
+      const ago = (ms: number, failures: number) =>
+        isApiCacheFresh({ ...cache, fetchedAt: now.getTime() - ms, failures }, now);
+      expect(ago(119_000, 1)).toBe(true);
+      expect(ago(120_000, 1)).toBe(false);
+      expect(ago(959_000, 9)).toBe(true);
+      expect(ago(960_000, 9)).toBe(false);
     });
   });
 });

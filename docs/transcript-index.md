@@ -18,7 +18,8 @@ priceTurn ─ src/pricing.ts; 5m and 1h cache writes priced apart; speed "fast" 
 owner = account whose sessions-map.json has the session id, else "unattributed"
         ▼
 <owner>/index/YYYY-MM.json  rows: day × project × model × scope × speed → Rollup
-<owner>/index/sessions.json session → totals, first/last time, project, branch, models
+<owner>/index/sessions.json session → totals, first/last time, project, branch, models,
+                            turnMs, thinkingMs, hookRuns, entrypoint
 ```
 
 - Offsets live in `~/.config/cc-daily-usage/index/offsets.json` with the size,
@@ -30,6 +31,12 @@ owner = account whose sessions-map.json has the session id, else "unattributed"
 - An unknown model counts tokens with no $ (`unpricedTurns`); totals that
   include one are a floor (`feed.json.spend.isFloor`).
 - Thinking $ is the output $ share of `thinking_tokens` (an estimate).
+- Time and hooks (`parseActivity`): `system` lines `turn_duration`
+  (`durationMs`) add `turnMs`, `stop_hook_summary` (`hookCount`) add
+  `hookRuns`; an assistant line's `thinkingDurationMs` (on the first copy of
+  the message, so the dedupe keeps it) adds `thinkingMs`; the first turn's
+  `entrypoint` (cli, sdk-ts, …) is kept. System lines only extend a session the
+  index already has. Sessions indexed before these fields read as zero.
 - Index files carry `schemaVersion` 1 and follow the downgrade guard in
   `docs/data-model.md`.
 
@@ -47,8 +54,10 @@ owner = account whose sessions-map.json has the session id, else "unattributed"
 
 - Ranges are local days: `week` = rolling 7 days, `month` = local month to date.
 - Columns: input, output, cache read, cache write, total; footer with the
-  subagent share, thinking $, web searches, the unattributed $ and the
-  "API-equivalent estimate" label.
+  subagent share, thinking $, web searches, turn time (thinking time), hook
+  runs and how sessions started (`entrypoint` counts), the unattributed $ and
+  the "API-equivalent estimate" label. `--by session` labels a row with
+  Claude Code's session name when `sessions-map.json` has one.
 - Self-check (`selfCheck`): per session in range with no unpriced turn, index
   $ vs the statusline's last `cost.total_cost_usd`; a gap over 5% (and over a
   cent) prints "price table may be stale for <model>".

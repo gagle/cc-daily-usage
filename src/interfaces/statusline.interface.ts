@@ -1,10 +1,17 @@
 import type { CacheForecast, CachePayload } from "../cache-forecast.js";
 import type { Runway } from "../limits-history.js";
-import type { ExtraUsageCacheEntry, RateLimitsCache } from "./config.interface.js";
+import type {
+  ApiExtraWindow,
+  ApiWindow,
+  ExtraUsageCacheEntry,
+  RateLimitsCache,
+} from "./config.interface.js";
 
 /** The subset of Claude Code's statusline stdin JSON that cc-daily-usage reads. */
 export interface HookPayload extends CachePayload {
   readonly session_id?: string;
+  readonly session_name?: string;
+  readonly version?: string; // Claude Code version
   readonly transcript_path?: string;
   readonly workspace?: {
     readonly current_dir?: string;
@@ -27,7 +34,13 @@ export interface HookPayload extends CachePayload {
   readonly rate_limits?: {
     readonly five_hour?: { readonly used_percentage?: number; readonly resets_at?: number };
     readonly seven_day?: { readonly used_percentage?: number; readonly resets_at?: number };
-    readonly spend_limit?: { readonly used_percentage?: number; readonly resets_at?: number };
+    readonly spend_limit?: {
+      readonly used_percentage?: number;
+      readonly resets_at?: number;
+      readonly used_usd?: number; // v2.1.284+; can lag the % by ~5 min and can be absent
+      readonly limit_usd?: number;
+      readonly period?: string; // daily | weekly | monthly
+    };
   };
 }
 
@@ -56,6 +69,17 @@ export interface StatuslineState {
   readonly rateLimits: ResolvedRateLimits;
   readonly rateLimitsCache: RateLimitsCache | null; // kept for shims installed before v0.2
   readonly spendLimitPct: number | null; // Claude apps gateway spend limit, 0-100+
+  readonly spendLimitUsd?: {
+    readonly used: number;
+    readonly limit: number;
+    readonly period: string | null;
+  } | null;
+  /** API-only details of the windows (fresh readings only): dollar meters, server severity, extra windows. */
+  readonly apiDetail?: {
+    readonly fiveHour: ApiWindow | null;
+    readonly sevenDay: ApiWindow | null;
+    readonly extraWindows: ReadonlyArray<ApiExtraWindow>;
+  } | null;
   readonly cache: CacheForecast | null;
   readonly runway?: { readonly fiveHour: Runway | null; readonly sevenDay: Runway | null };
   readonly coach?: {

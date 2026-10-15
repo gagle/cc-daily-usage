@@ -96,7 +96,7 @@ describe("checkStatusline", () => {
     const { installStatusline } = await import("./statusline-install.js");
     await installStatusline(() => Promise.resolve(true));
     const { checkStatusline } = await fresh();
-    expect(checkStatusline().map((check) => check.status)).toEqual(["ok", "ok", "ok", "ok"]);
+    expect(checkStatusline().map((check) => check.status)).toEqual(["ok", "ok", "ok", "ok", "ok"]);
 
     const { STATUSLINE_FILE, SETTINGS_FILE } = await import("./statusline-shared.js");
     writeFileSync(STATUSLINE_FILE, "// cc-daily-usage:managed v00000000\n");
@@ -109,7 +109,18 @@ describe("checkStatusline", () => {
       "fail",
       "warn",
       "warn",
+      "warn",
     ]);
+    const command = `node ${JSON.stringify(STATUSLINE_FILE)}`;
+    writeFileSync(
+      SETTINGS_FILE,
+      JSON.stringify({
+        statusLine: { command, refreshInterval: 1 },
+        subagentStatusLine: { command: "their-line" },
+      }),
+    );
+    expect(checkStatusline()[1]).toMatchObject({ status: "warn", name: "settings" });
+    expect(checkStatusline().at(-1)).toMatchObject({ status: "ok", name: "subagent line" });
   });
 
   it("a capture-only line counts as installed", async () => {
@@ -135,7 +146,11 @@ describe("checkAccounts", () => {
     writeFileSync(path.join(good, "usage.json"), JSON.stringify({ schemaVersion: 2 }));
     writeFileSync(
       path.join(good, "api-cache.json"),
-      JSON.stringify({ schemaVersion: 1, fetchedAt: NOW.getTime() - 30_000 }),
+      JSON.stringify({
+        schemaVersion: 1,
+        fetchedAt: NOW.getTime() - 30_000,
+        plan: { subscriptionStatus: "active" },
+      }),
     );
     writeFileSync(
       path.join(good, "feed.json"),
@@ -186,6 +201,34 @@ describe("checkAccounts", () => {
     expect(byName["refresher empty"]?.detail).toContain("dead refresher");
     expect(byName["refresher nolock"]?.detail).toContain("no usage reading yet");
     expect(byName["account stray.txt"]).toBeUndefined();
+  });
+});
+
+describe("checkPlan", () => {
+  it("plan from the profile read, version from the newest session; a lapsed plan warns", async () => {
+    const { checkPlan } = await fresh();
+    expect(checkPlan("a", {})).toBeNull();
+    const sessions = {
+      old: { lastSeenAt: "2026-10-01T00:00:00Z", claudeVersion: "2.1.200" },
+      new: { lastSeenAt: "2026-10-15T00:00:00Z", claudeVersion: "2.1.293" },
+      none: { lastSeenAt: "2026-10-16T00:00:00Z" },
+    };
+    const plan = {
+      rateLimitTier: "default_claude_ai",
+      subscriptionStatus: "active",
+      trialEndsAt: "2026-11-01T00:00:00Z",
+    };
+    expect(
+      checkPlan("a", { "api-cache.json": { plan }, "sessions-map.json": { sessions } }),
+    ).toEqual({
+      status: "ok",
+      name: "plan a",
+      detail:
+        "tier default_claude_ai, subscription active, trial ends 2026-11-01, last session on Claude Code 2.1.293",
+    });
+    expect(
+      checkPlan("a", { "api-cache.json": { plan: { subscriptionStatus: "past_due" } } }),
+    ).toMatchObject({ status: "warn", detail: "subscription past_due" });
   });
 });
 

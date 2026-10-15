@@ -56,6 +56,23 @@ export interface RateLimitsCache {
 export interface ApiWindow {
   readonly pct: number; // 0-100
   readonly resetsAt: number | null; // Unix epoch seconds
+  readonly usedDollars?: number | null; // dollar-metered windows only (null on Pro/Max as of 2026-10)
+  readonly limitDollars?: number | null;
+  readonly severity?: string | null; // the server's level from `limits[]`; "normal" when nothing to say
+}
+
+/** A model or product weekly window beside the main two (`seven_day_opus` → key "opus"). */
+export interface ApiExtraWindow extends ApiWindow {
+  readonly key: string;
+}
+
+/** Plan facts from `/api/oauth/profile`, refreshed at most daily by the refresher (`doctor` shows them). */
+export interface ApiPlan {
+  readonly fetchedAt: number; // epoch ms
+  readonly rateLimitTier: string | null;
+  readonly subscriptionStatus: string | null;
+  readonly billingType: string | null;
+  readonly trialEndsAt: string | null; // ISO
 }
 
 /** accounts/<key>/api-cache.json — written ONLY by the detached `--refresh` process (atomic rename), read by
@@ -66,6 +83,11 @@ export interface ApiCache {
   readonly fiveHour: ApiWindow | null;
   readonly sevenDay: ApiWindow | null;
   readonly stale?: boolean; // last attempt failed; fields are the previous good reading
+  readonly readAt?: number; // epoch ms of that good reading, set only when stale (else it is fetchedAt)
+  readonly failures?: number; // consecutive failed attempts; each doubles the wait before the next
+  readonly extraWindows?: ReadonlyArray<ApiExtraWindow>;
+  readonly claudeCodeShare?: number | null; // 0-1: Claude Code's part of the 7d window (`seven_day_breakdown`)
+  readonly plan?: ApiPlan;
 }
 
 export interface UsageState {
@@ -92,6 +114,7 @@ export interface LimitSample {
   readonly fiveHourResetsAt: number | null; // Unix epoch seconds
   readonly sevenDayResetsAt: number | null;
   readonly apiEqTotal: number; // UsageState.apiEqTotal at this reading
+  readonly claudeCodeShare?: number | null; // ApiCache.claudeCodeShare at this reading
 }
 
 /** accounts/<key>/limits.json — written by the render when a limit % changes. */
@@ -108,6 +131,8 @@ export interface SessionMapEntry {
   readonly costUsd: number; // Claude Code's cost.total_cost_usd at lastSeenAt
   readonly linesAdded: number;
   readonly linesRemoved: number;
+  readonly name?: string | null; // Claude Code's session_name (`/rename` or the AI title)
+  readonly claudeVersion?: string | null; // Claude Code's version as it rendered this session
 }
 
 /** accounts/<key>/sessions-map.json — written by the render on a new session, at most hourly after. */

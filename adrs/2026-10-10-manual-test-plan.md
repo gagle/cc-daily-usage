@@ -181,25 +181,26 @@ payload() { printf '%s' "$1" | HOME=$SANDBOX node /path/to/cc-daily-usage/bin/cc
 
 ## K. Statusline layout (`ccdu settings`)
 
-| ID  | Steps                                                           | Expected                                                              | Auto                                             |
-| --- | --------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------ |
-| K1  | no `statusline.json`, any session                               | first line every part; `»` tip on a second line when a finding exists | `src/statusline-render.spec.ts`                  |
-| K2  | `ccdu settings`, put 7 on row 2, clear it on row 1, Enter       | "Saved statusline layout"; next render has the cache part on line 2   | `src/settings-tui.spec.ts`, manual               |
-| K3  | type `1` then `2`; type `5` then `3`; type `0`; place 5 twice   | cell shows 12; then 3; preview shows the error; Enter does not save   | `src/settings-tui.spec.ts`                       |
-| K4  | Esc / q / Ctrl+C                                                | "Not saved."; terminal restored                                       | `src/settings-tui.spec.ts`, manual               |
-| K5  | `ccdu settings < /dev/null`                                     | prints one frame, exits 0                                             | manual                                           |
-| K6  | corrupt or hand-edited `statusline.json` (unknown ids, repeats) | statusline still renders; bad ids dropped, nothing usable → default   | `src/statusline-layout.spec.ts`                  |
-| K7  | scroll the mouse wheel / trackpad in `ccdu settings`            | the cursor does not move; after exit, the terminal scrolls normally   | `src/calendar-tui.spec.ts` (`parseKeys`), manual |
+| ID  | Steps                                                           | Expected                                                                                  | Auto                                             |
+| --- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| K1  | no `statusline.json`, any session                               | first line every part; second line `»` tip then `⚠` limit warnings, each when it has data | `src/statusline-render.spec.ts`                  |
+| K2  | `ccdu settings`, put 7 on row 2, clear it on row 1, Enter       | "Saved statusline layout"; next render has the cache part on line 2                       | `src/settings-tui.spec.ts`, manual               |
+| K3  | type `1` then `2`; type `5` then `3`; type `0`; place 5 twice   | cell shows 12; then 3; preview shows the error; Enter does not save                       | `src/settings-tui.spec.ts`                       |
+| K4  | Esc / q / Ctrl+C                                                | "Not saved."; terminal restored                                                           | `src/settings-tui.spec.ts`, manual               |
+| K5  | `ccdu settings < /dev/null`                                     | prints one frame, exits 0                                                                 | manual                                           |
+| K6  | corrupt or hand-edited `statusline.json` (unknown ids, repeats) | statusline still renders; bad ids dropped, nothing usable → default                       | `src/statusline-layout.spec.ts`                  |
+| K7  | scroll the mouse wheel / trackpad in `ccdu settings`            | the cursor does not move; after exit, the terminal scrolls normally                       | `src/calendar-tui.spec.ts` (`parseKeys`), manual |
 
 ## L. History and feed (CLI-1..5)
 
-| ID  | Steps                                                                 | Expected                                                                                                             | Auto                                                   |
-| --- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| L1  | Max account; work 20+ min in one session                              | `limits.json` gains a sample per % change; `⚠ 5h runs out ~HH:MM` only when the rate empties the window before reset | `src/limits-history.spec.ts`, `src/statusline.spec.ts` |
-| L2  | after 3+ one-point rises of the 7d %                                  | `⏱ …` has no `1%/7d≈$X`; `feed.json` `limits.usdPerPercentWeek` is set                                               | `src/limits-history.spec.ts`                           |
-| L3  | add or remove an MCP server mid-session, send a prompt                | no cause text on the line; `usage.missCauses[today]` counts it                                                       | `src/statusline.spec.ts`                               |
-| L4  | `node bin/cc-daily-usage.js --refresh <key>` with a logged-in account | `accounts/<key>/feed.json` has `schemaVersion: 1`, current `sessionIds`, limits with verdicts, `spend`               | `src/refresh.spec.ts`, `src/feed.spec.ts`              |
-| L5  | Pro/Max: a day of work                                                | `usage.apiEqDays[today]` grows by the session cost deltas; `monthlySpent` stays 0                                    | `src/calc.spec.ts`                                     |
+| ID  | Steps                                                                                      | Expected                                                                                                             | Auto                                                           |
+| --- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| L1  | Max account; work 20+ min in one session                                                   | `limits.json` gains a sample per % change; `⚠ 5h runs out ~HH:MM` only when the rate empties the window before reset | `src/limits-history.spec.ts`, `src/statusline.spec.ts`         |
+| L2  | after 3+ one-point rises of the 7d %                                                       | `⏱ …` has no `1%/7d≈$X`; `feed.json` `limits.usdPerPercentWeek` is set                                               | `src/limits-history.spec.ts`                                   |
+| L3  | add or remove an MCP server mid-session, send a prompt                                     | no cause text on the line; `usage.missCauses[today]` counts it                                                       | `src/statusline.spec.ts`                                       |
+| L4  | `node bin/cc-daily-usage.js --refresh <key>` with a logged-in account                      | `accounts/<key>/feed.json` has `schemaVersion: 1`, current `sessionIds`, limits with verdicts, `spend`               | `src/refresh.spec.ts`, `src/feed.spec.ts`                      |
+| L5  | Pro/Max: a day of work                                                                     | `usage.apiEqDays[today]` grows by the session cost deltas; `monthlySpent` stays 0                                    | `src/calc.spec.ts`                                             |
+| L6  | Max, `⚠ 5h out ~` shown; type a prompt and let a long turn run (a fetch may fail with 429) | the `⚠ … out ~` notice stays and its time does not jump; it hides only 15 min after the last good reading            | `src/limits-history.spec.ts`, `src/statusline.spec.ts`, manual |
 
 ## M. File versions and downgrade guard (CLI-6)
 
@@ -230,6 +231,24 @@ payload() { printf '%s' "$1" | HOME=$SANDBOX node /path/to/cc-daily-usage/bin/cc
 | O3  | no `statusline.json`, after a refresh with findings  | second line `» <tip> ~$X/week`                                                      | `src/statusline-render.spec.ts`                  |
 | O4  | a quiet week                                         | `Nothing to change this week.`; no `»` coach line                                   | `src/insights.spec.ts`                           |
 | O5  | 5h window at risk                                    | R8 first, no $                                                                      | `src/rules.spec.ts`                              |
+
+## P. Review fixes and new usage data (2026-10-15)
+
+| ID  | Steps                                                                      | Expected                                                                                          | Auto                                                    |
+| --- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| P1  | Pro/Max, a window at risk and the other near its limit                     | one segment: `⚠ 5h out ~5:22pm (1h13m) · 7d resets Tue 7pm (5d3h)`                                | `src/statusline-render.spec.ts`                         |
+| P2  | a window at 100%                                                           | `⛔ 5h full → 5:22pm (1h13m)`, red                                                                | `src/statusline-render.spec.ts`                         |
+| P3  | warm cache with under a minute left                                        | `🔥 cold in <1m`; `settings.json` unchanged by renders                                            | `src/statusline.spec.ts`                                |
+| P4  | `refreshInterval: 1` in settings, `ccdu doctor`, then `ccdu statusline`    | doctor warns; after `statusline` it is 30                                                         | `src/doctor.spec.ts`, `src/statusline-shared.spec.ts`   |
+| P5  | kill `ccdu statusline` while it writes settings (or inspect the code path) | `settings.json` is either old or new, never empty; file mode kept                                 | `src/statusline-shared.spec.ts`                         |
+| P6  | block api.anthropic.com, keep a session running for 5 min                  | ⏱ keeps the session's own reading; refresher retries at 2, 4, 8 min (`api-cache.json` `failures`) | `src/anthropic-usage.spec.ts`, `src/statusline.spec.ts` |
+| P7  | Max account with Opus weekly window                                        | `⏱ … NN%/7d-opus`                                                                                 | `src/statusline-render.spec.ts`                         |
+| P8  | `ccdu doctor` after a refresh                                              | `✔ plan <key>: tier …, subscription active, last session on Claude Code 2.1.x`                    | `src/doctor.spec.ts`                                    |
+| P9  | start a subagent in Claude Code                                            | agent panel row `Explore · … · 🤖 Sonnet 5.5 high · 41k (4%)`; Opus drawn orange                  | `src/subagent-line.spec.ts`                             |
+| P10 | `/rename fix login`, then `ccdu report week --by session`                  | row `<id> fix login`                                                                              | `src/report.spec.ts`                                    |
+| P11 | `ccdu report` after a day of work                                          | footer `Turn time …h…m (thinking …) · N hook runs · started from cli N`                           | `src/report.spec.ts`, `src/transcript-index.spec.ts`    |
+| P12 | behind a Claude apps gateway, Claude Code 2.1.284+                         | `💳 63% $62.80/$100.00/mo`                                                                        | `src/statusline-render.spec.ts`                         |
+| P13 | use claude.ai chat as well as Claude Code for a week                       | `feed.json` `limits.claudeCodeShare` < 1; `usdPerPercentWeek` higher than without the share       | `src/limits-history.spec.ts`                            |
 
 ## Consequences
 

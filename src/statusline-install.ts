@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -20,6 +20,7 @@ import {
   SETTINGS_FILE,
   stampVersion,
   STATUSLINE_FILE,
+  writeSettings,
 } from "./statusline-shared.js";
 
 export interface StatuslineInstallResult {
@@ -133,7 +134,7 @@ export function uninstallStatusline(): UninstallResult {
   const settings = readJsonFile(SETTINGS_FILE);
   if (previous.statusLine === null) delete settings.statusLine;
   else settings.statusLine = previous.statusLine;
-  writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  writeSettings(settings);
   ensureManagedHooks(null);
 
   const backup = previous.scriptBackup;

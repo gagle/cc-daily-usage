@@ -5,7 +5,14 @@ import { recentSessionIds, recordSession, SESSION_MAP_DAYS } from "./sessions-ma
 
 const NOW = new Date("2026-10-07T12:00:00.000Z");
 const DAY = 24 * 60 * 60 * 1000;
-const seen = { transcriptPath: "/t.jsonl", costUsd: 1, linesAdded: 2, linesRemoved: 0 };
+const seen = {
+  transcriptPath: "/t.jsonl",
+  costUsd: 1,
+  linesAdded: 2,
+  linesRemoved: 0,
+  name: null,
+  claudeVersion: "2.1.293",
+};
 
 function entry(lastSeenMsAgo: number): SessionMapEntry {
   const at = new Date(NOW.getTime() - lastSeenMsAgo).toISOString();
@@ -19,9 +26,18 @@ describe("recordSession", () => {
     });
   });
 
-  it("returns the same map inside the hour with the same path", () => {
+  it("returns the same map inside the hour with the same path and name", () => {
     const sessions = { a: entry(30 * 60 * 1000) };
     expect(recordSession(sessions, "a", { ...seen, costUsd: 5 }, NOW)).toBe(sessions);
+    const legacy = { a: { ...entry(30 * 60 * 1000), name: undefined } }; // written before names
+    expect(recordSession(legacy, "a", seen, NOW)).toBe(legacy);
+  });
+
+  it("a new session name is written at once", () => {
+    const sessions = { a: entry(30 * 60 * 1000) };
+    expect(recordSession(sessions, "a", { ...seen, name: "fix login" }, NOW).a?.name).toBe(
+      "fix login",
+    );
   });
 
   it("refreshes an hour-old entry, keeps firstSeenAt, and prunes old sessions", () => {

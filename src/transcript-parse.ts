@@ -19,6 +19,15 @@ export interface Turn {
   readonly webSearches: number;
   readonly webFetches: number;
   readonly effort: string | null;
+  readonly thinkingMs: number; // time spent thinking (`thinkingDurationMs`, on the first copy of the line)
+  readonly entrypoint: string | null; // cli, sdk-ts, … (how the session was started)
+}
+
+/** Time and hook facts from Claude Code's own system lines (no tokens, never priced). */
+export interface Activity {
+  readonly sessionId: string;
+  readonly turnMs: number; // `turn_duration`: wall time of one user turn
+  readonly hookRuns: number; // `stop_hook_summary`: hooks run at the end of a turn
 }
 
 /** $ of one turn by component; null for a model with no price. */
@@ -72,7 +81,30 @@ export function parseTurn(line: string): Turn | null {
     webSearches: num(server?.web_search_requests),
     webFetches: num(server?.web_fetch_requests),
     effort: typeof entry.effort === "string" ? entry.effort : null,
+    thinkingMs: num(entry.thinkingDurationMs),
+    entrypoint: typeof entry.entrypoint === "string" ? entry.entrypoint : null,
   };
+}
+
+/** A `turn_duration` or `stop_hook_summary` system line → Activity; anything else → null. The substring test
+ * keeps the second JSON.parse off the common lines. */
+export function parseActivity(line: string): Activity | null {
+  if (!line.includes('"turn_duration"') && !line.includes('"stop_hook_summary"')) return null;
+  let entry: Record<string, unknown>;
+  try {
+    entry = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (entry.type !== "system") return null;
+  const sessionId = str(entry.sessionId, "unknown");
+  if (entry.subtype === "turn_duration") {
+    return { sessionId, turnMs: num(entry.durationMs), hookRuns: 0 };
+  }
+  if (entry.subtype === "stop_hook_summary") {
+    return { sessionId, turnMs: 0, hookRuns: num(entry.hookCount) };
+  }
+  return null;
 }
 
 export function priceTurn(turn: Turn): TurnCost | null {

@@ -39,12 +39,6 @@ import { requestApiRefresh } from "./refresh.js";
 import { recordSession } from "./sessions-map.js";
 import { loadLayout } from "./statusline-layout.js";
 import { renderStatusline } from "./statusline-render.js";
-import {
-  FAST_REFRESH_BELOW_SECONDS,
-  STATUSLINE_FAST_REFRESH_SECONDS,
-  STATUSLINE_REFRESH_SECONDS,
-  syncRefreshInterval,
-} from "./statusline-shared.js";
 
 export async function readStdin(): Promise<string> {
   const chunks: Array<Buffer> = [];
@@ -109,8 +103,12 @@ export function resolveRateLimits(
 ): ResolvedRateLimits {
   const nowSec = Math.floor(now.getTime() / 1000);
   const apiUsable = api !== null && (api.fiveHour !== null || api.sevenDay !== null);
+  // A stale reading (failed fetch) carries the attempt's time, not the reading's: it never beats a hook
+  // snapshot, only stands in when there is none.
   const useApi =
-    !sawHookLimits && apiUsable && (cached?.seenAt === undefined || api.fetchedAt > cached.seenAt);
+    !sawHookLimits &&
+    apiUsable &&
+    (cached?.seenAt === undefined || (api.stale !== true && api.fetchedAt > cached.seenAt));
   if (useApi) {
     const five = liveWindow(api.fiveHour?.pct ?? null, api.fiveHour?.resetsAt ?? null, nowSec);
     const seven = liveWindow(api.sevenDay?.pct ?? null, api.sevenDay?.resetsAt ?? null, nowSec);
@@ -145,7 +143,8 @@ export function resolveRateLimits(
 /**
  * Appends the API reading to limits.json when a % changed, then the runway of each window. Only the API
  * reading is sampled: it is account-wide and carries its time, while an idle session keeps sending the
- * `rate_limits` of its last response (old values would read as resets and rises).
+ * `rate_limits` of its last response (old values would read as resets and rises). A failed fetch keeps the
+ * last good reading at its own time (`readAt`), so one 429 mid-turn does not hide the runway.
  */
 function trackLimits(
   key: string,
@@ -156,26 +155,28 @@ function trackLimits(
   const samples = loadLimitSamples(key);
   const five = api?.fiveHour ?? null;
   const seven = api?.sevenDay ?? null;
-  if (api === null || api.stale === true || (five === null && seven === null)) {
+  const readingAt = api?.stale === true ? api.readAt : api?.fetchedAt;
+  if (api === null || readingAt === undefined || (five === null && seven === null)) {
     return { runway: { fiveHour: null, sevenDay: null } };
   }
   const last = samples.at(-1);
   const next =
-    last !== undefined && api.fetchedAt <= last.t
+    last !== undefined && readingAt <= last.t
       ? samples
       : appendSample(samples, {
-          t: api.fetchedAt,
+          t: readingAt,
           fiveHourPct: five?.pct ?? null,
           sevenDayPct: seven?.pct ?? null,
           fiveHourResetsAt: five?.resetsAt ?? null,
           sevenDayResetsAt: seven?.resetsAt ?? null,
           apiEqTotal,
+          claudeCodeShare: api.claudeCodeShare ?? null,
         });
   if (next !== samples) saveLimitSamples(key, next);
   const runway = (window: "fiveHour" | "sevenDay", reading: ApiWindow | null): Runway | null =>
     reading === null
       ? null
-      : computeRunway(next, window, reading.pct, reading.resetsAt, api.fetchedAt, now);
+      : computeRunway(next, window, reading.pct, reading.resetsAt, readingAt, now);
   return { runway: { fiveHour: runway("fiveHour", five), sevenDay: runway("sevenDay", seven) } };
 }
 
@@ -336,6 +337,8 @@ export async function buildStatuslineState(
       costUsd: currentCost,
       linesAdded: payload.cost?.total_lines_added ?? 0,
       linesRemoved: payload.cost?.total_lines_removed ?? 0,
+      name: typeof payload.session_name === "string" ? payload.session_name : null,
+      claudeVersion: typeof payload.version === "string" ? payload.version : null,
     },
     now,
   );
@@ -343,13 +346,6 @@ export async function buildStatuslineState(
 
   const rateLimits = resolveRateLimits(sawRateLimits, usage.rateLimitsCache, api, now);
   const limits = trackLimits(key, api, usage.apiEqTotal, now);
-  const fastRefresh =
-    cache?.secondsUntilCold != null && cache.secondsUntilCold <= FAST_REFRESH_BELOW_SECONDS;
-  try {
-    syncRefreshInterval(fastRefresh ? STATUSLINE_FAST_REFRESH_SECONDS : STATUSLINE_REFRESH_SECONDS);
-  } catch {
-    // An unreadable settings.json only costs the live countdown.
-  }
 
   // No OAuth login (API-key user) → the usage endpoint has nothing to say; don't spawn refreshers for it.
   if (account !== null || process.env.CLAUDE_CODE_OAUTH_TOKEN) requestApiRefresh(key, now);
@@ -357,6 +353,7 @@ export async function buildStatuslineState(
   const computed = computeToday(usage, config, now);
   const showTodayPace = config.hasSpendCap !== false && isLaboralDay(config, now);
   const spendLimit = payload.rate_limits?.spend_limit?.used_percentage;
+  const { used_usd: usedUsd, limit_usd: limitUsd, period } = payload.rate_limits?.spend_limit ?? {};
   return {
     // Dollar self-budget: omitted entirely for Pro/Max. todayUsage always ships so off-days still show
     // spent-today; avgPerDay/todayUsedPct only on laboral days (pace vs max).
@@ -385,6 +382,14 @@ export async function buildStatuslineState(
     coach: coachTip(key),
     rateLimitsCache: usage.rateLimitsCache ?? null,
     spendLimitPct: typeof spendLimit === "number" ? spendLimit : null,
+    spendLimitUsd:
+      typeof usedUsd === "number" && typeof limitUsd === "number"
+        ? { used: usedUsd, limit: limitUsd, period: typeof period === "string" ? period : null }
+        : null,
+    apiDetail:
+      api === null || api.stale === true
+        ? null
+        : { fiveHour: api.fiveHour, sevenDay: api.sevenDay, extraWindows: api.extraWindows ?? [] },
     cache,
     hasSpendCap: config.hasSpendCap === true, // always resolved by the classification above
     planType: config.planType ?? null,

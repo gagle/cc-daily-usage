@@ -5,6 +5,7 @@ import {
   DEEP_CONTEXT_TOKENS,
   emptyRollup,
   mergeRollup,
+  parseActivity,
   parseRowKey,
   parseTurn,
   priceTurn,
@@ -67,7 +68,32 @@ describe("parseTurn", () => {
       webSearches: 2,
       webFetches: 1,
       effort: "high",
+      thinkingMs: 0,
+      entrypoint: null,
     });
+    expect(parseTurn(usageLine({ thinkingDurationMs: 1200, entrypoint: "cli" }))).toMatchObject({
+      thinkingMs: 1200,
+      entrypoint: "cli",
+    });
+  });
+
+  it("parseActivity reads turn time and hook runs from system lines; anything else is null", () => {
+    const system = (fields: Record<string, unknown>): string =>
+      JSON.stringify({ type: "system", sessionId: "s1", ...fields });
+    expect(parseActivity(system({ subtype: "turn_duration", durationMs: 4400 }))).toEqual({
+      sessionId: "s1",
+      turnMs: 4400,
+      hookRuns: 0,
+    });
+    expect(parseActivity(system({ subtype: "stop_hook_summary", hookCount: 4 }))).toEqual({
+      sessionId: "s1",
+      turnMs: 0,
+      hookRuns: 4,
+    });
+    expect(parseActivity(usageLine())).toBeNull();
+    expect(parseActivity('{"subtype":"turn_duration"')).toBeNull();
+    expect(parseActivity(JSON.stringify({ type: "user", subtype: "turn_duration" }))).toBeNull();
+    expect(parseActivity(system({ subtype: "other", note: "turn_duration" }))).toBeNull();
   });
 
   it("skips non-usage lines, garbage and synthetic messages", () => {

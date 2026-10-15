@@ -135,7 +135,9 @@ describe("snoozeRule / adviceFor", () => {
       "2026-10-07": { tools_changed: { count: 1, usd: 2 } },
       "2026-08-01": { tools_changed: { count: 1, usd: 50 } },
     };
-    const feed = { limits: { fiveHour: null, sevenDay: null, usdPerPercentWeek: null } };
+    const feed = {
+      limits: { fiveHour: null, sevenDay: null, usdPerPercentWeek: null, claudeCodeShare: null },
+    };
     const week = adviceFor("acct", "week", feed, loadConfig("acct"), usage, NOW);
     expect(week.map((finding) => [finding.id, finding.usd, finding.snoozedUntil !== null])).toEqual(
       [

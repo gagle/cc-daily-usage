@@ -1,5 +1,5 @@
 /* eslint-disable no-control-regex -- these tests assert on ANSI escape sequences */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { CacheForecast } from "./cache-forecast.js";
 import type { HookPayload, StatuslineState } from "./interfaces/statusline.interface.js";
@@ -161,8 +161,7 @@ describe("renderStatusline", () => {
       ),
     );
     expect(line).toContain("⏱ 100%/5h 100%/7d");
-    expect(line).toMatch(/⛔ 5h limit · continue at .+? \(in 1h\)/);
-    expect(line).toMatch(/⛔ weekly limit · continue at \w+ \d+ .+? \(in 5d 1h\)/);
+    expect(line).toMatch(/⛔ 5h full → \S+ \(1h\) · 7d full → \w{3} \S+ \(5d1h\)/);
     const near = plain(
       renderStatusline(
         payload,
@@ -179,7 +178,7 @@ describe("renderStatusline", () => {
         NOW,
       ),
     );
-    expect(near).toMatch(/⚠ 5h resets .+? \(in 1h 13m\)/);
+    expect(near).toMatch(/⚠ 5h resets \S+ \(1h13m\)/);
     const soon = plain(
       renderStatusline(
         payload,
@@ -196,7 +195,7 @@ describe("renderStatusline", () => {
         NOW,
       ),
     );
-    expect(soon).toContain("(in 10m)");
+    expect(soon).toContain("(10m)");
     expect(
       plain(
         renderStatusline(
@@ -267,7 +266,7 @@ describe("renderStatusline", () => {
           NOW,
         ),
       ),
-    ).toMatch(/🔥 cold in 30s · \$0\.04\/msg$/);
+    ).toMatch(/🔥 cold in <1m · \$0\.04\/msg$/);
     expect(
       plain(
         renderStatusline(
@@ -356,15 +355,75 @@ describe("history parts", () => {
       rateLimits: { ...NO_LIMITS, fiveHourPct: 60, sevenDayPct: 95, sevenDayResetsAt: nowSec + 60 },
       runway: { fiveHour: runway, sevenDay: { ...runway, usedPct: 95 } },
     });
-    expect(line).toMatch(/⚠ 5h runs out ~.+? \(in 1h\)/);
-    expect(line).toMatch(/⚠ weekly resets/);
-    expect(line).not.toMatch(/weekly runs out/);
+    expect(line).toMatch(/⚠ 5h out ~\S+ \(1h\) · 7d resets \S+ \(1m\)/);
+    expect(line).not.toMatch(/7d out/);
     expect(
       sub({ runway: { fiveHour: { ...runway, verdict: "on-track" }, sevenDay: null } }),
-    ).not.toMatch(/runs out/);
+    ).not.toMatch(/ out /);
     expect(
       sub({ runway: { fiveHour: { ...runway, exhaustsAt: null }, sevenDay: null } }),
-    ).not.toMatch(/runs out/);
+    ).not.toMatch(/ out /);
+  });
+
+  it("shows dollar meters, model weekly windows, server-flagged windows and gateway dollars", () => {
+    const window = { pct: 40, resetsAt: nowSec + 600, usedDollars: 2, limitDollars: 5 };
+    const line = sub({
+      rateLimits: {
+        ...NO_LIMITS,
+        fiveHourPct: 40,
+        fiveHourResetsAt: nowSec + 600,
+        sevenDayPct: 20,
+      },
+      apiDetail: {
+        fiveHour: { ...window, severity: "warning" },
+        sevenDay: { pct: 20, resetsAt: null, severity: "normal" },
+        extraWindows: [
+          { key: "opus", pct: 55, resetsAt: null },
+          { key: "omelette", pct: 1, resetsAt: null },
+        ],
+      },
+    });
+    expect(line).toContain("⏱ 40%/5h ($2.00/$5.00) 20%/7d 55%/7d-opus");
+    expect(line).not.toContain("omelette");
+    expect(line).toContain("⚠ 5h resets");
+    const flaggedAtRisk = sub({
+      rateLimits: { ...NO_LIMITS, fiveHourPct: 40, fiveHourResetsAt: nowSec + 7200 },
+      runway: { fiveHour: runway, sevenDay: null },
+      apiDetail: { fiveHour: { ...window, severity: "warning" }, sevenDay: null, extraWindows: [] },
+    });
+    expect(flaggedAtRisk).toContain("⚠ 5h out ~");
+    expect(flaggedAtRisk).not.toContain("resets");
+    const spend = (spendLimitUsd: StatuslineState["spendLimitUsd"]): string =>
+      plain(
+        renderStatusline(payload, state({ spendLimitPct: 62.8, spendLimitUsd }), "", NOW, [
+          ["spend"],
+        ]),
+      );
+    expect(spend(null)).toBe("💳 63%");
+    expect(spend({ used: 62.8, limit: 100, period: "monthly" })).toBe("💳 63% $62.80/$100.00/mo");
+    expect(spend({ used: 1, limit: 2, period: "hourly" })).toBe("💳 63% $1.00/$2.00");
+    expect(spend({ used: 1, limit: 2, period: null })).toBe("💳 63% $1.00/$2.00");
+  });
+
+  it("writes short times: 12-hour and 24-hour locales, a weekday within a week, a date after", () => {
+    vi.stubEnv("TZ", "UTC"); // NOW is 10:00 UTC
+    const at = (hours: number): number => nowSec + hours * 3600;
+    const line = (exhaustsAt: number): string =>
+      sub({ runway: { fiveHour: { ...runway, exhaustsAt }, sevenDay: null } });
+    expect(line(at(2))).toContain("5h out ~12pm (2h)");
+    expect(line(at(2.5))).toContain("5h out ~12:30pm (2h30m)");
+    expect(line(at(-1))).toContain("5h out ~9am (1m)");
+    expect(line(at(26))).toMatch(/5h out ~\w{3} 12pm \(1d2h\)/);
+    expect(line(at(24 * 8))).toMatch(/5h out ~\w{3} \d+ \(8d0h\)/);
+    const options = Intl.DateTimeFormat.prototype.resolvedOptions;
+    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockImplementation(function (
+      this: Intl.DateTimeFormat,
+    ) {
+      return { ...options.call(this), hour12: false };
+    });
+    expect(line(at(7.5))).toContain("5h out ~17:30 (7h30m)");
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("shows no $ per 1% of the week; no miss cause or hint in the cache part", () => {

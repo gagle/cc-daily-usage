@@ -178,6 +178,7 @@ const HOOK_MODES = new Set([
   "--statusline",
   "--prompt-gate",
   "--model-switch",
+  "--subagent-statusline",
   "--refresh",
 ]);
 
@@ -273,6 +274,10 @@ async function dispatch(argv: ReadonlyArray<string>): Promise<number> {
   if (argv[0] === "--model-switch") {
     const { runModelSwitch } = await import("./model-switch.js");
     return runModelSwitch();
+  }
+  if (argv[0] === "--subagent-statusline") {
+    const { runSubagentStatusline } = await import("./subagent-line.js");
+    return runSubagentStatusline();
   }
   if (argv[0] === "--refresh") {
     if (!argv[1]) throw new Error("--refresh needs an account key");

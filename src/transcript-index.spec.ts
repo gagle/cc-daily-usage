@@ -204,6 +204,33 @@ describe("runIndexPass", () => {
     });
   });
 
+  it("adds turn time, thinking time, hook runs and entrypoint; system lines alone never start a session", async () => {
+    sessionsMap("acct", ["s1"]);
+    const file = path.join(projectDir(), "s1.jsonl");
+    const system = (fields: Record<string, unknown>): string =>
+      `${JSON.stringify({ type: "system", sessionId: "s1", ...fields })}\n`;
+    writeFileSync(
+      file,
+      line("a", { thinkingDurationMs: 1500, entrypoint: "cli" }) +
+        line("a", { thinkingDurationMs: 1500 }) + // a repeat of the same message: counted once
+        system({ subtype: "turn_duration", durationMs: 30_000 }) +
+        system({ subtype: "stop_hook_summary", hookCount: 4 }) +
+        system({ sessionId: "nobody", subtype: "turn_duration", durationMs: 9 }),
+    );
+    const { runIndexPass, loadSessionTotals, UNATTRIBUTED } = await fresh();
+    runIndexPass({ now: NOW });
+    expect(loadSessionTotals("acct").s1).toMatchObject({
+      turnMs: 30_000,
+      thinkingMs: 1500,
+      hookRuns: 4,
+      entrypoint: "cli",
+    });
+    expect(loadSessionTotals(UNATTRIBUTED).nobody).toBeUndefined();
+    writeFileSync(file, system({ subtype: "turn_duration", durationMs: 10_000 }), { flag: "a" });
+    runIndexPass({ now: NOW });
+    expect(loadSessionTotals("acct").s1).toMatchObject({ turnMs: 40_000, turns: 1 });
+  });
+
   it("remembers only the newest dedupe keys", async () => {
     const main = path.join(projectDir(), "s3.jsonl");
     writeFileSync(main, Array.from({ length: 70 }, (_, i) => line(`k${String(i)}`)).join(""));

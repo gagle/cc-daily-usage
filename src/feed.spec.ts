@@ -53,7 +53,7 @@ describe("buildFeed", () => {
       accountKey: "acct",
       plan: { organizationType: "claude_max", hasSpendCap: false },
       sessionIds: ["a"],
-      limits: { fiveHour: null, sevenDay: null, usdPerPercentWeek: null },
+      limits: { fiveHour: null, sevenDay: null, usdPerPercentWeek: null, claudeCodeShare: null },
       advice: [],
     });
     expect(feed.budget).toBeUndefined();

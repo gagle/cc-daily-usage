@@ -82,8 +82,9 @@ export function appendSample(
 
 /**
  * Burn rate and runway of one window. Samples are change points, so a % holds from its sample to the next;
- * the rate runs from the reading in force 2 h ago (or the first one after the last reset, a drop in %) to
- * `usedPct` now. Guards: a reading older than STALE_READING_MS → `stale`; under 15 min of history →
+ * the rate runs from the reading in force 2 h before `readingAt` (or the first one after the last reset, a
+ * drop in %) to `usedPct` at `readingAt` — not to now: between fetches the % is unchanged, and dividing by a
+ * growing span would decay the rate and flip `at-risk` off while the user works. Guards: a reading older than STALE_READING_MS → `stale`; under 15 min of history →
  * `insufficient-data`. Verdict: exhausts before reset → `at-risk`; pace (rate ÷ the rate that lasts exactly
  * to reset) ≤ 0.8 → `comfortable`; else `on-track`.
  * # ponytail: one linear rate over 2 h, no work-day model; upgrade path: weight by laboralDays like antiburn.
@@ -109,23 +110,23 @@ export function computeRunway(
     if (previous === null || current === null || current < previous) start = i;
   }
   const segment = trusted.slice(start).filter((sample) => pctOf(sample, window) !== null);
-  const windowStart = nowMs - RATE_WINDOW_MS;
+  const windowStart = readingAt - RATE_WINDOW_MS;
   // Samples are in time order: the last one at or before the window start, else the first inside it.
   const inside = segment.findIndex((sample) => sample.t > windowStart);
   const anchor = inside === -1 ? segment.at(-1) : (segment[inside - 1] ?? segment[inside]);
-  if (anchor === undefined || nowMs - anchor.t < MIN_SPAN_MS) {
+  if (anchor === undefined || readingAt - anchor.t < MIN_SPAN_MS) {
     return { ...base, verdict: "insufficient-data" };
   }
 
-  const hours = (nowMs - anchor.t) / HOUR_MS;
+  const hours = (readingAt - anchor.t) / HOUR_MS;
   const rate = Math.max(0, (usedPct - (pctOf(anchor, window) as number)) / hours);
   const left = Math.max(0, 100 - usedPct);
-  const exhaustsAt = rate > 0 ? Math.round(nowMs / 1000 + (left / rate) * 3600) : null;
+  const exhaustsAt = rate > 0 ? Math.round(readingAt / 1000 + (left / rate) * 3600) : null;
   if (resetsAt === null) return { ...base, ratePctPerHour: rate, exhaustsAt, verdict: "on-track" };
   if (exhaustsAt !== null && exhaustsAt < resetsAt) {
     return { ...base, ratePctPerHour: rate, exhaustsAt, verdict: "at-risk" };
   }
-  const hoursToReset = Math.max(0, resetsAt * 1000 - nowMs) / HOUR_MS;
+  const hoursToReset = Math.max(0, resetsAt * 1000 - readingAt) / HOUR_MS;
   const pace = rate / (left / Math.max(hoursToReset, 1 / 60)); // left > 0: 100% returned above
   return {
     ...base,
@@ -135,9 +136,13 @@ export function computeRunway(
   };
 }
 
+/** Under this Claude Code share the ratio is mostly noise (a tiny share would inflate it without bound). */
+const MIN_CLAUDE_CODE_SHARE = 0.05;
+
 /**
  * API-equivalent $ per 1% of the 7-day window: between readings where the 7d % rose at least one point,
- * Δ apiEqTotal ÷ Δ%. Median of the last 14 days; null under 3 measured rises. A reset restarts; a drop
+ * Δ apiEqTotal ÷ (Δ% × Claude Code's share of the week, when the API gave one: chat and Cowork use also
+ * raise the % but not our $). Median of the last 14 days; null under 3 measured rises. A reset restarts; a drop
  * without one is a bad reading and is skipped.
  * Counts only spend this statusline saw, so use from other devices makes it read low — label it an estimate.
  */
@@ -155,7 +160,8 @@ export function usdPerPercentWeek(samples: ReadonlyArray<LimitSample>, now: Date
     const rise = pct - from.pct;
     if (rise < 1) continue;
     const usd = sample.apiEqTotal - from.usd;
-    if (usd >= 0) ratios.push(usd / rise);
+    const share = sample.claudeCodeShare ?? 1;
+    if (usd >= 0 && share >= MIN_CLAUDE_CODE_SHARE) ratios.push(usd / (rise * share));
     from = { pct, usd: sample.apiEqTotal };
   }
   if (ratios.length < USD_PER_PCT_MIN_SAMPLES) return null;

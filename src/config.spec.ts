@@ -360,6 +360,9 @@ describe("config.ts", () => {
     };
     saveLimitSamples("acct", [sample]);
     expect(loadLimitSamples("acct")).toEqual([sample]);
+    const earlier = { ...sample, t: sample.t - 1000 };
+    saveLimitSamples("acct", [sample, earlier]); // two racing renders wrote out of order
+    expect(loadLimitSamples("acct")).toEqual([earlier, sample]);
     const entry = {
       transcriptPath: null,
       firstSeenAt: "a",

@@ -30,12 +30,14 @@ vi.mock("node:child_process", () => ({
 }));
 
 const fetchUsageMock = vi.fn();
+const fetchPlanMock = vi.fn().mockResolvedValue(null);
 const tokenMock = vi.fn();
 vi.mock("./anthropic-usage.js", async (importOriginal) => {
   const actual = await importOriginal<typeof UsageModule>();
   return {
     ...actual,
     fetchUsage: (token: string) => fetchUsageMock(token) as unknown,
+    fetchPlan: (token: string, now: Date) => fetchPlanMock(token, now) as unknown,
     resolveOAuthAccessToken: () => tokenMock() as unknown,
   };
 });
@@ -153,6 +155,32 @@ describe("runRefresh", () => {
     };
     expect(feed.schemaVersion).toBe(1);
     expect(feed.limits.fiveHour?.usedPct).toBe(3);
+  });
+
+  it("reads the plan once a day, only after a good usage fetch", async () => {
+    tokenMock.mockReturnValue({ token: "tok", expiresAt: null });
+    fetchUsageMock.mockResolvedValue({ extraUsage: null, fiveHour: null, sevenDay: null });
+    const plan = {
+      fetchedAt: NOW.getTime(),
+      rateLimitTier: "t",
+      subscriptionStatus: "active",
+      billingType: null,
+      trialEndsAt: null,
+    };
+    fetchPlanMock.mockClear().mockResolvedValueOnce(plan).mockResolvedValueOnce(null);
+    const { runRefresh } = await fresh();
+    const { loadApiCache } = await import("./config.js");
+    await runRefresh("acct", NOW);
+    expect(loadApiCache("acct")?.plan).toEqual(plan);
+    await runRefresh("acct", new Date(NOW.getTime() + 60_000)); // not due
+    expect(fetchPlanMock).toHaveBeenCalledTimes(1);
+    const tomorrow = new Date(NOW.getTime() + 24 * 3600 * 1000);
+    await runRefresh("acct", tomorrow); // due; a failed profile read keeps yesterday's plan
+    expect(fetchPlanMock).toHaveBeenCalledTimes(2);
+    expect(loadApiCache("acct")?.plan).toEqual(plan);
+    fetchUsageMock.mockResolvedValue(null);
+    await runRefresh("acct", new Date(tomorrow.getTime() + 24 * 3600 * 1000));
+    expect(fetchPlanMock).toHaveBeenCalledTimes(2); // usage failed: no profile call
   });
 
   it("no token → a stale entry without any network call (default now)", async () => {

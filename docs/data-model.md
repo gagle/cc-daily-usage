@@ -19,7 +19,7 @@ Types live in `src/interfaces/config.interface.ts` and
   previous-statusline.json               what install replaced; read by uninstall
   statusline.json                        { rows: PartId[][] } — written by `settings`, read by every render
 ~/.claude/statusline.mjs                 the managed shim (from assets/statusline.mjs)
-~/.claude/settings.json                  statusLine { type, command, refreshInterval 30|1 }, hooks.UserPromptSubmit gate, hooks.PreModelSwitch cost, promptCacheTtl
+~/.claude/settings.json                  statusLine { type, command, refreshInterval 30 }, hooks.UserPromptSubmit gate, hooks.PreModelSwitch cost, subagentStatusLine, promptCacheTtl
 ```
 
 All writes are atomic (temp + rename, mode `0o600`). Missing files are seeded,
@@ -77,19 +77,30 @@ Fields added without a schema bump get their defaults in `upgradeUsage`.
 
 ## `limits.json`, `sessions-map.json`, `feed.json`
 
-- `LimitSample`: `{ t epoch ms, fiveHourPct, sevenDayPct, fiveHourResetsAt, sevenDayResetsAt, apiEqTotal }`,
-  appended only when a % changes; 8 days or 2,000 samples.
-- `SessionMapEntry`: `{ transcriptPath, firstSeenAt, lastSeenAt, costUsd, linesAdded, linesRemoved }`;
-  35 days by `lastSeenAt`.
+- `LimitSample`: `{ t epoch ms, fiveHourPct, sevenDayPct, fiveHourResetsAt, sevenDayResetsAt, apiEqTotal, claudeCodeShare? }`,
+  appended only when a % changes; 8 days or 2,000 samples. Sorted by `t` on
+  load (two racing renders can save them out of order).
+- `SessionMapEntry`: `{ transcriptPath, firstSeenAt, lastSeenAt, costUsd, linesAdded, linesRemoved, name?, claudeVersion? }`;
+  35 days by `lastSeenAt`. `name` is Claude Code's `session_name`; a changed
+  name is written at once.
 - A history file that is missing, garbled or of a newer version reads as empty.
 - `Feed`: the shared contract with the `/cost-tracker` mod, see `docs/history-and-feed.md`.
 
 ## `ApiCache`
 
-`{ fetchedAt, extraUsage, fiveHour, sevenDay, stale? }`. `extraUsage` holds the
-usage-credits ledger in dollars (`decimal_places` applied); windows are
-`{ pct 0-100, resetsAt epoch s }`. A failed fetch keeps the previous reading
-with `stale: true`. TTL 60 s (`API_CACHE_TTL_MS` in `src/anthropic-usage.ts`).
+`{ fetchedAt, extraUsage, fiveHour, sevenDay, stale?, readAt?, failures?, extraWindows?, claudeCodeShare?, plan? }`.
+`extraUsage` holds the usage-credits ledger in dollars (`decimal_places`
+applied); windows are `{ pct 0-100, resetsAt epoch s, usedDollars?, limitDollars?, severity? }`
+(`severity` from the response's `limits[]`: `session` → 5h, `weekly_all` →
+7d). `extraWindows` are the other `seven_day_<key>` windows with a reading
+(`{ key, ...window }`). `claudeCodeShare` (0-1) is Claude Code's row of
+`seven_day_breakdown`. `plan` is `{ fetchedAt, rateLimitTier, subscriptionStatus, billingType, trialEndsAt }`
+from `/api/oauth/profile`, re-read daily. A failed fetch keeps the previous
+reading with `stale: true`, its time in `readAt` (so the runway survives the
+failure), and counts `failures`; a good one clears them.
+TTL 60 s (`API_CACHE_TTL_MS` in `src/anthropic-usage.ts`), doubled per failure
+up to 16 min. `/api/oauth/usage` is undocumented: every field is read as
+optional (shape observed 2026-10-15).
 
 ## `StatuslineState`
 
@@ -97,7 +108,9 @@ What `cc-daily-usage --statusline` prints and `renderStatusline` consumes:
 budget fields (absent on Pro/Max), `capSource`, `extraUsage` (Pro/Max only),
 resolved `rateLimits` with their `source` and `readingAt`, `runway` per window,
 `coach` (top finding), `rateLimitsCache` (old shims),
-`spendLimitPct`, `cache` (a `CacheForecast`), `hasSpendCap`, `planType`.
+`spendLimitPct`, `spendLimitUsd` (`{ used, limit, period }` or null),
+`apiDetail` (fresh API windows with dollars, severity and extra windows; null
+when stale), `cache` (a `CacheForecast`), `hasSpendCap`, `planType`.
 
 ## Managed-file markers
 

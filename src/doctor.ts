@@ -16,6 +16,7 @@ import {
   readJsonFile,
   SETTINGS_FILE,
   STATUSLINE_FILE,
+  SUBAGENT_LINE_FLAG,
 } from "./statusline-shared.js";
 
 export interface Check {
@@ -94,13 +95,20 @@ export function checkStatusline(): ReadonlyArray<Check> {
             `shim v${installed}, this package ships v${shipped}; run: cc-daily-usage statusline`,
           ),
     );
+    const interval = (settings.statusLine as { refreshInterval?: unknown } | undefined)
+      ?.refreshInterval;
     checks.push(
-      command === `node ${JSON.stringify(STATUSLINE_FILE)}`
-        ? ok("settings", "statusLine runs the shim")
-        : fail(
+      command !== `node ${JSON.stringify(STATUSLINE_FILE)}`
+        ? fail(
             "settings",
             "settings.json statusLine does not run the shim; run: cc-daily-usage statusline",
-          ),
+          )
+        : interval === 1
+          ? warn(
+              "settings",
+              "refreshInterval 1 s from an older version; run: cc-daily-usage statusline",
+            )
+          : ok("settings", "statusLine runs the shim"),
     );
   } else if (existing !== null && CAPTURE_MARKER_REGEX.test(existing)) {
     checks.push(ok("statusline", "capture-only line in your own statusline script"));
@@ -126,6 +134,14 @@ export function checkStatusline(): ReadonlyArray<Check> {
         : warn(`hook ${event}`, `missing or for another install; run: cc-daily-usage statusline`),
     );
   }
+  const subagent = (settings.subagentStatusLine as { command?: unknown } | undefined)?.command;
+  checks.push(
+    subagent === hookCommand(binPath(), SUBAGENT_LINE_FLAG)
+      ? ok("subagent line", SUBAGENT_LINE_FLAG)
+      : subagent === undefined
+        ? warn("subagent line", "missing; run: cc-daily-usage statusline")
+        : ok("subagent line", "your own subagentStatusLine (kept)"),
+  );
   return checks;
 }
 
@@ -164,8 +180,35 @@ export function checkAccounts(now: Date): ReadonlyArray<Check> {
         : ok(`account ${key}`, versions.join(", ") || "no files yet"),
     );
     checks.push(...checkRefresher(key, dir, values, now));
+    const plan = checkPlan(key, values);
+    if (plan !== null) checks.push(plan);
   }
   return checks;
+}
+
+/** The plan from the daily profile read and the Claude Code version the newest session rendered with. */
+export function checkPlan(
+  key: string,
+  values: Readonly<Record<string, Record<string, unknown>>>,
+): Check | null {
+  const plan = values["api-cache.json"]?.plan as Record<string, unknown> | undefined;
+  const sessions = (values["sessions-map.json"]?.sessions ?? {}) as Record<
+    string,
+    { lastSeenAt?: string; claudeVersion?: string | null }
+  >;
+  const newest = Object.values(sessions)
+    .filter((session) => typeof session.claudeVersion === "string")
+    .sort((a, b) => String(b.lastSeenAt).localeCompare(String(a.lastSeenAt)))[0];
+  const parts = [
+    typeof plan?.rateLimitTier === "string" ? `tier ${plan.rateLimitTier}` : null,
+    typeof plan?.subscriptionStatus === "string" ? `subscription ${plan.subscriptionStatus}` : null,
+    typeof plan?.trialEndsAt === "string" ? `trial ends ${plan.trialEndsAt.slice(0, 10)}` : null,
+    newest?.claudeVersion ? `last session on Claude Code ${newest.claudeVersion}` : null,
+  ].filter((part): part is string => part !== null);
+  if (parts.length === 0) return null;
+  const lapsed =
+    typeof plan?.subscriptionStatus === "string" && plan.subscriptionStatus !== "active";
+  return (lapsed ? warn : ok)(`plan ${key}`, parts.join(", "));
 }
 
 function checkRefresher(

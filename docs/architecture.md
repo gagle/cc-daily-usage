@@ -34,7 +34,8 @@ fetches `/api/oauth/usage` (read-only, no model call, no tokens) and writes
 - **Stale-while-revalidate for API data.** `requestApiRefresh` in
   `src/refresh.ts` spawns at most one refresher per account per TTL (lock
   file). The fresh reading shows on the next render; `statusLine.refreshInterval`
-  makes that next render happen while idle. ADR:
+  (fixed 30 s; the render never writes `settings.json`) makes that next render
+  happen while idle. ADR:
   `adrs/2026-10-10-session-start-usage-refresh.md`.
 - **Two clocks.** Days are local; the budget period is the UTC month (the
   ledger's). See `docs/time-model.md` and
@@ -68,8 +69,9 @@ git.ts                 branch from .git/HEAD
 calendar-tui.ts        dependency-free terminal calendar (pure render + reducer + IO loop)
 notice.ts              boxed terminal notices (calendar on Pro/Max)
 statusline-install.ts  install / upgrade / uninstall of the shim
-statusline-shared.ts   installer helpers, settings.json statusLine merge
+statusline-shared.ts   installer helpers, settings.json merges (statusLine, hooks, subagentStatusLine), atomic settings write
 statusline-capture-install.ts  capture-only fallback for a foreign statusline
+subagent-line.ts       hidden --subagent-statusline: agent-panel rows (model, effort, tokens, context %)
 ```
 
 ## Data flow
@@ -99,8 +101,10 @@ and render the JSON themselves; that mode is kept.
 
 ```
 resolveOAuthAccessToken (env → macOS Keychain → ~/.claude/.credentials.json)
-  -> GET /api/oauth/usage -> nextApiCache (failure keeps last reading, stale)
-  -> accounts/<key>/api-cache.json ; remove refresh.lock
+  -> GET /api/oauth/usage -> nextApiCache (failure keeps last reading, stale,
+     failures + 1: the next try waits 60 s × 2^failures, at most 16 min)
+  -> GET /api/oauth/profile when the plan is a day old (after a good usage read)
+  -> accounts/<key>/api-cache.json -> index pass -> feed.json ; remove refresh.lock
 ```
 
 **`init`:** statusline install prompt → (Team/Enterprise) offer Mon–Fri for

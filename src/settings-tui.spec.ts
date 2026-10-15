@@ -27,15 +27,14 @@ function press(model: SettingsModel, keys: ReadonlyArray<Key | string>, fx = eff
 const empty = (): SettingsModel => initialSettings([]);
 
 describe("initialSettings / cellsToLayout", () => {
-  it("the default layout is 1..N-1 on the first row, the coach (N) on the second, and round-trips", () => {
+  it("the default layout numbers each row's parts by PARTS position, and round-trips", () => {
     const model = initialSettings(DEFAULT_LAYOUT);
+    const number = (id: string): string => String(PARTS.findIndex((part) => part.id === id) + 1);
     expect(model.cells).toHaveLength(GRID_ROWS);
-    expect(model.cells[0]).toEqual(
-      PARTS.slice(0, -1)
-        .map((_, i) => String(i + 1))
-        .concat(""),
-    );
-    expect(model.cells[1]?.[0]).toBe(String(PARTS.length));
+    for (const [row, ids] of DEFAULT_LAYOUT.entries()) {
+      expect(model.cells[row]?.slice(0, ids.length)).toEqual(ids.map(number));
+      expect(model.cells[row]?.slice(ids.length).every((cell) => cell === "")).toBe(true);
+    }
     expect(model.cells[2]).toEqual(Array.from({ length: GRID_COLS }, () => ""));
     expect(cellsToLayout(model.cells)).toEqual({ layout: DEFAULT_LAYOUT });
   });

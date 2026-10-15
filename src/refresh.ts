@@ -4,9 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  fetchPlan,
   fetchUsage,
   isApiCacheFresh,
   nextApiCache,
+  PLAN_TTL_MS,
   resolveOAuthAccessToken,
 } from "./anthropic-usage.js";
 import {
@@ -96,8 +98,8 @@ export async function writeFeed(accountKey: string, now: Date): Promise<void> {
   });
 }
 
-/** Body of the hidden `--refresh <key>` mode: token → GET /api/oauth/usage → api-cache.json → one bounded
- * transcript-index pass → feed.json.
+/** Body of the hidden `--refresh <key>` mode: token → GET /api/oauth/usage (+ /api/oauth/profile once a day)
+ * → api-cache.json → one bounded transcript-index pass → feed.json.
  * The token read (macOS Keychain spawn) lives here, off the render path. Never throws; always releases the
  * lock. */
 export async function runRefresh(accountKey: string, now: Date = new Date()): Promise<number> {
@@ -105,7 +107,10 @@ export async function runRefresh(accountKey: string, now: Date = new Date()): Pr
     const previous = loadApiCache(accountKey);
     const token = resolveOAuthAccessToken();
     const fetched = token ? await fetchUsage(token.token) : null;
-    saveApiCache(accountKey, nextApiCache(previous, fetched, now));
+    const next = nextApiCache(previous, fetched, now);
+    const planDue = next.plan === undefined || now.getTime() - next.plan.fetchedAt >= PLAN_TTL_MS;
+    const plan = token && fetched !== null && planDue ? await fetchPlan(token.token, now) : null;
+    saveApiCache(accountKey, plan === null ? next : { ...next, plan });
     const { runIndexPass } = await import("./transcript-index.js");
     runIndexPass({ now }); // bounded; the rest waits for the next refresh
     await writeFeed(accountKey, now);

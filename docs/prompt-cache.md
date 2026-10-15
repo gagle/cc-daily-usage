@@ -69,9 +69,10 @@ Part 7 (`cache`) of the statusline layout (see `docs/use-cases.md`).
   causes are booked per day (below) and feed the coach (`insights`).
 
 Color: warm fades green → yellow → orange with the share of the TTL left
-(`warmColor` in `src/statusline-render.ts`); cold is red. While under a minute
-is left, the statusline re-renders every second (`syncRefreshInterval` in
-`src/statusline-shared.ts` switches our `refreshInterval` 30 → 1 and back).
+(`warmColor` in `src/statusline-render.ts`); cold is red. The line re-renders
+every 30 s and Claude Code re-runs it itself when the cache's `expires_at`
+passes, so under a minute the countdown reads `<1m`. The render never writes
+`settings.json`.
 
 The calendar header sums `cacheMissUsd` of today's sessions as
 "Cache re-paid today". Per local day, `usage.missCauses` keeps the count and $

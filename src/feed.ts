@@ -47,6 +47,7 @@ export interface Feed {
     readonly fiveHour: FeedWindow | null; // null = no reading yet
     readonly sevenDay: FeedWindow | null;
     readonly usdPerPercentWeek: number | null;
+    readonly claudeCodeShare: number | null; // 0-1 of this week's use; null when the API gave none
   };
   readonly budget?: {
     readonly todaySpent: number;
@@ -154,6 +155,7 @@ export function buildFeed(input: FeedInput, now: Date): Feed {
       fiveHour: feedWindow(input, "fiveHour", now),
       sevenDay: feedWindow(input, "sevenDay", now),
       usdPerPercentWeek: usdPerPercentWeek(input.samples, now),
+      claudeCodeShare: input.api?.claudeCodeShare ?? null,
     },
     ...(budget ? { budget } : {}),
     spend: {
