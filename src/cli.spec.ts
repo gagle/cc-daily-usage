@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as AccountModule from "./account.js";
 import type * as CliModule from "./cli.js";
+import type * as InsightsModule from "./insights.js";
+import type * as ReportModule from "./report.js";
 import type * as SharedModule from "./statusline-shared.js";
 
 let fakeHome: string;
@@ -36,7 +38,29 @@ const runModelSwitchMock = vi.fn().mockResolvedValue(0);
 vi.mock("./model-switch.js", () => ({ runModelSwitch: () => runModelSwitchMock() as unknown }));
 
 const runRefreshMock = vi.fn().mockResolvedValue(0);
-vi.mock("./refresh.js", () => ({ runRefresh: (key: string) => runRefreshMock(key) as unknown }));
+const writeFeedMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("./refresh.js", () => ({
+  runRefresh: (key: string) => runRefreshMock(key) as unknown,
+  writeFeed: (key: string) => writeFeedMock(key) as unknown,
+}));
+
+const catchUpMock = vi.fn().mockReturnValue(true);
+vi.mock("./transcript-index.js", () => ({ catchUp: () => catchUpMock() as unknown }));
+
+const insightsAdviceMock = vi.fn().mockReturnValue([]);
+vi.mock("./insights.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof InsightsModule>()),
+  adviceFor: () => insightsAdviceMock() as unknown,
+  snoozeRule: (_key: string, _id: string, days: number) =>
+    days > 0 ? "2026-10-14T00:00:00.000Z" : null,
+}));
+
+const buildReportMock = vi.fn().mockReturnValue({ rows: [] });
+vi.mock("./report.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ReportModule>()),
+  buildReport: (...args: Array<unknown>) => buildReportMock(...args) as unknown,
+  formatReport: () => "TABLE",
+}));
 
 const installStatuslineMock = vi.fn();
 const uninstallStatuslineMock = vi.fn();
@@ -68,6 +92,9 @@ vi.mock("./calendar-tui.js", () => ({
 
 const runSettingsTuiMock = vi.fn().mockResolvedValue(0);
 vi.mock("./settings-tui.js", () => ({ runSettingsTui: () => runSettingsTuiMock() as unknown }));
+
+const doctorReportMock = vi.fn();
+vi.mock("./doctor.js", () => ({ doctorReport: () => doctorReportMock() as unknown }));
 
 async function fresh(): Promise<typeof CliModule> {
   vi.resetModules();
@@ -136,6 +163,18 @@ describe("hidden modes", () => {
 });
 
 describe("arguments", () => {
+  it("a command that met a newer file prints the update hint; hook modes stay quiet", async () => {
+    const { runCli } = await fresh();
+    const { markNewerFile } = await import("./config.js");
+    markNewerFile("/x/config.json");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await runCli(["--statusline-line"]);
+    expect(errors).not.toHaveBeenCalled();
+    await runCli(["--help"]);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("npm i -g cc-daily-usage"));
+  });
+
   it("help for no args, -h or --help anywhere", async () => {
     const { runCli } = await fresh();
     for (const argv of [[], ["-h"], ["calendar", "--help"]]) {
@@ -198,6 +237,86 @@ describe("settings", () => {
     const { runCli } = await fresh();
     expect(await runCli(["settings"])).toBe(0);
     expect(runSettingsTuiMock).toHaveBeenCalled();
+  });
+});
+
+describe("doctor", () => {
+  it("prints the report and returns its exit code", async () => {
+    doctorReportMock.mockResolvedValue({ text: "✖ node: 22", code: 1 });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { runCli } = await fresh();
+    expect(await runCli(["doctor"])).toBe(1);
+    expect(log).toHaveBeenCalledWith("✖ node: 22");
+  });
+});
+
+describe("report", () => {
+  it("catches up, refreshes the feed and prints the table or JSON", async () => {
+    buildReportMock.mockReturnValue({ rows: [] });
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    accountMock.mockReturnValue({ email: "dev@example.com", organizationType: "claude_max" });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { runCli } = await fresh();
+    expect(await runCli(["report"])).toBe(0);
+    expect(log).toHaveBeenCalledWith("TABLE");
+    expect(writeFeedMock).toHaveBeenCalledWith("dev_example_com");
+    expect(buildReportMock).toHaveBeenCalledWith(
+      "dev_example_com",
+      expect.objectContaining({ label: "last 7 days" }),
+      "model",
+    );
+    catchUpMock.mockReturnValueOnce(false);
+    writeFeedMock.mockClear();
+    expect(await runCli(["report", "today", "--json", "--account", "unattributed"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(JSON.stringify({ rows: [] }, null, 2));
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("Another index pass"));
+    expect(writeFeedMock).not.toHaveBeenCalled();
+  });
+
+  it("shows progress on a TTY; bad arguments throw", async () => {
+    buildReportMock.mockReturnValue({ rows: [] });
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    accountMock.mockReturnValue(null);
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const tty = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+    Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true });
+    const { runCli } = await fresh();
+    try {
+      await runCli(["report", "month"]);
+      expect(write).toHaveBeenCalledWith(expect.stringContaining("Reading new transcript lines"));
+    } finally {
+      if (tty) Object.defineProperty(process.stderr, "isTTY", tty);
+      else Reflect.deleteProperty(process.stderr, "isTTY");
+    }
+    await expect(runCli(["report", "--by", "x"])).rejects.toThrow("--by needs one of");
+    await expect(runCli(["report", "2026-13"])).rejects.toThrow("Unknown period: 2026-13");
+  });
+});
+
+describe("insights", () => {
+  it("snoozes, catches up, refreshes the feed and prints findings or JSON", async () => {
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    insightsAdviceMock.mockReturnValue([]);
+    accountMock.mockReturnValue({ email: "dev@example.com", organizationType: "claude_max" });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { runCli } = await fresh();
+    expect(await runCli(["insights"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith("Nothing to change this week.");
+    expect(writeFeedMock).toHaveBeenCalledWith("dev_example_com");
+    expect(await runCli(["insights", "--snooze", "R1", "7d", "--json"])).toBe(0);
+    expect(log).toHaveBeenCalledWith("R1 snoozed until 2026-10-14T00:00:00.000Z");
+    expect(log).toHaveBeenLastCalledWith("[]");
+    catchUpMock.mockReturnValueOnce(false);
+    expect(await runCli(["insights", "--snooze", "R1", "0d"])).toBe(0);
+    expect(log).toHaveBeenCalledWith("R1 unsnoozed");
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("Another index pass"));
+    await expect(runCli(["insights", "--x"])).rejects.toThrow("Unknown insights argument");
   });
 });
 

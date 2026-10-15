@@ -55,6 +55,16 @@ null → null · ≤0.25 Coast · ≤0.50 Ahead · ≤0.75 Steady · ≤1.00 On 
 - delta = `currentCost - lastSeenCost`; a lower cost is a reset (`/clear`) and counts in full.
 - `accumulate` (dollar-cap plan and no ledger) gates whether the delta joins `monthlySpent`; the baseline always advances.
 - `lastSeenAt` refreshes when the cost changed or at most hourly (fewer writes); `cacheMissUsd` is kept.
+- every positive delta also goes to `addApiEquivalent`, whatever the plan.
+
+## `addApiEquivalent`, `addMissCauses`
+
+- `apiEqDays[localToday] += delta`, `apiEqTotal += delta`. API-equivalent, not a bill: on Pro/Max it is
+  what the same tokens cost on the API. Only sessions that render this statusline count.
+- `addMissCauses(prior, current, missUsdDelta)`: new count per cause = current − prior (all of current
+  when any count went down, a reset). `missUsdDelta` splits over the new counts; $ with no new count
+  goes to `unknown`. The caller stores the returned counts as the session's `missCounts`.
+- Both keep `DAY_HISTORY_DAYS` (62) local days; older keys drop when a new day key starts.
 
 ## `applyLedgerReading`
 
@@ -73,7 +83,8 @@ month; the proportional rescale is a guess at which days were inflated.
 
 v1 → v2: keeps day keys, derives `periodFrozen` = v1 "days before
 lastUpdated's UTC day in its UTC month", repairs missing fields, clamps
-`lastUpdated` to now. `freshUsage(now)` seeds new files.
+`lastUpdated` to now. `apiEqDays`, `apiEqTotal`, `missCauses` default to
+empty/0 without a schema bump. `freshUsage(now)` seeds new files.
 
 ## `classifyHasSpendCap`, `pruneStaleSessions`, `colorForPct`
 

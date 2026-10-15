@@ -96,7 +96,11 @@ describe("config.ts", () => {
     const file = path.join(dir, "config.json");
     writeFileSync(file, "");
     expect(loadConfig("acct")).toEqual({ monthlyCap: 200, laboralDays: {} });
-    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({ monthlyCap: 200, laboralDays: {} });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      monthlyCap: 200,
+      laboralDays: {},
+      schemaVersion: 1,
+    });
   });
 
   it("round-trips a saved config", async () => {
@@ -115,12 +119,15 @@ describe("config.ts", () => {
       lastUpdated: "2026-09-01T00:00:00.000Z",
       days: {},
       sessions: {},
+      apiEqDays: {},
+      apiEqTotal: 0,
+      missCauses: {},
     };
     saveUsage("acct", usage);
     expect(loadUsage("acct")).toEqual(usage);
   });
 
-  it("fills in monthlyCap/laboralDays from DEFAULT_CONFIG when a stored config omits them, without rewriting the file", async () => {
+  it("fills in monthlyCap/laboralDays from DEFAULT_CONFIG when a stored config omits them, writing only the version", async () => {
     const { loadConfig, ACCOUNTS_DIR } = await freshConfigModule();
     const dir = path.join(ACCOUNTS_DIR, "acct");
     mkdirSync(dir, { recursive: true });
@@ -130,10 +137,11 @@ describe("config.ts", () => {
     expect(config.monthlyCap).toBe(200);
     expect(config.laboralDays).toEqual({});
     expect(config.hasSpendCap).toBe(false);
-    // In-memory fill only — the on-disk file is untouched.
+    // In-memory fill only — the migration adds the version and nothing else.
     expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
       planType: "claude_pro",
       hasSpendCap: false,
+      schemaVersion: 1,
     });
   });
 
@@ -266,6 +274,134 @@ describe("config.ts", () => {
     expect(loadApiCache("acct")).toEqual(cache);
     writeFileSync(apiCacheFile("acct"), JSON.stringify({ fetchedAt: "x" }));
     expect(loadApiCache("acct")).toBeNull();
+  });
+
+  it("legacy files: versioned once with a backup, unknown fields kept, a rerun changes nothing", async () => {
+    const { loadConfig, ACCOUNTS_DIR } = await freshConfigModule();
+    const dir = path.join(ACCOUNTS_DIR, "acct");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({ monthlyCap: 5, laboralDays: {}, future: "kept" }));
+    expect(loadConfig("acct")).toMatchObject({ monthlyCap: 5, future: "kept" });
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+      monthlyCap: 5,
+      laboralDays: {},
+      future: "kept",
+      schemaVersion: 1,
+    });
+    const backups = (): Array<string> =>
+      readdirSync(dir).filter((name) => name.startsWith("config.json.bak-"));
+    expect(backups()).toHaveLength(1);
+    loadConfig("acct");
+    expect(backups()).toHaveLength(1);
+  });
+
+  it("a v1 usage.json gets a backup before its upgrade", async () => {
+    const { loadUsage, ACCOUNTS_DIR } = await freshConfigModule();
+    const dir = path.join(ACCOUNTS_DIR, "acct");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "usage.json"), JSON.stringify({ monthlySpent: 1, days: {} }));
+    loadUsage("acct");
+    expect(readdirSync(dir).some((name) => name.startsWith("usage.json.bak-"))).toBe(true);
+  });
+
+  it("newer files are read but never rewritten, and are listed", async () => {
+    const {
+      loadConfig,
+      saveConfig,
+      loadUsage,
+      saveUsage,
+      loadApiCache,
+      saveApiCache,
+      ACCOUNTS_DIR,
+      listNewerFiles,
+    } = await freshConfigModule();
+    const dir = path.join(ACCOUNTS_DIR, "acct");
+    mkdirSync(dir, { recursive: true });
+    const files = {
+      config: JSON.stringify({ schemaVersion: 9, monthlyCap: 7, laboralDays: {} }),
+      usage: JSON.stringify({ schemaVersion: 9, monthlySpent: 1, days: {}, sessions: {} }),
+      api: JSON.stringify({ schemaVersion: 9, fetchedAt: 1 }),
+    };
+    writeFileSync(path.join(dir, "config.json"), files.config);
+    writeFileSync(path.join(dir, "usage.json"), files.usage);
+    writeFileSync(path.join(dir, "api-cache.json"), files.api);
+    const config = loadConfig("acct");
+    expect(config.monthlyCap).toBe(7);
+    saveConfig("acct", { ...config, monthlyCap: 1 });
+    const usage = loadUsage("acct");
+    saveUsage("acct", { ...usage, monthlySpent: 99 });
+    expect(loadApiCache("acct")).toBeNull();
+    saveApiCache("acct", { fetchedAt: 2, extraUsage: null, fiveHour: null, sevenDay: null });
+    expect(readFileSync(path.join(dir, "config.json"), "utf8")).toBe(files.config);
+    expect(readFileSync(path.join(dir, "usage.json"), "utf8")).toBe(files.usage);
+    expect(readFileSync(path.join(dir, "api-cache.json"), "utf8")).toBe(files.api);
+    expect(listNewerFiles()).toHaveLength(3);
+  });
+
+  it("history files: round-trip, empty when missing or garbled, a newer one left alone", async () => {
+    const {
+      loadLimitSamples,
+      saveLimitSamples,
+      loadSessionsMap,
+      saveSessionsMap,
+      limitsFile,
+      sessionsMapFile,
+    } = await freshConfigModule();
+    expect(loadLimitSamples("acct")).toEqual([]);
+    expect(loadSessionsMap("acct")).toEqual({});
+    const sample = {
+      t: 1,
+      fiveHourPct: 1,
+      sevenDayPct: null,
+      fiveHourResetsAt: null,
+      sevenDayResetsAt: null,
+      apiEqTotal: 0,
+    };
+    saveLimitSamples("acct", [sample]);
+    expect(loadLimitSamples("acct")).toEqual([sample]);
+    const entry = {
+      transcriptPath: null,
+      firstSeenAt: "a",
+      lastSeenAt: "a",
+      costUsd: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+    };
+    saveSessionsMap("acct", { s: entry });
+    expect(loadSessionsMap("acct")).toEqual({ s: entry });
+    writeFileSync(limitsFile("acct"), JSON.stringify({ schemaVersion: 1, samples: "x" }));
+    writeFileSync(sessionsMapFile("acct"), JSON.stringify({ schemaVersion: 1, sessions: [] }));
+    expect(loadLimitSamples("acct")).toEqual([]);
+    expect(loadSessionsMap("acct")).toEqual({});
+    const newer = JSON.stringify({ schemaVersion: 2, samples: [] });
+    writeFileSync(limitsFile("acct"), newer);
+    expect(loadLimitSamples("acct")).toEqual([]);
+    saveLimitSamples("acct", [sample]);
+    expect(readFileSync(limitsFile("acct"), "utf8")).toBe(newer);
+  });
+
+  it("feed advice: written by saveFeed, empty when missing or not a list", async () => {
+    const { saveFeed, loadFeedAdvice, feedFile } = await freshConfigModule();
+    expect(loadFeedAdvice("acct")).toEqual([]);
+    saveFeed("acct", { schemaVersion: 1, advice: [{ id: "R1" }] });
+    expect(loadFeedAdvice("acct")).toEqual([{ id: "R1" }]);
+    writeFileSync(feedFile("acct"), JSON.stringify({ schemaVersion: 1, advice: {} }));
+    expect(loadFeedAdvice("acct")).toEqual([]);
+  });
+
+  it("backupFile keeps the newest three and never throws", async () => {
+    const { backupFile } = await freshConfigModule();
+    const file = path.join(fakeHome, "f.json");
+    writeFileSync(file, "{}");
+    for (let day = 1; day <= 5; day++) backupFile(file, new Date(Date.UTC(2026, 9, day)));
+    const names = readdirSync(fakeHome).filter((name) => name.startsWith("f.json.bak-"));
+    expect(names).toHaveLength(3);
+    expect(names.every((name) => !name.includes(":"))).toBe(true);
+    expect(names.sort()[0]).toContain("2026-10-03");
+    expect(() => {
+      backupFile(path.join(fakeHome, "missing.json"));
+    }).not.toThrow();
   });
 
   it("writeFileAtomic creates the parent directory and leaves no temp file", async () => {

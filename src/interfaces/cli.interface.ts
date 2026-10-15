@@ -1,4 +1,13 @@
-export const OPERATIONS = ["init", "statusline", "calendar", "settings", "uninstall"] as const;
+export const OPERATIONS = [
+  "init",
+  "statusline",
+  "calendar",
+  "settings",
+  "uninstall",
+  "doctor",
+  "report",
+  "insights",
+] as const;
 export type Operation = (typeof OPERATIONS)[number];
 
 export function isOperation(value: string): value is Operation {

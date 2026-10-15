@@ -135,7 +135,7 @@ export function ensureSettingsStatusLine(): void {
 }
 
 /** Our hooks: the Claude Code event, and the hidden flag that runs it (also how we recognise our own entry). */
-const MANAGED_HOOKS = [
+export const MANAGED_HOOKS = [
   { event: "UserPromptSubmit", flag: "--prompt-gate" },
   { event: "PreModelSwitch", flag: "--model-switch" },
 ] as const;

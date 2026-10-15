@@ -58,20 +58,15 @@ statusline segment shows the row for the current context.
 Part 7 (`cache`) of the statusline layout (see `docs/use-cases.md`).
 
 ```
-🔥 cold in 4m · $0.10/msg · if cold +$2.40 · → /compact before a break
-❄ cold · next msg ~$2.45 · → /clear (free)
+🔥 cold in 4m · $0.10/msg · if cold +$2.40
+❄ cold · next msg ~$2.45
 ```
 
 - `$/msg` — what each message costs now with a warm cache (the table's first
   column for your context). `if cold +$` — the extra the next message costs if the cache goes cold
   first (expiry, `/model`); a forecast, not a miss that happened.
-- `→ /compact before a break` — warm and going cold would cost ≥ $1
-  (`COSTLY_MISS_USD`): `/compact` now reads the context at the cached rate and
-  leaves a short summary, so a later expiry re-writes little. Keep working
-  without a break and it can be ignored: each message resets the timer.
-- `→ /clear (free)` — already cold and costly: `/compact` now
-  would pay the full re-send; `/clear` makes no request.
-- `→ /compact` — context ≥ 60%.
+- No advice text and no miss cause on the line: they only widened it. Miss
+  causes are booked per day (below) and feed the coach (`insights`).
 
 Color: warm fades green → yellow → orange with the share of the TTL left
 (`warmColor` in `src/statusline-render.ts`); cold is red. While under a minute
@@ -79,7 +74,9 @@ is left, the statusline re-renders every second (`syncRefreshInterval` in
 `src/statusline-shared.ts` switches our `refreshInterval` 30 → 1 and back).
 
 The calendar header sums `cacheMissUsd` of today's sessions as
-"Cache re-paid today".
+"Cache re-paid today". Per local day, `usage.missCauses` keeps the count and $
+of misses by cause (`prompt_cache.miss_causes`, Claude Code v2.1.260+); see
+`addMissCauses` in `docs/calculations.md`.
 
 ## Prompt gate (`src/prompt-gate.ts`)
 

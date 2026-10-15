@@ -140,8 +140,8 @@ payload() { printf '%s' "$1" | HOME=$SANDBOX node /path/to/cc-daily-usage/bin/cc
 | G4  | after `/compact`                         | `recache_tokens_if_cold: null`   | no cold price, no crash                                                      | `src/cache-forecast.spec.ts`    |
 | G5  | unknown model                            | `model.id` not in the table      | no `🧊` segment                                                              | `src/cache-forecast.spec.ts`    |
 | G6  | old Claude Code                          | no `prompt_cache`                | no segment                                                                   | `src/cache-forecast.spec.ts`    |
-| G7  | big context                              | `used_percentage ≥ 60`           | `→ /compact`                                                                 | `src/cache-forecast.spec.ts`    |
-| G8  | warm, costly to lose; then cold          | if-cold extra ≥ $1; cold ≥ $1    | `→ /compact before a break`; once cold `→ /clear (free)`                     | `src/cache-forecast.spec.ts`    |
+| G7  | big context                              | `used_percentage ≥ 60`           | no `→` hint on the line                                                      | `src/statusline-render.spec.ts` |
+| G8  | warm, costly to lose; then cold          | if-cold extra ≥ $1; cold ≥ $1    | `if cold +$…` while warm, `next msg ~$…` once cold; no `→` hint              | `src/statusline-render.spec.ts` |
 | G9  | `/model` switch while warm, context ≥ $1 | **live**                         | Claude Code asks to confirm, reason names the target model, tokens and `~$`  | `src/model-switch.spec.ts`      |
 | G10 | `/model` switch while cold or cheap      | **live**                         | switch applies; a `cc-daily-usage: switching to … ~$` message shows          | `src/model-switch.spec.ts`      |
 | G11 | a cache miss of any cause                | payload `last_miss_cause`        | no `last miss` text on the line                                              | `src/statusline-render.spec.ts` |
@@ -181,15 +181,55 @@ payload() { printf '%s' "$1" | HOME=$SANDBOX node /path/to/cc-daily-usage/bin/cc
 
 ## K. Statusline layout (`ccdu settings`)
 
-| ID  | Steps                                                           | Expected                                                            | Auto                                             |
-| --- | --------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------ |
-| K1  | no `statusline.json`, any session                               | one line; `🔥`/`❄` cache part right before `⏱`                      | `src/statusline-render.spec.ts`                  |
-| K2  | `ccdu settings`, put 7 on row 2, clear it on row 1, Enter       | "Saved statusline layout"; next render has the cache part on line 2 | `src/settings-tui.spec.ts`, manual               |
-| K3  | type `1` then `2`; type `5` then `3`; type `0`; place 5 twice   | cell shows 12; then 3; preview shows the error; Enter does not save | `src/settings-tui.spec.ts`                       |
-| K4  | Esc / q / Ctrl+C                                                | "Not saved."; terminal restored                                     | `src/settings-tui.spec.ts`, manual               |
-| K5  | `ccdu settings < /dev/null`                                     | prints one frame, exits 0                                           | manual                                           |
-| K6  | corrupt or hand-edited `statusline.json` (unknown ids, repeats) | statusline still renders; bad ids dropped, nothing usable → default | `src/statusline-layout.spec.ts`                  |
-| K7  | scroll the mouse wheel / trackpad in `ccdu settings`            | the cursor does not move; after exit, the terminal scrolls normally | `src/calendar-tui.spec.ts` (`parseKeys`), manual |
+| ID  | Steps                                                           | Expected                                                               | Auto                                             |
+| --- | --------------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------ |
+| K1  | no `statusline.json`, any session                               | first line every part; `💡` tip on a second line when a finding exists | `src/statusline-render.spec.ts`                  |
+| K2  | `ccdu settings`, put 7 on row 2, clear it on row 1, Enter       | "Saved statusline layout"; next render has the cache part on line 2    | `src/settings-tui.spec.ts`, manual               |
+| K3  | type `1` then `2`; type `5` then `3`; type `0`; place 5 twice   | cell shows 12; then 3; preview shows the error; Enter does not save    | `src/settings-tui.spec.ts`                       |
+| K4  | Esc / q / Ctrl+C                                                | "Not saved."; terminal restored                                        | `src/settings-tui.spec.ts`, manual               |
+| K5  | `ccdu settings < /dev/null`                                     | prints one frame, exits 0                                              | manual                                           |
+| K6  | corrupt or hand-edited `statusline.json` (unknown ids, repeats) | statusline still renders; bad ids dropped, nothing usable → default    | `src/statusline-layout.spec.ts`                  |
+| K7  | scroll the mouse wheel / trackpad in `ccdu settings`            | the cursor does not move; after exit, the terminal scrolls normally    | `src/calendar-tui.spec.ts` (`parseKeys`), manual |
+
+## L. History and feed (CLI-1..5)
+
+| ID  | Steps                                                                 | Expected                                                                                                             | Auto                                                   |
+| --- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| L1  | Max account; work 20+ min in one session                              | `limits.json` gains a sample per % change; `⚠ 5h runs out ~HH:MM` only when the rate empties the window before reset | `src/limits-history.spec.ts`, `src/statusline.spec.ts` |
+| L2  | after 3+ one-point rises of the 7d %                                  | `⏱ … · 1%/7d≈$X` appears                                                                                             | `src/limits-history.spec.ts`                           |
+| L3  | add or remove an MCP server mid-session, send a prompt                | no cause text on the line; `usage.missCauses[today]` counts it                                                       | `src/statusline.spec.ts`                               |
+| L4  | `node bin/cc-daily-usage.js --refresh <key>` with a logged-in account | `accounts/<key>/feed.json` has `schemaVersion: 1`, current `sessionIds`, limits with verdicts, `spend`               | `src/refresh.spec.ts`, `src/feed.spec.ts`              |
+| L5  | Pro/Max: a day of work                                                | `usage.apiEqDays[today]` grows by the session cost deltas; `monthlySpent` stays 0                                    | `src/calc.spec.ts`                                     |
+
+## M. File versions and downgrade guard (CLI-6)
+
+| ID  | Steps                                                                    | Expected                                                                                             | Auto                                                              |
+| --- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| M1  | config.json without `schemaVersion`, run any render                      | file gains `"schemaVersion": 1`, other fields equal; one `config.json.bak-*` next to it              | `src/config.spec.ts`                                              |
+| M2  | set `"schemaVersion": 99` in config.json, render and run `ccdu settings` | line starts `⚠ update cc-daily-usage`; the command prints the npm hint; the file is byte-equal after | `src/config.spec.ts`, `src/statusline.spec.ts`, `src/cli.spec.ts` |
+| M3  | migrate 5 times (delete the version each time)                           | only the newest 3 backups stay                                                                       | `src/config.spec.ts`                                              |
+
+## N. Doctor, transcript index and report (CLI-7 part, CLI-8)
+
+| ID  | Steps                                              | Expected                                                                                            | Auto                           |
+| --- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------ |
+| N1  | `ccdu doctor` on a working install                 | every line `✔` (a `⚠` for `claude` when not on PATH); exit 0                                        | `src/doctor.spec.ts`           |
+| N2  | set a config `schemaVersion` to 99, `ccdu doctor`  | `✖ account …: config.json v99 is from a newer cc-daily-usage`; exit 1                               | `src/doctor.spec.ts`           |
+| N3  | `ccdu report` after a day of work                  | table by model; footer "API-equivalent estimate", subagent share                                    | `src/report.spec.ts`           |
+| N4  | run `ccdu report` twice                            | second run reads 0 new bytes; same numbers                                                          | `src/transcript-index.spec.ts` |
+| N5  | `ccdu report week --by subagent --json`            | JSON with one row per agent type plus `main`                                                        | `src/report.spec.ts`           |
+| N6  | a session started with `claude -p` (no statusline) | its $ shows as "more in sessions no account claimed"; `ccdu report --account unattributed` lists it | `src/report.spec.ts`           |
+| N7  | `ccdu report 2026-13`, `ccdu report --by colour`   | clear error, exit 1                                                                                 | `src/cli.spec.ts`              |
+
+## O. Coach (CLI-9)
+
+| ID  | Steps                                                | Expected                                                                            | Auto                                             |
+| --- | ---------------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------ |
+| O1  | a week with Opus subagents, `ccdu insights`          | `R1 Subagents on a premium model ~$…/week` with `CLAUDE_CODE_SUBAGENT_MODEL=sonnet` | `src/rules.spec.ts`                              |
+| O2  | `ccdu insights --snooze R1 7d`, then `ccdu insights` | R1 last, marked snoozed; the 💡 line shows the next finding                         | `src/insights.spec.ts`, `src/statusline.spec.ts` |
+| O3  | no `statusline.json`, after a refresh with findings  | second line `💡 <tip> ~$X/week`                                                     | `src/statusline-render.spec.ts`                  |
+| O4  | a quiet week                                         | `Nothing to change this week.`; no 💡 line                                          | `src/insights.spec.ts`                           |
+| O5  | 5h window at risk                                    | R8 first, no $                                                                      | `src/rules.spec.ts`                              |
 
 ## Consequences
 

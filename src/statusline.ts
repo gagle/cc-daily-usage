@@ -1,6 +1,7 @@
 import { accountKey, resolveActiveAccount } from "./account.js";
 import { forecastCache } from "./cache-forecast.js";
 import {
+  addMissCauses,
   applyLedgerReading,
   captureSessionCost,
   classifyHasSpendCap,
@@ -8,15 +9,34 @@ import {
   isLaboralDay,
   rolloverIfNeeded,
 } from "./calc.js";
-import { loadApiCache, loadConfig, loadUsage, saveConfig, saveUsage } from "./config.js";
+import {
+  listNewerFiles,
+  loadApiCache,
+  loadConfig,
+  loadFeedAdvice,
+  loadLimitSamples,
+  loadSessionsMap,
+  loadUsage,
+  saveConfig,
+  saveLimitSamples,
+  saveSessionsMap,
+  saveUsage,
+} from "./config.js";
 import { readGitBranch } from "./git.js";
-import type { ApiCache, RateLimitsCache, UsageState } from "./interfaces/config.interface.js";
+import type {
+  ApiCache,
+  ApiWindow,
+  RateLimitsCache,
+  UsageState,
+} from "./interfaces/config.interface.js";
 import type {
   HookPayload,
   ResolvedRateLimits,
   StatuslineState,
 } from "./interfaces/statusline.interface.js";
+import { appendSample, computeRunway, type Runway, usdPerPercentWeek } from "./limits-history.js";
 import { requestApiRefresh } from "./refresh.js";
+import { recordSession } from "./sessions-map.js";
 import { loadLayout } from "./statusline-layout.js";
 import { renderStatusline } from "./statusline-render.js";
 import {
@@ -119,6 +139,60 @@ export function resolveRateLimits(
     fiveHourResetsAt: five.resetsAt,
     sevenDayResetsAt: seven.resetsAt,
     source: sawHookLimits ? "hook" : "cache",
+  };
+}
+
+/**
+ * Appends the API reading to limits.json when a % changed, then the runway of each window. Only the API
+ * reading is sampled: it is account-wide and carries its time, while an idle session keeps sending the
+ * `rate_limits` of its last response (old values would read as resets and rises).
+ */
+function trackLimits(
+  key: string,
+  api: ApiCache | null,
+  apiEqTotal: number,
+  now: Date,
+): Pick<StatuslineState, "runway" | "usdPerPctWeek"> {
+  const samples = loadLimitSamples(key);
+  const five = api?.fiveHour ?? null;
+  const seven = api?.sevenDay ?? null;
+  if (api === null || api.stale === true || (five === null && seven === null)) {
+    return {
+      runway: { fiveHour: null, sevenDay: null },
+      usdPerPctWeek: usdPerPercentWeek(samples, now),
+    };
+  }
+  const last = samples.at(-1);
+  const next =
+    last !== undefined && api.fetchedAt <= last.t
+      ? samples
+      : appendSample(samples, {
+          t: api.fetchedAt,
+          fiveHourPct: five?.pct ?? null,
+          sevenDayPct: seven?.pct ?? null,
+          fiveHourResetsAt: five?.resetsAt ?? null,
+          sevenDayResetsAt: seven?.resetsAt ?? null,
+          apiEqTotal,
+        });
+  if (next !== samples) saveLimitSamples(key, next);
+  const runway = (window: "fiveHour" | "sevenDay", reading: ApiWindow | null): Runway | null =>
+    reading === null
+      ? null
+      : computeRunway(next, window, reading.pct, reading.resetsAt, api.fetchedAt, now);
+  return {
+    runway: { fiveHour: runway("fiveHour", five), sevenDay: runway("sevenDay", seven) },
+    usdPerPctWeek: usdPerPercentWeek(next, now),
+  };
+}
+
+/** The first non-snoozed finding of feed.json (written by the refresher), or null. */
+function coachTip(key: string): StatuslineState["coach"] {
+  const top = loadFeedAdvice(key).find((finding) => finding.snoozedUntil == null);
+  if (typeof top?.title !== "string") return null;
+  return {
+    title: top.title,
+    usd: typeof top.usd === "number" ? top.usd : null,
+    window: typeof top.window === "string" ? top.window : "week",
   };
 }
 
@@ -236,14 +310,45 @@ export async function buildStatuslineState(
       coldUsd: cache.nextColdUsd,
       warmUsd: cache.nextWarmUsd,
     };
-    const changed =
-      session.cacheMissUsd !== cache.sessionMissUsd ||
-      JSON.stringify(session.cacheGate) !== JSON.stringify(cacheGate);
-    if (changed) {
-      usage.sessions[sessionId] = { ...session, cacheMissUsd: cache.sessionMissUsd, cacheGate };
-    }
+    // Like the cost capture: a lower cumulative miss $ than last seen is a reset, all of it new.
+    const priorMissUsd = session.cacheMissUsd ?? 0;
+    const missUsdDelta =
+      cache.sessionMissUsd >= priorMissUsd
+        ? cache.sessionMissUsd - priorMissUsd
+        : cache.sessionMissUsd;
+    const missCounts = addMissCauses(
+      usage,
+      session.missCounts,
+      payload.prompt_cache?.miss_causes ?? session.missCounts ?? {},
+      missUsdDelta,
+      now,
+    );
+    // saveUsage skips the write when the serialized file is unchanged.
+    usage.sessions[sessionId] = {
+      ...session,
+      cacheMissUsd: cache.sessionMissUsd,
+      cacheGate,
+      missCounts,
+    };
   }
   saveUsage(key, usage);
+
+  const sessions = loadSessionsMap(key);
+  const nextSessions = recordSession(
+    sessions,
+    sessionId,
+    {
+      transcriptPath: typeof payload.transcript_path === "string" ? payload.transcript_path : null,
+      costUsd: currentCost,
+      linesAdded: payload.cost?.total_lines_added ?? 0,
+      linesRemoved: payload.cost?.total_lines_removed ?? 0,
+    },
+    now,
+  );
+  if (nextSessions !== sessions) saveSessionsMap(key, nextSessions);
+
+  const rateLimits = resolveRateLimits(sawRateLimits, usage.rateLimitsCache, api, now);
+  const limits = trackLimits(key, api, usage.apiEqTotal, now);
   const fastRefresh =
     cache?.secondsUntilCold != null && cache.secondsUntilCold <= FAST_REFRESH_BELOW_SECONDS;
   try {
@@ -281,7 +386,9 @@ export async function buildStatuslineState(
         }),
     // Pro/Max only — enterprise hides 🎫 to avoid duplicating $month.
     extraUsage: config.hasSpendCap === false ? extraUsage : null,
-    rateLimits: resolveRateLimits(sawRateLimits, usage.rateLimitsCache, api, now),
+    rateLimits,
+    ...limits,
+    coach: coachTip(key),
     rateLimitsCache: usage.rateLimitsCache ?? null,
     spendLimitPct: typeof spendLimit === "number" ? spendLimit : null,
     cache,
@@ -309,6 +416,8 @@ export async function runStatuslineLine(raw?: string): Promise<number> {
     state = null;
   }
   const cwd = payload.workspace?.current_dir ?? payload.cwd ?? "";
-  process.stdout.write(renderStatusline(payload, state, readGitBranch(cwd), now, loadLayout()));
+  const line = renderStatusline(payload, state, readGitBranch(cwd), now, loadLayout());
+  // A file from a newer version is left alone; say so instead of quietly showing old numbers.
+  process.stdout.write(listNewerFiles().length > 0 ? `⚠ update cc-daily-usage | ${line}` : line);
   return 0;
 }

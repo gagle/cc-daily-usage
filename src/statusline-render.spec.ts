@@ -46,7 +46,6 @@ function forecast(overrides: Partial<CacheForecast> = {}): CacheForecast {
     nextColdUsd: 1.24,
     missPremiumUsd: 1.2,
     sessionMissUsd: 0,
-    hint: null,
     ...overrides,
   };
 }
@@ -255,7 +254,7 @@ describe("renderStatusline", () => {
     expect(plain(renderStatusline(payload, null, "", NOW, [["branch", "effort"]]))).toBe("");
   });
 
-  it("cache segment: warm countdown + premium, cold + hints", () => {
+  it("cache segment: warm countdown + premium, cold, no hints", () => {
     expect(plain(renderStatusline(payload, state({ cache: forecast() }), "", NOW))).toContain(
       "🔥 cold in 4m · $0.04/msg · if cold +$1.20",
     );
@@ -274,25 +273,25 @@ describe("renderStatusline", () => {
         renderStatusline(
           payload,
           state({
-            cache: forecast({ secondsUntilCold: null, missPremiumUsd: null, hint: "compact" }),
+            cache: forecast({ secondsUntilCold: null, missPremiumUsd: null }),
           }),
           "",
           NOW,
         ),
       ),
-    ).toContain("🔥 warm · $0.04/msg · → /compact");
+    ).toMatch(/🔥 warm · \$0\.04\/msg$/);
     expect(
       plain(
         renderStatusline(
           payload,
           state({
-            cache: forecast({ warm: false, hint: "clear" }),
+            cache: forecast({ warm: false }),
           }),
           "",
           NOW,
         ),
       ),
-    ).toContain("❄ cold · next msg ~$1.24 · → /clear (free)");
+    ).toMatch(/❄ cold · next msg ~\$1\.24$/);
     expect(
       plain(
         renderStatusline(
@@ -303,9 +302,6 @@ describe("renderStatusline", () => {
         ),
       ),
     ).toContain("❄ cold · next msg ~$0.04");
-    expect(
-      plain(renderStatusline(payload, state({ cache: forecast({ hint: "break" }) }), "", NOW)),
-    ).toContain("if cold +$1.20 · → /compact before a break");
   });
 
   it("warm color fades green → yellow → orange with the TTL; cold is red", () => {
@@ -336,5 +332,64 @@ describe("ccColor", () => {
       "244;164;96",
       "248;105;107",
     ]);
+  });
+});
+
+describe("history parts", () => {
+  const sub = (overrides: Partial<StatuslineState>): string =>
+    plain(
+      renderStatusline(payload, state({ hasSpendCap: false, ...overrides }), "", NOW, [
+        ["limits", "warnings", "cache"],
+      ]),
+    );
+  const nowSec = NOW.getTime() / 1000;
+  const runway = {
+    usedPct: 60,
+    resetsAt: nowSec + 7200,
+    ratePctPerHour: 40,
+    exhaustsAt: nowSec + 3600,
+    verdict: "at-risk",
+  } as const;
+
+  it("warns when the burn rate empties a window before reset, under the 90% notice", () => {
+    const line = sub({
+      rateLimits: { ...NO_LIMITS, fiveHourPct: 60, sevenDayPct: 95, sevenDayResetsAt: nowSec + 60 },
+      runway: { fiveHour: runway, sevenDay: { ...runway, usedPct: 95 } },
+    });
+    expect(line).toMatch(/⚠ 5h runs out ~.+? \(in 1h\)/);
+    expect(line).toMatch(/⚠ weekly resets/);
+    expect(line).not.toMatch(/weekly runs out/);
+    expect(
+      sub({ runway: { fiveHour: { ...runway, verdict: "on-track" }, sevenDay: null } }),
+    ).not.toMatch(/runs out/);
+    expect(
+      sub({ runway: { fiveHour: { ...runway, exhaustsAt: null }, sevenDay: null } }),
+    ).not.toMatch(/runs out/);
+  });
+
+  it("shows $ per 1% of the week; no miss cause or hint in the cache part", () => {
+    const line = sub({
+      rateLimits: { ...NO_LIMITS, sevenDayPct: 20 },
+      usdPerPctWeek: 0.85,
+      cache: forecast(),
+    });
+    expect(line).toContain("⏱ 20%/7d · 1%/7d≈$0.85");
+    expect(line).not.toContain("miss:");
+    expect(line).not.toContain("→");
+  });
+});
+
+describe("coach part", () => {
+  it("shows the top tip with its $ and window; no $ for a rule without one; hidden without a tip", () => {
+    const line = (coach: StatuslineState["coach"]): string =>
+      plain(renderStatusline(payload, state({ coach }), "", NOW, [["coach"]]));
+    expect(line({ title: "Fast mode", usd: 12.4, window: "week" })).toBe(
+      "💡 Fast mode ~$12.40/week",
+    );
+    expect(line({ title: "Running out early", usd: null, window: "week" })).toBe(
+      "💡 Running out early",
+    );
+    expect(line(null)).toBe("");
+    expect(plain(renderStatusline(payload, null, "", NOW, [["coach"]]))).toBe("");
   });
 });

@@ -15,6 +15,8 @@ export const USAGE_SCHEMA_VERSION = 2;
 
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const TWO_DAYS_MS = 48 * ONE_HOUR_MS;
+/** Local days of API-equivalent and miss-cause history kept: two months covers "month to date" and 30 d. */
+export const DAY_HISTORY_DAYS = 62;
 
 export function getLaboralDays(config: Config, year: number, month: number): ReadonlyArray<number> {
   return config.laboralDays[String(year)]?.[String(month)] ?? [];
@@ -39,6 +41,9 @@ export function freshUsage(now: Date): UsageState {
     lastUpdated: now.toISOString(),
     days: {},
     sessions: {},
+    apiEqDays: {},
+    apiEqTotal: 0,
+    missCauses: {},
   };
 }
 
@@ -55,6 +60,11 @@ export function upgradeUsage(usage: Partial<UsageState>, now: Date): UsageState 
   usage.lastUpdated = lastUpdated.toISOString();
   const days = (usage.days ??= {});
   usage.sessions ??= {};
+  usage.apiEqDays ??= {};
+  usage.missCauses ??= {};
+  if (typeof usage.apiEqTotal !== "number" || !Number.isFinite(usage.apiEqTotal)) {
+    usage.apiEqTotal = 0;
+  }
   if (typeof usage.monthlySpent !== "number" || !Number.isFinite(usage.monthlySpent)) {
     usage.monthlySpent = 0;
   }
@@ -223,6 +233,7 @@ export function captureSessionCost(
   const delta =
     prior && currentCost >= prior.lastSeenCost ? currentCost - prior.lastSeenCost : currentCost;
   if (accumulate) usage.monthlySpent += Math.max(0, delta);
+  if (delta > 0) addApiEquivalent(usage, delta, now);
   // lastSeenAt only feeds the 2-day prune, so an unchanged cost refreshes it at most hourly (fewer writes).
   const touchDue = !prior || now.getTime() - new Date(prior.lastSeenAt).getTime() >= ONE_HOUR_MS;
   if (!prior || prior.lastSeenCost !== currentCost || touchDue) {
@@ -234,6 +245,66 @@ export function captureSessionCost(
   }
   pruneStaleSessions(usage, now);
   return usage;
+}
+
+/** `record` without the local day keys older than DAY_HISTORY_DAYS before `now`'s local day. */
+function dropOldDays<T>(record: Record<string, T>, now: Date): Record<string, T> {
+  const cutoff = localDateKey(
+    new Date(now.getFullYear(), now.getMonth(), now.getDate() - DAY_HISTORY_DAYS),
+  );
+  return Object.fromEntries(Object.entries(record).filter(([day]) => day >= cutoff));
+}
+
+/**
+ * Books a session cost delta as API-equivalent $ on the local day, for every plan. Unlike monthlySpent this
+ * is not a bill: on Pro/Max it is what the same tokens would cost on the API. Only sessions that render this
+ * statusline are seen. Old days drop when a new day key starts, so the prune runs once a day.
+ * # ponytail: a session pruned after 2 idle days and then resumed counts its whole cost again; fix by
+ * taking the baseline from sessions-map.json.
+ */
+export function addApiEquivalent(usage: UsageState, delta: number, now: Date): UsageState {
+  const day = localDateKey(now);
+  if (usage.apiEqDays[day] === undefined) usage.apiEqDays = dropOldDays(usage.apiEqDays, now);
+  usage.apiEqDays[day] = (usage.apiEqDays[day] ?? 0) + delta;
+  usage.apiEqTotal += delta;
+  return usage;
+}
+
+/**
+ * Folds one session's cumulative `prompt_cache.miss_causes` counts into today's per-cause totals. The $ of
+ * the new misses (`missUsdDelta`, from the session's cacheMissUsd) splits over the causes by their new
+ * counts; $ with no counted cause goes to `unknown`. Counts lower than last seen mean a reset (`/clear`):
+ * the new counts are all new. Returns the counts to store as the session's next baseline.
+ */
+export function addMissCauses(
+  usage: UsageState,
+  prior: Readonly<Record<string, number>> | undefined,
+  current: Readonly<Record<string, number>>,
+  missUsdDelta: number,
+  now: Date,
+): Readonly<Record<string, number>> {
+  const reset = Object.entries(prior ?? {}).some(([cause, n]) => (current[cause] ?? 0) < n);
+  const added: Array<[string, number]> = [];
+  for (const [cause, n] of Object.entries(current)) {
+    const delta = n - (reset ? 0 : (prior?.[cause] ?? 0));
+    if (delta > 0) added.push([cause, delta]);
+  }
+  const usd = Math.max(0, missUsdDelta);
+  if (added.length === 0 && usd === 0) return current;
+  const day = localDateKey(now);
+  if (usage.missCauses[day] === undefined) usage.missCauses = dropOldDays(usage.missCauses, now);
+  const today = (usage.missCauses[day] ??= {});
+  const total = added.reduce((sum, [, n]) => sum + n, 0);
+  for (const [cause, n] of added) {
+    const entry = (today[cause] ??= { count: 0, usd: 0 });
+    entry.count += n;
+    entry.usd += (usd * n) / total;
+  }
+  if (added.length === 0) {
+    const entry = (today["unknown"] ??= { count: 0, usd: 0 });
+    entry.usd += usd;
+  }
+  return current;
 }
 
 /**

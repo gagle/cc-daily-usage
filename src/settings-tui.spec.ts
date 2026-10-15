@@ -27,11 +27,16 @@ function press(model: SettingsModel, keys: ReadonlyArray<Key | string>, fx = eff
 const empty = (): SettingsModel => initialSettings([]);
 
 describe("initialSettings / cellsToLayout", () => {
-  it("the default layout is 1..N on the first row and round-trips", () => {
+  it("the default layout is 1..N-1 on the first row, the coach (N) on the second, and round-trips", () => {
     const model = initialSettings(DEFAULT_LAYOUT);
     expect(model.cells).toHaveLength(GRID_ROWS);
-    expect(model.cells[0]).toEqual(PARTS.map((_, i) => String(i + 1)));
-    expect(model.cells[1]).toEqual(Array.from({ length: GRID_COLS }, () => ""));
+    expect(model.cells[0]).toEqual(
+      PARTS.slice(0, -1)
+        .map((_, i) => String(i + 1))
+        .concat(""),
+    );
+    expect(model.cells[1]?.[0]).toBe(String(PARTS.length));
+    expect(model.cells[2]).toEqual(Array.from({ length: GRID_COLS }, () => ""));
     expect(cellsToLayout(model.cells)).toEqual({ layout: DEFAULT_LAYOUT });
   });
 
@@ -45,8 +50,8 @@ describe("initialSettings / cellsToLayout", () => {
     ).toEqual({
       layout: [["model"], ["cache", "cost"]],
     });
-    expect(cellsToLayout([["0"]])).toEqual({ error: "0 is not a part number (1-13)" });
-    expect(cellsToLayout([["99"]])).toEqual({ error: "99 is not a part number (1-13)" });
+    expect(cellsToLayout([["0"]])).toEqual({ error: "0 is not a part number (1-14)" });
+    expect(cellsToLayout([["99"]])).toEqual({ error: "99 is not a part number (1-14)" });
     expect(cellsToLayout([["5", "5"]])).toEqual({ error: "part 5 is placed twice" });
     expect(cellsToLayout([[""]])).toEqual({ error: "place at least one part" });
   });
@@ -119,7 +124,7 @@ describe("renderSettings", () => {
 
   it("an invalid grid previews the error; colour marks the cursor with inverse video", () => {
     const frame = renderSettings(press(empty(), ["0"]) ?? empty(), { color: true }).join("\n");
-    expect(frame).toContain("✗ 0 is not a part number (1-13)");
+    expect(frame).toContain("✗ 0 is not a part number (1-14)");
     expect(frame).toContain("\x1b[7m  0 \x1b[0m");
   });
 });

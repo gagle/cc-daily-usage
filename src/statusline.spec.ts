@@ -439,6 +439,161 @@ describe("buildStatuslineState", () => {
   });
 });
 
+describe("history tracking", () => {
+  it("books cache-miss causes per day", async () => {
+    writeAccount("claude_max");
+    const { buildStatuslineState } = await fresh();
+    const nowSec = NOW.getTime() / 1000;
+    const payload = {
+      session_id: "s1",
+      model: { id: "claude-opus-5-5" },
+      prompt_cache: {
+        warm: true,
+        ttl: "5m",
+        miss_recache_tokens: 1_000_000,
+        miss_causes: { tools_changed: 2 },
+        last_miss_cause: { causes: ["tools_changed"] },
+        last_miss_at: nowSec - 60,
+      },
+    };
+    await buildStatuslineState(payload, NOW);
+    expect(readJson("usage.json").missCauses).toEqual({
+      "2026-10-07": { tools_changed: { count: 2, usd: 4.8 } },
+    });
+    // Older Claude Code (no miss_causes) after a /clear: $ only, counted as unknown.
+    const { miss_causes: _, ...olderCache } = payload.prompt_cache;
+    await buildStatuslineState(
+      { ...payload, prompt_cache: { ...olderCache, miss_recache_tokens: 500_000 } },
+      NOW,
+    );
+    const day = (readJson("usage.json").missCauses as Record<string, Record<string, unknown>>)[
+      "2026-10-07"
+    ];
+    expect(day?.unknown).toEqual({ count: 0, usd: 2.4 });
+  });
+
+  it("samples the API reading on change and reports burn rate and runway", async () => {
+    writeAccount("claude_max");
+    const { buildStatuslineState } = await fresh();
+    const nowSec = NOW.getTime() / 1000;
+    const apiAt = (at: Date, five: number, stale = false): void => {
+      writeJson("api-cache.json", {
+        fetchedAt: at.getTime(),
+        extraUsage: null,
+        fiveHour: { pct: five, resetsAt: nowSec + 3 * 3600 },
+        sevenDay: { pct: 10, resetsAt: nowSec + 86_400 },
+        ...(stale ? { stale } : {}),
+      });
+    };
+    // An idle session's old hook reading never becomes a sample.
+    const idleHook = { session_id: "s", rate_limits: { five_hour: { used_percentage: 5 } } };
+    apiAt(NOW, 40);
+    const first = await buildStatuslineState(idleHook, NOW);
+    expect(first.runway?.fiveHour?.verdict).toBe("insufficient-data");
+    const later = new Date(NOW.getTime() + 30 * 60_000);
+    apiAt(later, 60);
+    const second = await buildStatuslineState(idleHook, later);
+    expect(second.runway?.fiveHour).toMatchObject({ ratePctPerHour: 40, verdict: "at-risk" });
+    expect(second.runway?.sevenDay?.verdict).toBe("comfortable");
+    expect(second.usdPerPctWeek).toBeNull();
+    await buildStatuslineState(idleHook, later); // same reading: no new sample
+    apiAt(NOW, 99); // older than the last sample: ignored
+    await buildStatuslineState(idleHook, later);
+    const samples = readJson("limits.json").samples as Array<{ fiveHourPct: number }>;
+    expect(samples.map((sample) => sample.fiveHourPct)).toEqual([40, 60]);
+    apiAt(later, 70, true); // a failed fetch: no runway, no sample
+    expect((await buildStatuslineState(idleHook, later)).runway).toEqual({
+      fiveHour: null,
+      sevenDay: null,
+    });
+  });
+
+  it("only the windows the API reports get a runway", async () => {
+    writeAccount("claude_max");
+    writeJson("api-cache.json", {
+      fetchedAt: NOW.getTime(),
+      extraUsage: null,
+      fiveHour: null,
+      sevenDay: { pct: 3, resetsAt: null },
+    });
+    const { buildStatuslineState } = await fresh();
+    const state = await buildStatuslineState({ session_id: "s" }, NOW);
+    expect(state.runway?.fiveHour).toBeNull();
+    expect(state.runway?.sevenDay?.verdict).toBe("insufficient-data");
+    writeJson("api-cache.json", {
+      fetchedAt: NOW.getTime(),
+      extraUsage: null,
+      fiveHour: null,
+      sevenDay: null,
+    });
+    expect((await buildStatuslineState({ session_id: "s" }, NOW)).runway?.sevenDay).toBeNull();
+  });
+
+  it("keeps the session map: transcript path, cost and lines, rewritten at most hourly", async () => {
+    writeAccount("claude_max");
+    const { buildStatuslineState } = await fresh();
+    const payload = {
+      session_id: "s",
+      transcript_path: "/t/s.jsonl",
+      cost: { total_cost_usd: 2, total_lines_added: 10, total_lines_removed: 3 },
+    };
+    await buildStatuslineState(payload, NOW);
+    expect(readJson("sessions-map.json")).toEqual({
+      schemaVersion: 1,
+      sessions: {
+        s: {
+          transcriptPath: "/t/s.jsonl",
+          costUsd: 2,
+          linesAdded: 10,
+          linesRemoved: 3,
+          firstSeenAt: NOW.toISOString(),
+          lastSeenAt: NOW.toISOString(),
+        },
+      },
+    });
+    await buildStatuslineState({ session_id: "s", cost: { total_cost_usd: 3 } }, NOW);
+    const entry = (
+      readJson("sessions-map.json").sessions as Record<string, { transcriptPath: unknown }>
+    ).s;
+    expect(entry?.transcriptPath).toBeNull(); // a changed path rewrites at once
+  });
+});
+
+describe("coach tip", () => {
+  it("the first non-snoozed finding of feed.json, or null", async () => {
+    writeAccount("claude_max");
+    const { buildStatuslineState } = await fresh();
+    expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toBeNull();
+    writeJson("feed.json", {
+      schemaVersion: 1,
+      advice: [
+        {
+          id: "R2",
+          title: "Fast mode",
+          usd: 3,
+          window: "week",
+          snoozedUntil: "2026-12-01T00:00:00Z",
+        },
+        { id: "R8", title: "Running out early", usd: null, snoozedUntil: null },
+      ],
+    });
+    expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toEqual({
+      title: "Running out early",
+      usd: null,
+      window: "week",
+    });
+    writeJson("feed.json", {
+      schemaVersion: 1,
+      advice: [{ id: "R1", title: "T", usd: 1, window: "month" }],
+    });
+    expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toEqual({
+      title: "T",
+      usd: 1,
+      window: "month",
+    });
+  });
+});
+
 describe("runners", () => {
   let written: Array<string>;
 
@@ -478,6 +633,14 @@ describe("runners", () => {
     expect(written.join("")).toContain("🤖 Opus");
     expect(written.join("")).not.toContain("⏱");
     await runStatuslineLine("{}");
+  });
+
+  it("a file from a newer version puts an update marker first", async () => {
+    writeAccount("claude_pro");
+    writeJson("config.json", { schemaVersion: 99, monthlyCap: 1, laboralDays: {} });
+    const { runStatuslineLine } = await fresh();
+    await runStatuslineLine('{"model":{"display_name":"Opus"}}');
+    expect(written.join("")).toMatch(/^⚠ update cc-daily-usage \| /);
   });
 
   it("readStdin with no explicit raw for the JSON runner", async () => {

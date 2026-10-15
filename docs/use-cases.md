@@ -64,13 +64,30 @@ Header: today vs today's max with pace label (off day → `$today (off day)`),
 month vs cap with `cap: Anthropic` or `cap: local`, Day-1 max, real average,
 "no laboral days left", and "Cache re-paid today".
 
+## `cc-daily-usage doctor`
+
+One line per check (`src/doctor.ts`), `✔` ok, `⚠` warn, `✖` fail; exit 1 when
+any check fails. Checks: Node ≥ 24, package version, `claude --version` (a
+warn when missing), the shim's version vs the shipped one, `settings.json`
+`statusLine`, both managed hooks, then per account each file's
+`schemaVersion` (garbled or newer files fail), a dead `refresh.lock`, and the
+age of the last usage reading and `feed.json`.
+
+## `cc-daily-usage report`
+
+API-equivalent $ from local transcripts; see `docs/transcript-index.md`.
+
+## `cc-daily-usage insights`
+
+Ranked findings with $ and the exact fix; see `docs/coach.md`.
+
 ## Hidden modes
 
 | Mode                | Used by                                                           |
 | ------------------- | ----------------------------------------------------------------- |
 | `--statusline-line` | the current shim (prints the ANSI line)                           |
 | `--statusline`      | shims from older versions and the capture-only line (prints JSON) |
-| `--refresh <key>`   | the detached refresher                                            |
+| `--refresh <key>`   | the detached refresher (usage API, one index pass, `feed.json`)   |
 | `--prompt-gate`     | the `UserPromptSubmit` hook (cold-cache prompt gate)              |
 | `--model-switch`    | the `PreModelSwitch` hook (model-switch cost)                     |
 
@@ -79,7 +96,8 @@ month vs cap with `cap: Anthropic` or `cap: local`, Day-1 max, real average,
 Each is guarded on its own data; a missing field hides one part, and a line
 with nothing to show is dropped. `renderStatusline` places the parts by the
 layout from `statusline.json` (`loadLayout`, see `cc-daily-usage settings`);
-the default is every part on one line, in this order (`DEFAULT_LAYOUT`).
+the default is every part but the coach tip on one line, in this order, and
+the coach tip on a second line (`DEFAULT_LAYOUT`).
 Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 
 1. `(🌿 branch)` when in a git repo (no repo name — Claude Code already shows the project).
@@ -89,12 +107,16 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 5. `🤖` model.
 6. `💪` effort.
 7. `🔥`/`❄` prompt-cache forecast, color fading with the TTL (see `docs/prompt-cache.md`).
-8. Pro/Max: `⏱ 5h/7d` (hook, else the newer of cache and API; placeholder `—/5h —/7d`).
+8. Pro/Max: `⏱ 5h/7d` (hook, else the newer of cache and API; placeholder `—/5h —/7d`),
+   then `· 1%/7d≈$X` once the $ per 1% of the week is known (`docs/history-and-feed.md`).
 9. Pro/Max: `⚠ 5h resets HH:MM (in 1h 12m)` at ≥ 90%,
    `⛔ 5h limit · continue at HH:MM (in …)` at the limit (same for weekly).
+   Under 90%, `⚠ 5h runs out ~HH:MM (in …)` when the burn rate empties the window before reset.
 10. Pro/Max: `🎫` usage credits.
 11. Budget plans: `⚠ run: cc-daily-usage init` before any laboral day exists;
     else `$today/$max (pct)` on laboral days (`(over)` when the max is 0),
     `$today` on off days.
 12. Budget plans: `$month/$cap (pct)`.
 13. `💳 pct` — Claude apps gateway spend limit, when present.
+14. `💡 <tip> ~$X/week` — the top coach finding (`docs/coach.md`), on its own
+    line by default.

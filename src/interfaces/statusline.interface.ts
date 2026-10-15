@@ -1,9 +1,11 @@
 import type { CacheForecast, CachePayload } from "../cache-forecast.js";
+import type { Runway } from "../limits-history.js";
 import type { ExtraUsageCacheEntry, RateLimitsCache } from "./config.interface.js";
 
 /** The subset of Claude Code's statusline stdin JSON that cc-daily-usage reads. */
 export interface HookPayload extends CachePayload {
   readonly session_id?: string;
+  readonly transcript_path?: string;
   readonly workspace?: {
     readonly current_dir?: string;
     readonly project_dir?: string;
@@ -15,6 +17,8 @@ export interface HookPayload extends CachePayload {
   readonly cost?: {
     readonly total_cost_usd?: number;
     readonly total_duration_ms?: number;
+    readonly total_lines_added?: number;
+    readonly total_lines_removed?: number;
   };
   readonly context_window?: {
     readonly total_input_tokens?: number;
@@ -53,6 +57,13 @@ export interface StatuslineState {
   readonly rateLimitsCache: RateLimitsCache | null; // kept for shims installed before v0.2
   readonly spendLimitPct: number | null; // Claude apps gateway spend limit, 0-100+
   readonly cache: CacheForecast | null;
+  readonly runway?: { readonly fiveHour: Runway | null; readonly sevenDay: Runway | null };
+  readonly usdPerPctWeek?: number | null; // API-equivalent $ per 1% of the 7-day window
+  readonly coach?: {
+    readonly title: string;
+    readonly usd: number | null;
+    readonly window: string;
+  } | null;
   readonly hasSpendCap: boolean;
   readonly planType: string | null;
 }

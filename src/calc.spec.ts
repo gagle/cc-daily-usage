@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  addApiEquivalent,
+  addMissCauses,
   applyLedgerReading,
   captureSessionCost,
   classifyHasSpendCap,
@@ -38,6 +40,9 @@ function makeUsage(overrides: Partial<UsageState> = {}): UsageState {
     lastUpdated: "2026-09-01T00:00:00.000Z",
     days: {},
     sessions: {},
+    apiEqDays: {},
+    apiEqTotal: 0,
+    missCauses: {},
     ...overrides,
   };
 }
@@ -82,6 +87,9 @@ describe("freshUsage / upgradeUsage", () => {
       lastUpdated: now.toISOString(),
       days: {},
       sessions: {},
+      apiEqDays: {},
+      apiEqTotal: 0,
+      missCauses: {},
     });
     const started = performance.now();
     rolloverIfNeeded(usage, now, null);
@@ -116,6 +124,19 @@ describe("freshUsage / upgradeUsage", () => {
     expect(usage.sessions).toEqual({});
     expect(usage.monthlySpent).toBe(0);
     expect(usage.periodFrozen).toBe(0);
+    expect(usage.apiEqDays).toEqual({});
+    expect(usage.apiEqTotal).toBe(0);
+    expect(usage.missCauses).toEqual({});
+  });
+
+  it("keeps an existing API-equivalent history", () => {
+    const now = at("2026-10-05T11:00:00.000Z");
+    const usage = upgradeUsage(
+      makeUsage({ apiEqDays: { "2026-10-05": 2 }, apiEqTotal: 9, missCauses: {} }),
+      now,
+    );
+    expect(usage.apiEqDays).toEqual({ "2026-10-05": 2 });
+    expect(usage.apiEqTotal).toBe(9);
   });
 
   it("pulls a future lastUpdated (clock skew) back to now", () => {
@@ -415,6 +436,83 @@ describe("captureSessionCost", () => {
       lastSeenAt: "2026-09-03T11:00:00.000Z",
       cacheMissUsd: 0.4,
     });
+  });
+});
+
+describe("addApiEquivalent", () => {
+  it("books every positive capture delta on the local day, whatever the plan", () => {
+    const usage = makeUsage();
+    captureSessionCost(usage, "s", 3, at("2026-10-05T10:00:00.000Z"), false);
+    captureSessionCost(usage, "s", 5, at("2026-10-05T11:00:00.000Z"), false);
+    captureSessionCost(usage, "s", 5, at("2026-10-05T12:00:00.000Z"), false);
+    expect(usage.monthlySpent).toBe(0);
+    expect(usage.apiEqDays).toEqual({ "2026-10-05": 5 });
+    expect(usage.apiEqTotal).toBe(5);
+  });
+
+  it("drops days older than the history window when a new day starts", () => {
+    const usage = makeUsage({ apiEqDays: { "2026-07-01": 1, "2026-09-01": 2 }, apiEqTotal: 3 });
+    addApiEquivalent(usage, 1, at("2026-10-05T10:00:00.000Z"));
+    expect(usage.apiEqDays).toEqual({ "2026-09-01": 2, "2026-10-05": 1 });
+    expect(usage.apiEqTotal).toBe(4);
+  });
+
+  it.each(["Europe/Madrid", "America/Los_Angeles"])("uses the local day in %s", (tz) => {
+    vi.stubEnv("TZ", tz);
+    const usage = makeUsage();
+    addApiEquivalent(usage, 1, at("2026-10-05T23:30:00.000Z"));
+    const expected = tz === "Europe/Madrid" ? "2026-10-06" : "2026-10-05";
+    expect(Object.keys(usage.apiEqDays)).toEqual([expected]);
+    vi.unstubAllEnvs();
+  });
+});
+
+describe("addMissCauses", () => {
+  const now = at("2026-10-05T10:00:00.000Z");
+
+  it("splits the new miss $ over the causes by their new counts", () => {
+    const usage = makeUsage();
+    const next = addMissCauses(
+      usage,
+      { tools_changed: 1 },
+      { tools_changed: 2, ttl_expired_5m: 1 },
+      4,
+      now,
+    );
+    expect(next).toEqual({ tools_changed: 2, ttl_expired_5m: 1 });
+    expect(usage.missCauses["2026-10-05"]).toEqual({
+      tools_changed: { count: 1, usd: 2 },
+      ttl_expired_5m: { count: 1, usd: 2 },
+    });
+  });
+
+  it("books $ with no counted cause as unknown", () => {
+    const usage = makeUsage();
+    addMissCauses(usage, undefined, {}, 1.5, now);
+    expect(usage.missCauses["2026-10-05"]).toEqual({ unknown: { count: 0, usd: 1.5 } });
+  });
+
+  it("writes nothing when no miss is new", () => {
+    const usage = makeUsage();
+    addMissCauses(usage, { tools_changed: 2 }, { tools_changed: 2 }, 0, now);
+    addMissCauses(usage, undefined, {}, -1, now);
+    expect(usage.missCauses).toEqual({});
+  });
+
+  it("treats lower counts as a reset: all current counts are new", () => {
+    const usage = makeUsage();
+    addMissCauses(usage, { tools_changed: 5 }, { tools_changed: 1 }, 1, now);
+    addMissCauses(usage, { ttl_expired_5m: 1 }, { tools_changed: 1 }, 0, now);
+    expect(usage.missCauses["2026-10-05"]).toEqual({ tools_changed: { count: 2, usd: 1 } });
+  });
+
+  it("adds to an existing day and prunes old days on a new one", () => {
+    const usage = makeUsage({
+      missCauses: { "2026-07-01": { unknown: { count: 0, usd: 1 } } },
+    });
+    addMissCauses(usage, undefined, { tools_changed: 1 }, 1, now);
+    addMissCauses(usage, { tools_changed: 1 }, { tools_changed: 2 }, 1, now);
+    expect(usage.missCauses).toEqual({ "2026-10-05": { tools_changed: { count: 2, usd: 2 } } });
   });
 });
 

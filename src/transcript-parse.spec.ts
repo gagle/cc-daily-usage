@@ -1,0 +1,209 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  addTurn,
+  DEEP_CONTEXT_TOKENS,
+  emptyRollup,
+  mergeRollup,
+  parseRowKey,
+  parseTurn,
+  priceTurn,
+  rollupUsd,
+  rowKey,
+  turnRowKey,
+} from "./transcript-parse.js";
+
+function usageLine(
+  overrides: Record<string, unknown> = {},
+  usage: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    type: "assistant",
+    requestId: "req_1",
+    sessionId: "s1",
+    timestamp: "2026-10-07T10:00:00.000Z",
+    cwd: "/work/app",
+    gitBranch: "main",
+    effort: "high",
+    message: {
+      id: "msg_1",
+      model: "claude-opus-5-5",
+      usage: {
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        cache_read_input_tokens: 1_000_000,
+        cache_creation_input_tokens: 300_000,
+        cache_creation: { ephemeral_5m_input_tokens: 200_000, ephemeral_1h_input_tokens: 100_000 },
+        output_tokens_details: { thinking_tokens: 50_000 },
+        server_tool_use: { web_search_requests: 2, web_fetch_requests: 1 },
+        speed: "standard",
+        ...usage,
+      },
+    },
+    ...overrides,
+  });
+}
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
+
+describe("parseTurn", () => {
+  it("reads every usage field of an assistant line", () => {
+    expect(parseTurn(usageLine())).toEqual({
+      key: "req_1|msg_1",
+      sessionId: "s1",
+      timestamp: "2026-10-07T10:00:00.000Z",
+      model: "claude-opus-5-5",
+      cwd: "/work/app",
+      branch: "main",
+      fast: false,
+      input: 1_000_000,
+      output: 100_000,
+      cacheRead: 1_000_000,
+      cacheWrite5m: 200_000,
+      cacheWrite1h: 100_000,
+      thinking: 50_000,
+      webSearches: 2,
+      webFetches: 1,
+      effort: "high",
+    });
+  });
+
+  it("skips non-usage lines, garbage and synthetic messages", () => {
+    expect(parseTurn("{oops")).toBeNull();
+    expect(parseTurn("null")).toBeNull();
+    expect(parseTurn(JSON.stringify({ type: "user", message: {} }))).toBeNull();
+    expect(parseTurn(JSON.stringify({ type: "assistant", message: { model: "x" } }))).toBeNull();
+    expect(parseTurn(JSON.stringify({ type: "assistant", message: { usage: {} } }))).toBeNull();
+    const synthetic = JSON.parse(usageLine()) as { message: { model: string } };
+    synthetic.message.model = "<synthetic>";
+    expect(parseTurn(JSON.stringify(synthetic))).toBeNull();
+  });
+
+  it("older lines: only a write total (5m), missing ids and fields default", () => {
+    const line = JSON.stringify({
+      type: "assistant",
+      uuid: "u1",
+      message: {
+        model: "claude-sonnet-5-5",
+        usage: {
+          input_tokens: 5,
+          cache_creation_input_tokens: 7,
+          output_tokens: -1,
+          speed: "fast",
+        },
+      },
+    });
+    expect(parseTurn(line)).toMatchObject({
+      key: "|u1",
+      sessionId: "unknown",
+      timestamp: "",
+      cwd: "",
+      branch: "",
+      fast: true,
+      input: 5,
+      output: 0,
+      cacheWrite5m: 7,
+      cacheWrite1h: 0,
+      thinking: 0,
+      effort: null,
+    });
+    const noIds = JSON.parse(line) as Record<string, unknown>;
+    delete noIds.uuid;
+    expect(parseTurn(JSON.stringify(noIds))?.key).toBe("|");
+  });
+});
+
+describe("priceTurn", () => {
+  it("prices each component with the 5m/1h write split", () => {
+    const turn = parseTurn(usageLine());
+    expect(turn && priceTurn(turn)).toEqual({
+      input: 4,
+      output: 2,
+      cacheRead: 0.2,
+      cacheWrite: 0.2 * 4 * 1.25 + 0.1 * 4 * 2,
+    });
+  });
+
+  it("doubles fast mode and has no price for an unknown model", () => {
+    const fast = parseTurn(usageLine({}, { speed: "fast" }));
+    expect(fast && priceTurn(fast)?.input).toBe(8);
+    const unknown = parseTurn(usageLine({ message: { model: "claude-future-9", usage: {} } }));
+    expect(unknown && priceTurn(unknown)).toBeNull();
+  });
+});
+
+describe("rollups", () => {
+  it("adds turns, keeps the deepest context, splits thinking $ and deep-context reads", () => {
+    const turn = parseTurn(usageLine());
+    if (!turn) throw new Error("parse");
+    const row = emptyRollup();
+    addTurn(row, turn, priceTurn(turn));
+    addTurn(row, { ...turn, output: 0 }, priceTurn({ ...turn, output: 0 }));
+    addTurn(row, { ...turn, model: "claude-future-9" }, null);
+    expect(row).toMatchObject({
+      turns: 3,
+      unpricedTurns: 1,
+      input: 3_000_000,
+      thinking: 150_000,
+      webSearches: 6,
+      maxContext: 2_300_000,
+      usdThinking: 1,
+      usdThinkingHigh: 0,
+      deepContextReadUsd: 2 * 0.2 * (2_100_000 / 2_300_000),
+    });
+    expect(rollupUsd(row)).toBeCloseTo(2 * (4 + 0.2 + 1.8) + 2);
+    const small = { ...turn, input: 1, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 };
+    const shallow = emptyRollup();
+    addTurn(shallow, small, priceTurn(small));
+    expect(shallow.deepContextReadUsd).toBe(0);
+    const high = emptyRollup();
+    addTurn(high, { ...turn, effort: "max" }, priceTurn(turn));
+    addTurn(high, { ...turn, effort: null }, priceTurn(turn));
+    expect(high.usdThinkingHigh).toBe(1);
+    expect(shallow.maxContext).toBeLessThan(DEEP_CONTEXT_TOKENS);
+  });
+
+  it("merges by sum, maxContext by max", () => {
+    const a = { ...emptyRollup(), turns: 1, maxContext: 5 };
+    mergeRollup(a, { ...emptyRollup(), turns: 2, maxContext: 3 });
+    expect(a).toMatchObject({ turns: 3, maxContext: 5 });
+  });
+
+  it("row keys round-trip; speed defaults to standard", () => {
+    const key = {
+      day: "2026-10-07",
+      project: "/p",
+      model: "m",
+      scope: "main",
+      speed: "fast",
+    } as const;
+    expect(parseRowKey(rowKey(key))).toEqual(key);
+    expect(parseRowKey("")).toEqual({
+      day: "",
+      project: "",
+      model: "",
+      scope: "",
+      speed: "standard",
+    });
+  });
+
+  it.each([
+    ["UTC", "2026-10-07"],
+    ["Europe/Madrid", "2026-10-08"],
+    ["America/Los_Angeles", "2026-10-07"],
+  ])("a turn's row uses its local day (%s)", (tz, day) => {
+    vi.stubEnv("TZ", tz);
+    const turn = parseTurn(usageLine({ timestamp: "2026-10-07T23:30:00.000Z" }, { speed: "fast" }));
+    if (!turn) throw new Error("parse");
+    expect(turnRowKey(turn, "subagent:Explore")).toEqual({
+      day,
+      project: "/work/app",
+      model: "claude-opus-5-5",
+      scope: "subagent:Explore",
+      speed: "fast",
+    });
+    expect(turnRowKey({ ...turn, timestamp: "" }, "main")).toBeNull();
+  });
+});

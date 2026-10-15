@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -107,6 +115,16 @@ describe("requestApiRefresh", () => {
     expect(requestApiRefresh("acct", NOW)).toBe(false);
     expect(existsSync(path.join(accountDir(), "refresh.lock"))).toBe(false);
   });
+
+  it("a throwing fetch keeps the old files and still removes the lock", async () => {
+    tokenMock.mockReturnValue({ token: "tok", expiresAt: null });
+    fetchUsageMock.mockRejectedValue(new Error("boom"));
+    writeFileSync(path.join(accountDir(), "refresh.lock"), "");
+    const { runRefresh } = await fresh();
+    expect(await runRefresh("acct", NOW)).toBe(0);
+    expect(existsSync(path.join(accountDir(), "api-cache.json"))).toBe(false);
+    expect(existsSync(path.join(accountDir(), "refresh.lock"))).toBe(false);
+  });
 });
 
 describe("runRefresh", () => {
@@ -129,6 +147,12 @@ describe("runRefresh", () => {
       sevenDay: null,
     });
     expect(existsSync(path.join(accountDir(), "refresh.lock"))).toBe(false);
+    const feed = JSON.parse(readFileSync(path.join(accountDir(), "feed.json"), "utf8")) as {
+      schemaVersion: number;
+      limits: { fiveHour: { usedPct: number } | null };
+    };
+    expect(feed.schemaVersion).toBe(1);
+    expect(feed.limits.fiveHour?.usedPct).toBe(3);
   });
 
   it("no token → a stale entry without any network call (default now)", async () => {

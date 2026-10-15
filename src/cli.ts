@@ -12,6 +12,12 @@ Operations:
   calendar          Open the live terminal calendar: stats, laboral days, day-$ edit (Team/Enterprise)
   settings          Arrange the statusline: which parts show, in what order, on how many lines
   uninstall         Remove the managed statusline and restore your previous settings.json statusLine
+  doctor            Check Node, Claude Code, the statusline, hooks and every account's files
+  report [period]   API-equivalent $ from your local transcripts. period: today | week | month | 30d |
+                    YYYY-MM (default week). --by model|project|component|subagent|session|day,
+                    --json, --account <key|unattributed>
+  insights          What to change to spend less, with $ and the exact fix. --week (default) | --month,
+                    --json, --snooze <rule> <N>d (0d clears)
 
 Flags:
   -h, --help        Print this help and exit
@@ -167,7 +173,91 @@ async function runCalendarOperation(): Promise<number> {
   return runCalendarTui(account);
 }
 
+const HOOK_MODES = new Set([
+  "--statusline-line",
+  "--statusline",
+  "--prompt-gate",
+  "--model-switch",
+  "--refresh",
+]);
+
+/**
+ * `report`: catch the transcript index up (local files only), then print the table or JSON for the active
+ * account. Also refreshes feed.json, so the mod sees the same numbers.
+ */
+async function runReportOperation(argv: ReadonlyArray<string>): Promise<number> {
+  const report = await import("./report.js");
+  const args = report.parseReportArgs(argv);
+  if (typeof args === "string") throw new Error(`${args}\nUse --help for help.`);
+  const now = new Date();
+  const range = report.resolveRange(args.period, now);
+  if (range === null) throw new Error(`Unknown period: ${args.period}\nUse --help for help.`);
+  const [{ accountKey, resolveActiveAccount }, { catchUp }, { writeFeed }] = await Promise.all([
+    import("./account.js"),
+    import("./transcript-index.js"),
+    import("./refresh.js"),
+  ]);
+  const key = args.account ?? accountKey(await resolveActiveAccount());
+  if (process.stderr.isTTY) process.stderr.write("Reading new transcript lines…\r");
+  if (!catchUp({ now })) console.error("Another index pass is running; numbers may lag.");
+  if (key !== "unattributed") await writeFeed(key, now);
+  const built = report.buildReport(key, range, args.by);
+  console.log(args.json ? JSON.stringify(built, null, 2) : report.formatReport(built));
+  return 0;
+}
+
+/** `insights`: catch up the index, rank the coach findings, refresh feed.json, print them. */
+async function runInsightsOperation(argv: ReadonlyArray<string>): Promise<number> {
+  const insights = await import("./insights.js");
+  const args = insights.parseInsightsArgs(argv);
+  if (typeof args === "string") throw new Error(`${args}\nUse --help for help.`);
+  const now = new Date();
+  const [{ accountKey, resolveActiveAccount }, { catchUp }, { writeFeed }, config, { buildFeed }] =
+    await Promise.all([
+      import("./account.js"),
+      import("./transcript-index.js"),
+      import("./refresh.js"),
+      import("./config.js"),
+      import("./feed.js"),
+    ]);
+  const key = accountKey(await resolveActiveAccount());
+  if (args.snooze) {
+    const until = insights.snoozeRule(key, args.snooze.id, args.snooze.days, now);
+    console.log(until ? `${args.snooze.id} snoozed until ${until}` : `${args.snooze.id} unsnoozed`);
+  }
+  if (!catchUp({ now })) console.error("Another index pass is running; numbers may lag.");
+  await writeFeed(key, now);
+  const cfg = config.loadConfig(key);
+  const usage = config.loadUsage(key, now);
+  const feed = buildFeed(
+    {
+      accountKey: key,
+      config: cfg,
+      usage,
+      samples: config.loadLimitSamples(key),
+      api: config.loadApiCache(key),
+      sessions: config.loadSessionsMap(key),
+    },
+    now,
+  );
+  const advice = insights.adviceFor(key, args.window, feed, cfg, usage, now);
+  console.log(
+    args.json ? JSON.stringify(advice, null, 2) : insights.formatInsights(advice, args.window),
+  );
+  return 0;
+}
+
 export async function runCli(argv: ReadonlyArray<string>): Promise<number> {
+  const code = await dispatch(argv);
+  // Hidden hook modes print to Claude Code, not a person; the render shows its own marker.
+  if (!HOOK_MODES.has(argv[0] ?? "")) {
+    const { listNewerFiles, NEWER_FILE_HINT } = await import("./config.js");
+    if (listNewerFiles().length > 0) console.error(NEWER_FILE_HINT);
+  }
+  return code;
+}
+
+async function dispatch(argv: ReadonlyArray<string>): Promise<number> {
   if (argv[0] === "--statusline-line") {
     const { runStatuslineLine } = await import("./statusline.js");
     return runStatuslineLine();
@@ -203,6 +293,8 @@ export async function runCli(argv: ReadonlyArray<string>): Promise<number> {
     throw new Error(`Unknown argument: ${operationArg ?? ""}\nUse --help for help.`);
   }
 
+  if (operationArg === "report") return runReportOperation(rest);
+  if (operationArg === "insights") return runInsightsOperation(rest);
   if (rest[0] !== undefined) {
     throw new Error(`Unknown argument: ${rest[0]}\nUse --help for help.`);
   }
@@ -220,5 +312,11 @@ export async function runCli(argv: ReadonlyArray<string>): Promise<number> {
     }
     case "uninstall":
       return runUninstallOperation();
+    case "doctor": {
+      const { doctorReport } = await import("./doctor.js");
+      const { text, code } = await doctorReport();
+      console.log(text);
+      return code;
+    }
   }
 }

@@ -12,6 +12,7 @@ const DOC_MAP = {
     "package.json",
     "bin/**",
     "src/cli.ts",
+    "src/doctor.ts",
     "src/notice.ts",
     "src/statusline-render.ts",
     "src/statusline-install.ts",
@@ -30,6 +31,19 @@ const DOC_MAP = {
     "bin/**",
   ],
   "docs/calculations.md": ["src/calc.ts", "src/clock.ts"],
+  "docs/coach.md": ["src/rules.ts", "src/insights.ts", "src/statusline-render.ts"],
+  "docs/transcript-index.md": [
+    "src/transcript-index.ts",
+    "src/transcript-parse.ts",
+    "src/report.ts",
+    "src/refresh.ts",
+  ],
+  "docs/history-and-feed.md": [
+    "src/limits-history.ts",
+    "src/sessions-map.ts",
+    "src/feed.ts",
+    "src/refresh.ts",
+  ],
   "docs/time-model.md": ["src/clock.ts", "src/calc.ts"],
   "docs/prompt-cache.md": [
     "src/cache-forecast.ts",
@@ -40,6 +54,7 @@ const DOC_MAP = {
   "docs/data-model.md": [
     "src/interfaces/**",
     "src/config.ts",
+    "src/migrate.ts",
     "src/statusline-install.ts",
     "src/statusline-layout.ts",
   ],

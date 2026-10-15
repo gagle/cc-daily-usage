@@ -15,6 +15,9 @@ export interface CachePayload {
     readonly miss_recache_tokens?: number;
     readonly recache_tokens_if_cold?: number | null;
     readonly hit_ratio?: number | null;
+    readonly last_miss_at?: number | null; // epoch seconds (v2.1.260+ for the two cause fields)
+    readonly last_miss_cause?: { readonly causes?: ReadonlyArray<string> } | null;
+    readonly miss_causes?: Readonly<Record<string, number>>;
   };
 }
 
@@ -27,22 +30,12 @@ export interface CacheForecast {
   readonly missPremiumUsd: number | null; // cold − warm: what letting the cache expire costs
   readonly sessionMissUsd: number; // already re-paid this session for misses (write − read on miss tokens)
   readonly expiresAt: number | null; // epoch seconds the cache goes cold; null = unknown/cold
-  // break: warm but going cold would be costly — /compact before a break, while reading it is cheap.
-  // clear: already cold and costly — /clear is the only free move. compact: context is large.
-  readonly hint: "break" | "clear" | "compact" | null;
 }
-
-/** A miss (re-cache) at least this expensive is worth avoiding: hand off while warm, /clear once cold. */
-export const COSTLY_MISS_USD = 1;
-/** Context share past which every prompt re-reads a lot — /compact at a natural break. */
-const COMPACT_CONTEXT_PCT = 60;
 
 /**
  * Predicts the input-side cost of the NEXT prompt from the cache state Claude Code reports. Output tokens
  * and the new prompt's own text are not known in advance, so this is the floor the history alone costs.
  * Returns null for an unpriced model or before Claude Code reports any cache data.
- * # ponytail: break/compact hints are fixed thresholds, not a model of the user's next task; upgrade path:
- * compare against the measured cost of a fresh session's first turn.
  */
 export function forecastCache(payload: CachePayload, nowSec: number): CacheForecast | null {
   const cache = payload.prompt_cache;
@@ -63,12 +56,6 @@ export function forecastCache(payload: CachePayload, nowSec: number): CacheForec
   const missPremiumUsd = nextColdUsd === null ? null : Math.max(0, nextColdUsd - nextWarmUsd);
   const sessionMissUsd = tokensCost(cache.miss_recache_tokens ?? 0, writeRate - rates.cacheRead);
 
-  const usedPct = payload.context_window?.used_percentage ?? 0;
-  let hint: CacheForecast["hint"] = null;
-  if (warm && missPremiumUsd !== null && missPremiumUsd >= COSTLY_MISS_USD) hint = "break";
-  else if (!warm && nextColdUsd !== null && nextColdUsd >= COSTLY_MISS_USD) hint = "clear";
-  else if (usedPct >= COMPACT_CONTEXT_PCT) hint = "compact";
-
   return {
     warm,
     secondsUntilCold: warm && expiresAt !== null ? Math.max(0, expiresAt - nowSec) : null,
@@ -78,6 +65,5 @@ export function forecastCache(payload: CachePayload, nowSec: number): CacheForec
     nextColdUsd,
     missPremiumUsd,
     sessionMissUsd,
-    hint,
   };
 }

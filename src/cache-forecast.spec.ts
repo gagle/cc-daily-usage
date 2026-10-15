@@ -37,7 +37,6 @@ describe("forecastCache", () => {
       missPremiumUsd: 0.78,
       sessionMissUsd: (50_000 * (8 - 0.2)) / 1_000_000,
       expiresAt: NOW + 300,
-      hint: null,
     });
   });
 
@@ -69,20 +68,7 @@ describe("forecastCache", () => {
     expect(forecast?.secondsUntilCold).toBeNull();
   });
 
-  it("hints: compact before a break while warm and going cold costs ≥ $1; /clear once cold; compact at ≥ 60%", () => {
-    const warmBig = forecastCache(
-      payload({
-        context_window: { total_input_tokens: 500_000, used_percentage: 50 },
-        prompt_cache: {
-          warm: true,
-          ttl: "5m",
-          expires_at: NOW + 60,
-          recache_tokens_if_cold: 500_000,
-        },
-      }),
-      NOW,
-    );
-    expect(warmBig?.hint).toBe("break");
+  it("a cold cache has no expiry", () => {
     const cold = forecastCache(
       payload({
         context_window: { total_input_tokens: 500_000, used_percentage: 50 },
@@ -90,13 +76,7 @@ describe("forecastCache", () => {
       }),
       NOW,
     );
-    expect(cold?.hint).toBe("clear");
     expect(cold?.expiresAt).toBeNull();
-    const big = forecastCache(
-      payload({ context_window: { total_input_tokens: 600_000, used_percentage: 60 } }),
-      NOW,
-    );
-    expect(big?.hint).toBe("compact");
   });
 
   it("missing context counts as 0 tokens; fast mode doubles", () => {
@@ -105,6 +85,5 @@ describe("forecastCache", () => {
       NOW,
     );
     expect(forecast?.nextWarmUsd).toBe(0);
-    expect(forecast?.hint).toBeNull();
   });
 });

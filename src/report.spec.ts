@@ -1,0 +1,288 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import type * as NodeOs from "node:os";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type * as ReportModule from "./report.js";
+
+let fakeHome: string;
+
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeOs>();
+  return { ...actual, homedir: () => fakeHome };
+});
+
+function fresh(): Promise<typeof ReportModule> {
+  return import("./report.js");
+}
+
+const NOW = new Date("2026-10-07T12:00:00.000Z");
+
+function line(id: string, fields: Record<string, unknown> = {}, model = "claude-opus-5-5"): string {
+  return `${JSON.stringify({
+    type: "assistant",
+    requestId: id,
+    sessionId: "s1",
+    timestamp: "2026-10-07T10:00:00.000Z",
+    cwd: "/work/app",
+    message: {
+      id,
+      model,
+      usage: {
+        input_tokens: 1_000_000,
+        output_tokens: 100_000,
+        output_tokens_details: { thinking_tokens: 50_000 },
+        server_tool_use: { web_search_requests: 1 },
+      },
+    },
+    ...fields,
+  })}\n`;
+}
+
+function sessionsMap(sessions: Record<string, number>): void {
+  const dir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "acct");
+  mkdirSync(dir, { recursive: true });
+  const at = NOW.toISOString();
+  writeFileSync(
+    path.join(dir, "sessions-map.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      sessions: Object.fromEntries(
+        Object.entries(sessions).map(([id, costUsd]) => [
+          id,
+          {
+            transcriptPath: null,
+            firstSeenAt: at,
+            lastSeenAt: at,
+            costUsd,
+            linesAdded: 0,
+            linesRemoved: 0,
+          },
+        ]),
+      ),
+    }),
+  );
+}
+
+async function indexFixtures(): Promise<void> {
+  const dir = path.join(fakeHome, ".claude", "projects", "-work-app");
+  const agents = path.join(dir, "s1", "subagents");
+  mkdirSync(agents, { recursive: true });
+  writeFileSync(
+    path.join(dir, "s1.jsonl"),
+    line("a") +
+      line("b", { timestamp: "2026-09-20T10:00:00.000Z" }) +
+      line("c", { cwd: "/work/lib" }, "claude-sonnet-5-5"),
+  );
+  writeFileSync(path.join(agents, "agent-x.jsonl"), line("d"));
+  writeFileSync(path.join(agents, "agent-x.meta.json"), JSON.stringify({ agentType: "Explore" }));
+  writeFileSync(path.join(dir, "s9.jsonl"), line("e", { sessionId: "s9" }, "claude-future-9"));
+  const { runIndexPass } = await import("./transcript-index.js");
+  runIndexPass({ now: NOW });
+}
+
+beforeEach(() => {
+  vi.resetModules();
+  fakeHome = mkdtempSync(path.join(tmpdir(), "ccdu-report-"));
+  vi.stubEnv("TZ", "UTC");
+});
+
+afterEach(() => {
+  rmSync(fakeHome, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+});
+
+describe("ranges", () => {
+  it("resolves every period to local days and the months it touches", async () => {
+    const { resolveRange, monthsOf } = await fresh();
+    expect(resolveRange("today", NOW)).toEqual({
+      label: "today",
+      from: "2026-10-07",
+      to: "2026-10-07",
+    });
+    expect(resolveRange("week", NOW)).toMatchObject({ from: "2026-10-01", to: "2026-10-07" });
+    expect(resolveRange("30d", NOW)).toMatchObject({ from: "2026-09-08" });
+    expect(resolveRange("month", NOW)).toMatchObject({ label: "2026-10", from: "2026-10-01" });
+    expect(resolveRange("2026-02", NOW)).toEqual({
+      label: "2026-02",
+      from: "2026-02-01",
+      to: "2026-02-31",
+    });
+    expect(resolveRange("2026-13", NOW)).toBeNull();
+    expect(resolveRange("soon", NOW)).toBeNull();
+    expect(monthsOf({ label: "", from: "2025-11-20", to: "2026-02-01" })).toEqual([
+      "2025-11",
+      "2025-12",
+      "2026-01",
+      "2026-02",
+    ]);
+  });
+
+  it("uses the local day in other zones", async () => {
+    vi.stubEnv("TZ", "Pacific/Auckland");
+    const { resolveRange } = await fresh();
+    expect(resolveRange("today", NOW)?.from).toBe("2026-10-08");
+  });
+});
+
+describe("parseReportArgs", () => {
+  it("defaults, flags and errors", async () => {
+    const { parseReportArgs } = await fresh();
+    expect(parseReportArgs([])).toEqual({
+      period: "week",
+      by: "model",
+      json: false,
+      account: null,
+    });
+    expect(parseReportArgs(["2026-09", "--by", "day", "--json", "--account", "k"])).toEqual({
+      period: "2026-09",
+      by: "day",
+      json: true,
+      account: "k",
+    });
+    expect(parseReportArgs(["--by", "colour"])).toContain("--by needs one of");
+    expect(parseReportArgs(["--by"])).toContain("--by needs one of");
+    expect(parseReportArgs(["--account"])).toBe("--account needs an account key");
+    expect(parseReportArgs(["--nope"])).toBe("Unknown report argument: --nope");
+  });
+});
+
+describe("buildReport / formatReport", () => {
+  it("groups by each dimension, ranks by $, notes subagents, unattributed and unpriced", async () => {
+    sessionsMap({ s1: 3 * 6 });
+    await indexFixtures();
+    const { buildReport, formatReport, resolveRange } = await fresh();
+    const week = resolveRange("week", NOW);
+    if (!week) throw new Error("range");
+
+    const byModel = buildReport("acct", week, "model");
+    expect(byModel.rows.map((row) => row.label)).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);
+    expect(byModel.subagentUsd).toBe(6);
+    expect(byModel.unattributedUsd).toBe(0); // unpriced only
+    const text = formatReport(byModel);
+    expect(text).toContain("API-equivalent estimate");
+    expect(text).toMatch(/Subagents \$6\.00 \(4\d%\)/);
+    expect(text).toContain("thinking $");
+
+    expect(buildReport("acct", week, "project").rows.map((row) => row.label)).toEqual([
+      "app",
+      "lib",
+    ]);
+    expect(buildReport("acct", week, "subagent").rows.map((row) => row.label)).toEqual([
+      "main",
+      "Explore",
+    ]);
+    expect(buildReport("acct", week, "day").rows.map((row) => row.label)).toEqual(["2026-10-07"]);
+    expect(buildReport("acct", week, "component").rows.map((row) => row.label)).toEqual([
+      "input",
+      "output",
+      "cache read",
+      "cache write",
+    ]);
+    expect(buildReport("acct", week, "session").rows[0]?.label).toBe("s1 app");
+
+    const month = resolveRange("30d", NOW);
+    if (!month) throw new Error("range");
+    expect(buildReport("acct", month, "day").rows).toHaveLength(2);
+
+    const stray = buildReport("unattributed", week, "model");
+    expect(stray.rows[0]?.rollup.unpricedTurns).toBe(1);
+    expect(stray.gaps).toEqual([]);
+    expect(formatReport(stray)).toContain("totals are a floor");
+  });
+
+  it("flags a price gap over 5% and names its models; sessions out of range are ignored", async () => {
+    sessionsMap({ s1: 1 });
+    await indexFixtures();
+    const { buildReport, formatReport, resolveRange, selfCheck } = await fresh();
+    const week = resolveRange("week", NOW);
+    if (!week) throw new Error("range");
+    const report = buildReport("acct", week, "model");
+    expect(report.gaps).toEqual([
+      "price table may be stale for claude-opus-5-5",
+      "price table may be stale for claude-sonnet-5-5",
+    ]);
+    expect(formatReport(report)).toContain("price table may be stale");
+    const session = {
+      firstAt: "",
+      lastAt: "2026-01-01T00:00:00.000Z",
+      project: "",
+      branch: "",
+      models: ["m"],
+      turns: 1,
+      usd: 9,
+      unpricedTurns: 0,
+      subagentUsd: 0,
+    };
+    const seen = {
+      transcriptPath: null,
+      firstSeenAt: "",
+      lastSeenAt: "",
+      costUsd: 1,
+      linesAdded: 0,
+      linesRemoved: 0,
+    };
+    expect(selfCheck({ old: session }, { old: seen }, week)).toEqual([]);
+    expect(
+      selfCheck(
+        { x: { ...session, lastAt: NOW.toISOString(), unpricedTurns: 1 } },
+        { x: seen },
+        week,
+      ),
+    ).toEqual([]);
+    expect(
+      selfCheck({ y: { ...session, lastAt: NOW.toISOString(), usd: 1.004 } }, { y: seen }, week),
+    ).toEqual([]);
+  });
+
+  it("an account sees the unattributed $ as a note; an empty range says so", async () => {
+    const dir = path.join(fakeHome, ".claude", "projects", "-p");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "s5.jsonl"), line("z", { sessionId: "s5" }));
+    const { runIndexPass } = await import("./transcript-index.js");
+    runIndexPass({ now: NOW });
+    const { buildReport, formatReport, resolveRange, hasUnpricedTurns } = await fresh();
+    const week = resolveRange("week", NOW);
+    if (!week) throw new Error("range");
+    const report = buildReport("acct", week, "model");
+    expect(report.unattributedUsd).toBe(6);
+    expect(formatReport(report)).toMatch(/^No usage in last 7 days\./);
+    const withRows = { ...report, rows: [{ label: "x", rollup: report.total }] };
+    expect(formatReport(withRows)).toContain("$6.00 more in sessions no account claimed");
+    expect(hasUnpricedTurns("acct", NOW)).toBe(false);
+    expect(formatReport({ ...withRows, unattributedUsd: 0 })).toContain("Subagents $0.00 (0%)");
+  });
+
+  it("hasUnpricedTurns sees an unpriced model in the last 30 days", async () => {
+    sessionsMap({ s9: 0 });
+    await indexFixtures();
+    const { hasUnpricedTurns } = await fresh();
+    expect(hasUnpricedTurns("acct", NOW)).toBe(true);
+  });
+
+  it("a row with no project path shows (unknown)", async () => {
+    sessionsMap({ s1: 0 });
+    const dir = path.join(fakeHome, ".claude", "projects", "-p");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, "s1.jsonl"),
+      line("q", { cwd: "" }) +
+        line("r", {}, "claude-opus-5-5").replace('"usage":{', '"usage":{"speed":"fast",'),
+    );
+    const { runIndexPass } = await import("./transcript-index.js");
+    runIndexPass({ now: NOW });
+    const { buildReport, resolveRange } = await fresh();
+    const week = resolveRange("week", NOW);
+    if (!week) throw new Error("range");
+    expect(
+      buildReport("acct", week, "project")
+        .rows.map((row) => row.label)
+        .sort(),
+    ).toEqual(["(unknown)", "app"]);
+    expect(buildReport("acct", week, "model").rows.map((row) => row.label)).toContain(
+      "claude-opus-5-5 (fast)",
+    );
+  });
+});

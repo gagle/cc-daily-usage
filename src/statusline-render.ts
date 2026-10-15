@@ -1,4 +1,5 @@
 import type { HookPayload, StatuslineState } from "./interfaces/statusline.interface.js";
+import type { Runway } from "./limits-history.js";
 import { DEFAULT_LAYOUT, type Layout, type PartId } from "./statusline-layout.js";
 
 const RESET = "\x1b[0m";
@@ -103,19 +104,29 @@ function windowNotice(
     : rgb("244;164;96", `⚠ ${label} resets ${when}`);
 }
 
+/** Below the 90% notice: a window whose burn rate empties it before reset. */
+function runwayNotice(label: string, runway: Runway | null | undefined, now: Date): string {
+  if (runway?.verdict !== "at-risk" || runway.exhaustsAt === null) return "";
+  const when = `${formatResetTime(runway.exhaustsAt, now)} (in ${timeUntil(runway.exhaustsAt, now)})`;
+  return rgb("244;164;96", `⚠ ${label} runs out ~${when}`);
+}
+
 function limitsPart(state: StatuslineState): string {
   const { fiveHourPct, sevenDayPct } = state.rateLimits;
   const parts: Array<string> = [];
   if (fiveHourPct !== null) parts.push(`${String(Math.round(fiveHourPct))}%/5h`);
   if (sevenDayPct !== null) parts.push(`${String(Math.round(sevenDayPct))}%/7d`);
-  return rgb("100;180;255", `⏱ ${parts.length > 0 ? parts.join(" ") : "—/5h —/7d"}`);
+  const usdPerPct = state.usdPerPctWeek == null ? "" : ` · 1%/7d≈${money(state.usdPerPctWeek)}`;
+  return rgb("100;180;255", `⏱ ${parts.length > 0 ? parts.join(" ") : "—/5h —/7d"}${usdPerPct}`);
 }
 
 function warningsPart(state: StatuslineState, now: Date): string {
   const { fiveHourPct, sevenDayPct, fiveHourResetsAt, sevenDayResetsAt } = state.rateLimits;
   return [
-    windowNotice("5h", fiveHourPct, fiveHourResetsAt, now),
-    windowNotice("weekly", sevenDayPct, sevenDayResetsAt, now),
+    windowNotice("5h", fiveHourPct, fiveHourResetsAt, now) ||
+      runwayNotice("5h", state.runway?.fiveHour, now),
+    windowNotice("weekly", sevenDayPct, sevenDayResetsAt, now) ||
+      runwayNotice("weekly", state.runway?.sevenDay, now),
   ]
     .filter((notice) => notice !== "")
     .join(` ${SEP} `);
@@ -178,8 +189,8 @@ export function warmColor(secondsUntilCold: number | null, ttlSeconds: number): 
 /**
  * The current row of the cost-by-context table: what one message costs now ($/msg, cache read) and what a
  * miss would cost (re-writing the whole context), plus the move that avoids paying it.
- *   🔥 cold in 4m · $0.10/msg · if cold +$2.40 · → /compact before a break
- *   ❄ cold · next msg ~$2.45 · → /clear (free)
+ *   🔥 cold in 4m · $0.10/msg · if cold +$2.40
+ *   ❄ cold · next msg ~$2.45
  */
 function cacheSegment(state: StatuslineState): string {
   const cache = state.cache;
@@ -199,12 +210,15 @@ function cacheSegment(state: StatuslineState): string {
     parts.push("❄ cold");
     parts.push(`next msg ~${money(cache.nextColdUsd ?? cache.nextWarmUsd)}`);
   }
-  if (cache.hint === "break") parts.push("→ /compact before a break");
-  else if (cache.hint === "clear") parts.push("→ /clear (free)");
-  else if (cache.hint === "compact") parts.push("→ /compact");
   // Cold = the costly case, in the same red as "over budget"; warm fades as the expiry nears.
   const color = cache.warm ? warmColor(cache.secondsUntilCold, cache.ttlSeconds) : ccColor(1);
   return rgb(color, parts.join(" · "));
+}
+
+/** `💡 Subagents on a premium model ~$12.40/week`; details in `cc-daily-usage insights`. */
+function coachPart(coach: NonNullable<StatuslineState["coach"]>): string {
+  const usd = coach.usd === null ? "" : ` ~${money(coach.usd)}/${coach.window}`;
+  return rgb("255;215;0", `💡 ${coach.title}${usd}`);
 }
 
 /**
@@ -255,6 +269,8 @@ export function renderStatusline(
         return budget ? todayPart(state) : "";
       case "month":
         return budget ? monthPart(state) : "";
+      case "coach":
+        return state?.coach ? coachPart(state.coach) : "";
       case "spend":
         return state?.spendLimitPct == null
           ? ""

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -38,9 +38,12 @@ describe("parseLayout", () => {
     expect(parseLayout(null)).toBe(DEFAULT_LAYOUT);
   });
 
-  it("the default is every part on one row", async () => {
+  it("the default is every part on one row, the coach tip on its own", async () => {
     const { DEFAULT_LAYOUT, PARTS } = await fresh();
-    expect(DEFAULT_LAYOUT).toEqual([PARTS.map((part) => part.id)]);
+    expect(DEFAULT_LAYOUT).toEqual([
+      PARTS.map((part) => part.id).filter((id) => id !== "coach"),
+      ["coach"],
+    ]);
   });
 });
 
@@ -49,9 +52,26 @@ describe("loadLayout / saveLayout", () => {
     const { loadLayout, saveLayout, DEFAULT_LAYOUT, LAYOUT_FILE } = await fresh();
     expect(loadLayout()).toBe(DEFAULT_LAYOUT);
     saveLayout([["cost"], ["cache"]]);
-    expect(JSON.parse(readFileSync(LAYOUT_FILE, "utf8"))).toEqual({ rows: [["cost"], ["cache"]] });
+    expect(JSON.parse(readFileSync(LAYOUT_FILE, "utf8"))).toEqual({
+      schemaVersion: 1,
+      rows: [["cost"], ["cache"]],
+    });
     expect(loadLayout()).toEqual([["cost"], ["cache"]]);
     writeFileSync(LAYOUT_FILE, "{not json");
     expect(loadLayout()).toBe(DEFAULT_LAYOUT);
+    writeFileSync(LAYOUT_FILE, "null");
+    expect(loadLayout()).toBe(DEFAULT_LAYOUT);
+  });
+
+  it("a newer statusline.json still renders but is never overwritten", async () => {
+    const { loadLayout, saveLayout, LAYOUT_FILE } = await fresh();
+    const { listNewerFiles } = await import("./config.js");
+    const newer = JSON.stringify({ schemaVersion: 2, rows: [["cost", "future-part"]] });
+    mkdirSync(path.dirname(LAYOUT_FILE), { recursive: true });
+    writeFileSync(LAYOUT_FILE, newer);
+    expect(loadLayout()).toEqual([["cost"]]);
+    saveLayout([["cache"]]);
+    expect(readFileSync(LAYOUT_FILE, "utf8")).toBe(newer);
+    expect(listNewerFiles()).toEqual([LAYOUT_FILE]);
   });
 });
