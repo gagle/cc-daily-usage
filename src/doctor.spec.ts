@@ -172,6 +172,15 @@ describe("checkAccounts", () => {
       path.join(idle, "api-cache.json"),
       JSON.stringify({ fetchedAt: NOW.getTime() - 3_600_000 }),
     );
+    writeFileSync(
+      path.join(accountDir("throttled"), "api-cache.json"),
+      JSON.stringify({
+        fetchedAt: NOW.getTime() - 60_000,
+        stale: true,
+        readAt: NOW.getTime() - 1_620_000,
+        lastError: "HTTP 429",
+      }),
+    );
     const empty = accountDir("empty");
     const lock = path.join(empty, "refresh.lock");
     writeFileSync(lock, "");
@@ -196,6 +205,9 @@ describe("checkAccounts", () => {
       status: "warn",
       detail: "usage read 3 h ago; last fetch failed",
     });
+    expect(byName["refresher throttled"]?.detail).toBe(
+      "usage read 60 s ago; last fetch failed (HTTP 429); last good reading 27 min ago",
+    );
     expect(byName["refresher idle"]?.detail).toBe("usage read 60 min ago (no session since)");
     expect(byName["account empty"]?.detail).toBe("no files yet");
     expect(byName["refresher empty"]?.detail).toContain("dead refresher");

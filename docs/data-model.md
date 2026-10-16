@@ -67,6 +67,7 @@ A missing version is 0 (the format before versioning).
 | `days`            | local `YYYY-MM-DD` → frozen $                                                                     |
 | `sessions`        | session id → `{ lastSeenCost, lastSeenAt, cacheMissUsd?, cacheGate?, gateArmedAt?, missCounts? }` |
 | `ledgerBaseline`  | ledger reading at this period's start                                                             |
+| `sinceLedger`     | `{ readAt, usd }`: known sessions' growth since the ledger reading taken at `readAt`              |
 | `rateLimitsCache` | last hook `rate_limits` snapshot + `seenAt`                                                       |
 | `extraUsageCache` | v1 only; read once as a fallback until `api-cache.json` exists                                    |
 | `apiEqDays`       | local `YYYY-MM-DD` → API-equivalent $ of every session seen, any plan; 62 days kept               |
@@ -88,7 +89,7 @@ Fields added without a schema bump get their defaults in `upgradeUsage`.
 
 ## `ApiCache`
 
-`{ fetchedAt, extraUsage, fiveHour, sevenDay, stale?, readAt?, failures?, extraWindows?, claudeCodeShare?, plan? }`.
+`{ fetchedAt, extraUsage, fiveHour, sevenDay, stale?, readAt?, failures?, lastError?, retryAt?, extraWindows?, claudeCodeShare?, plan? }`.
 `extraUsage` holds the usage-credits ledger in dollars (`decimal_places`
 applied); windows are `{ pct 0-100, resetsAt epoch s, usedDollars?, limitDollars?, severity? }`
 (`severity` from the response's `limits[]`: `session` → 5h, `weekly_all` →
@@ -97,15 +98,18 @@ applied); windows are `{ pct 0-100, resetsAt epoch s, usedDollars?, limitDollars
 `seven_day_breakdown`. `plan` is `{ fetchedAt, rateLimitTier, subscriptionStatus, billingType, trialEndsAt }`
 from `/api/oauth/profile`, re-read daily. A failed fetch keeps the previous
 reading with `stale: true`, its time in `readAt` (so the runway survives the
-failure), and counts `failures`; a good one clears them.
-TTL 60 s (`API_CACHE_TTL_MS` in `src/anthropic-usage.ts`), doubled per failure
-up to 16 min. `/api/oauth/usage` is undocumented: every field is read as
+failure), counts `failures`, and keeps why in `lastError` (`HTTP 429`,
+`network`, `bad response`, `no token`; `doctor` shows it); a good one clears
+them. TTL 60 s (`API_CACHE_TTL_MS` in `src/anthropic-usage.ts`), doubled per
+failure up to 16 min; a `Retry-After` (seconds or date) sets `retryAt`, capped
+at 1 h, and no fetch starts before it. `/api/oauth/usage` is undocumented: every field is read as
 optional (shape observed 2026-10-15).
 
 ## `StatuslineState`
 
 What `cc-daily-usage --statusline` prints and `renderStatusline` consumes:
-budget fields (absent on Pro/Max), `capSource`, `extraUsage` (Pro/Max only),
+budget fields (absent on Pro/Max; `ledgerAgeMs` is the last good ledger
+reading's age while the refresher fails, else null), `capSource`, `extraUsage` (Pro/Max only),
 resolved `rateLimits` with their `source` and `readingAt`, `runway` per window,
 `coach` (top finding), `rateLimitsCache` (old shims),
 `spendLimitPct`, `spendLimitUsd` (`{ used, limit, period }` or null),

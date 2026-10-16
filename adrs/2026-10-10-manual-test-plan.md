@@ -118,6 +118,8 @@ payload() { printf '%s' "$1" | HOME=$SANDBOX node /path/to/cc-daily-usage/bin/cc
 | E8  | offline                               | disconnect, render                        | last reading stays (marked stale in `api-cache.json`), no delay                                      | `src/refresh.spec.ts`           |
 | E9  | expired token / 401 / 429             | revoke or wait                            | same as E8; no render slowdown                                                                       | `src/anthropic-usage.spec.ts`   |
 | E10 | Claude apps gateway                   | payload with `rate_limits.spend_limit`    | `💳 pct` segment                                                                                     | `src/statusline-render.spec.ts` |
+| E11 | enterprise, refresher keeps failing   | block api.anthropic.com, keep working     | `$month` keeps rising with this machine's sessions and shows `Nm old`; next good reading takes over  | `src/statusline.spec.ts`        |
+| E12 | server sends 429 + Retry-After        | `ccdu doctor` after the 429               | `last fetch failed (HTTP 429); last good reading …`; no fetch before `retryAt` (≤ 1 h)               | `src/anthropic-usage.spec.ts`   |
 
 ## F. Sessions and accounts
 

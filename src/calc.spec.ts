@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addApiEquivalent,
   addMissCauses,
+  addSinceLedger,
   applyLedgerReading,
   captureSessionCost,
   classifyHasSpendCap,
@@ -395,6 +396,25 @@ describe("applyLedgerReading", () => {
     const usage = makeUsage({ periodFrozen: 10, days: { "2026-09-01": 10 } });
     applyLedgerReading(usage, 25, at("2026-09-03T10:00:00.000Z"));
     expect(usage.days).toEqual({ "2026-09-01": 10 });
+  });
+});
+
+describe("addSinceLedger", () => {
+  const seen = (cost: number) => ({ lastSeenCost: cost, lastSeenAt: "2026-09-03T10:00:00.000Z" });
+
+  it("sums a known session's growth after one reading; a new reading restarts at 0", () => {
+    const usage = makeUsage({ sessions: { a: seen(2) } });
+    expect(addSinceLedger(usage, 100, "a", 3)).toBe(1);
+    usage.sessions.a = seen(3);
+    expect(addSinceLedger(usage, 100, "a", 3.5)).toBe(1.5);
+    expect(addSinceLedger(usage, 200, "a", 3.5)).toBe(0.5); // still vs lastSeenCost 3
+    expect(usage.sinceLedger).toEqual({ readAt: 200, usd: 0.5 });
+  });
+
+  it("a new or reset session adds nothing (phantom spend)", () => {
+    const usage = makeUsage({ sessions: { a: seen(5) } });
+    expect(addSinceLedger(usage, 100, "new", 40)).toBe(0);
+    expect(addSinceLedger(usage, 100, "a", 1)).toBe(0);
   });
 });
 

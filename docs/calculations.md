@@ -76,6 +76,20 @@ if periodFrozen > monthlySpent:                                 (phantom session
     periodFrozen = monthlySpent
 ```
 
+The render passes `usedCredits + addSinceLedger(...)`, so the total moves
+between readings and while the refresher fails.
+
+## `addSinceLedger(usage, readAt, sessionId, currentCost)`
+
+```
+sinceLedger.readAt != readAt  →  sinceLedger = { readAt, usd: 0 }   (new reading took it over)
+prior session known and currentCost > lastSeenCost  →  usd += currentCost - lastSeenCost
+return usd
+```
+
+A new or reset session adds nothing (phantom spend). Runs before
+`captureSessionCost` moves `lastSeenCost`.
+
 `# ponytail` notes in `src/calc.ts`: the ledger is assumed to reset on the UTC
 month; the proportional rescale is a guess at which days were inflated.
 

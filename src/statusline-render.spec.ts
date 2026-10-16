@@ -108,6 +108,15 @@ describe("renderStatusline", () => {
     expect(line).toContain("| $12.00/$30.00 (40%) | $120.00/$650.00 (18%)");
   });
 
+  it("an old ledger reading shows its age after the month total", () => {
+    const month = { monthlySpent: 120, monthlyCap: 650, monthUsedPct: 120 / 650 };
+    const line = (ledgerAgeMs: number | null) =>
+      plain(renderStatusline(payload, state({ ...month, ledgerAgeMs }), "", NOW));
+    expect(line(27 * 60_000 + 5_000)).toContain("$120.00/$650.00 (18%) 27m old");
+    expect(line(59_000)).not.toContain(" old");
+    expect(line(null)).not.toContain(" old");
+  });
+
   it("budget exhausted, off day, init nudge", () => {
     expect(
       plain(

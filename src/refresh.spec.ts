@@ -36,7 +36,7 @@ vi.mock("./anthropic-usage.js", async (importOriginal) => {
   const actual = await importOriginal<typeof UsageModule>();
   return {
     ...actual,
-    fetchUsage: (token: string) => fetchUsageMock(token) as unknown,
+    fetchUsageOutcome: (token: string) => fetchUsageMock(token) as unknown,
     fetchPlan: (token: string, now: Date) => fetchPlanMock(token, now) as unknown,
     resolveOAuthAccessToken: () => tokenMock() as unknown,
   };
@@ -133,9 +133,7 @@ describe("runRefresh", () => {
   it("fetches with the resolved token, writes api-cache.json, removes the lock", async () => {
     tokenMock.mockReturnValue({ token: "tok", expiresAt: null });
     fetchUsageMock.mockResolvedValue({
-      extraUsage: null,
-      fiveHour: { pct: 3, resetsAt: 1 },
-      sevenDay: null,
+      usage: { extraUsage: null, fiveHour: { pct: 3, resetsAt: 1 }, sevenDay: null },
     });
     writeFileSync(path.join(accountDir(), "refresh.lock"), "");
     const { runRefresh } = await fresh();
@@ -159,7 +157,9 @@ describe("runRefresh", () => {
 
   it("reads the plan once a day, only after a good usage fetch", async () => {
     tokenMock.mockReturnValue({ token: "tok", expiresAt: null });
-    fetchUsageMock.mockResolvedValue({ extraUsage: null, fiveHour: null, sevenDay: null });
+    fetchUsageMock.mockResolvedValue({
+      usage: { extraUsage: null, fiveHour: null, sevenDay: null },
+    });
     const plan = {
       fetchedAt: NOW.getTime(),
       rateLimitTier: "t",
@@ -178,7 +178,7 @@ describe("runRefresh", () => {
     await runRefresh("acct", tomorrow); // due; a failed profile read keeps yesterday's plan
     expect(fetchPlanMock).toHaveBeenCalledTimes(2);
     expect(loadApiCache("acct")?.plan).toEqual(plan);
-    fetchUsageMock.mockResolvedValue(null);
+    fetchUsageMock.mockResolvedValue({ failure: { error: "HTTP 429", retryAfter: null } });
     await runRefresh("acct", new Date(tomorrow.getTime() + 24 * 3600 * 1000));
     expect(fetchPlanMock).toHaveBeenCalledTimes(2); // usage failed: no profile call
   });
@@ -190,6 +190,6 @@ describe("runRefresh", () => {
     const { loadApiCache } = await import("./config.js");
     await runRefresh("acct");
     expect(fetchUsageMock).not.toHaveBeenCalled();
-    expect(loadApiCache("acct")?.stale).toBe(true);
+    expect(loadApiCache("acct")).toMatchObject({ stale: true, lastError: "no token" });
   });
 });

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   fetchPlan,
-  fetchUsage,
+  fetchUsageOutcome,
   isApiCacheFresh,
   nextApiCache,
   PLAN_TTL_MS,
@@ -106,10 +106,12 @@ export async function runRefresh(accountKey: string, now: Date = new Date()): Pr
   try {
     const previous = loadApiCache(accountKey);
     const token = resolveOAuthAccessToken();
-    const fetched = token ? await fetchUsage(token.token) : null;
-    const next = nextApiCache(previous, fetched, now);
+    const outcome = token
+      ? await fetchUsageOutcome(token.token)
+      : { failure: { error: "no token", retryAfter: null } };
+    const next = nextApiCache(previous, outcome, now);
     const planDue = next.plan === undefined || now.getTime() - next.plan.fetchedAt >= PLAN_TTL_MS;
-    const plan = token && fetched !== null && planDue ? await fetchPlan(token.token, now) : null;
+    const plan = token && "usage" in outcome && planDue ? await fetchPlan(token.token, now) : null;
     saveApiCache(accountKey, plan === null ? next : { ...next, plan });
     const { runIndexPass } = await import("./transcript-index.js");
     runIndexPass({ now }); // bounded; the rest waits for the next refresh

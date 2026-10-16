@@ -85,6 +85,8 @@ export interface ApiCache {
   readonly stale?: boolean; // last attempt failed; fields are the previous good reading
   readonly readAt?: number; // epoch ms of that good reading, set only when stale (else it is fetchedAt)
   readonly failures?: number; // consecutive failed attempts; each doubles the wait before the next
+  readonly lastError?: string; // why the last attempt failed ("HTTP 429", "network", "no token"); set only when stale
+  readonly retryAt?: number; // epoch ms from the server's Retry-After; no attempt before it (capped at 1 h)
   readonly extraWindows?: ReadonlyArray<ApiExtraWindow>;
   readonly claudeCodeShare?: number | null; // 0-1: Claude Code's part of the 7d window (`seven_day_breakdown`)
   readonly plan?: ApiPlan;
@@ -101,6 +103,7 @@ export interface UsageState {
   rateLimitsCache?: RateLimitsCache; // last-seen Claude Code hook rate_limits, for the render(s) at session
   // start before Claude Code has attached a fresh one — see runStatuslineHidden in cli.ts
   ledgerBaseline?: number; // Anthropic ledger reading at this month's start; monthlySpent = used_credits - baseline
+  sinceLedger?: { readAt: number; usd: number }; // session spend seen after the ledger reading taken at readAt
   apiEqDays: Record<string, number>; // LOCAL date -> API-equivalent $ of every session seen (any plan)
   apiEqTotal: number; // monotone sum of every API-equivalent delta — limit samples difference it
   missCauses: Record<string, Record<string, MissCauseDay>>; // LOCAL date -> cache-miss cause -> count/$

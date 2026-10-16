@@ -102,7 +102,8 @@ and render the JSON themselves; that mode is kept.
 ```
 resolveOAuthAccessToken (env → macOS Keychain → ~/.claude/.credentials.json)
   -> GET /api/oauth/usage -> nextApiCache (failure keeps last reading, stale,
-     failures + 1: the next try waits 60 s × 2^failures, at most 16 min)
+     failures + 1, lastError: the next try waits 60 s × 2^failures, at most 16 min,
+     and never before retryAt from Retry-After, at most 1 h)
   -> GET /api/oauth/profile when the plan is a day old (after a good usage read)
   -> accounts/<key>/api-cache.json -> index pass -> feed.json ; remove refresh.lock
 ```

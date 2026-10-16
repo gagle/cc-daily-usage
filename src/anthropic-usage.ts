@@ -141,7 +141,15 @@ interface RawUsageResponse {
   } | null;
 }
 
-async function fetchJson<T>(url: string, token: string): Promise<T | null> {
+/** Why a fetch gave no reading: `error` is shown by `doctor`; `retryAfter` is the server's raw header. */
+export interface FetchFailure {
+  readonly error: string; // "HTTP 429", "network" (timeout, DNS, bad JSON), "bad response", "no token"
+  readonly retryAfter: string | null;
+}
+
+type FetchOutcome<T> = { readonly data: T } | { readonly failure: FetchFailure };
+
+async function fetchJsonOutcome<T>(url: string, token: string): Promise<FetchOutcome<T>> {
   try {
     const response = await fetch(url, {
       headers: {
@@ -151,11 +159,23 @@ async function fetchJson<T>(url: string, token: string): Promise<T | null> {
       },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
-    return (await response.json()) as T;
+    if (!response.ok) {
+      return {
+        failure: {
+          error: `HTTP ${String(response.status)}`,
+          retryAfter: response.headers.get("retry-after"),
+        },
+      };
+    }
+    return { data: (await response.json()) as T };
   } catch {
-    return null;
+    return { failure: { error: "network", retryAfter: null } };
   }
+}
+
+async function fetchJson<T>(url: string, token: string): Promise<T | null> {
+  const outcome = await fetchJsonOutcome<T>(url, token);
+  return "data" in outcome ? outcome.data : null;
 }
 
 /** `GET /api/oauth/profile` — resolves account identity straight from a bearer token, independent of
@@ -219,21 +239,34 @@ function parseClaudeCodeShare(raw: RawUsageResponse): number | null {
   return typeof percent === "number" ? Math.min(1, Math.max(0, percent / 100)) : null;
 }
 
+export type UsageReading = Omit<ApiCache, "fetchedAt" | "stale">;
+export type UsageOutcome = { readonly usage: UsageReading } | { readonly failure: FetchFailure };
+
 /** `GET /api/oauth/usage` — the same read-only endpoint Claude Code's own `/usage` calls (no model request, no
- * tokens). Returns null on any fetch/parse failure. `extra_usage` is Anthropic's server-side "Usage credits"
- * ledger; `five_hour`/`seven_day` are the seat windows Claude Code only learns from a model response. */
-export async function fetchUsage(
-  token: string,
-): Promise<Omit<ApiCache, "fetchedAt" | "stale"> | null> {
-  const raw = await fetchJson<RawUsageResponse>(`${BASE_API_URL}/api/oauth/usage`, token);
-  if (raw === null || typeof raw !== "object") return null;
+ * tokens). A failure says why. `extra_usage` is Anthropic's server-side "Usage credits" ledger;
+ * `five_hour`/`seven_day` are the seat windows Claude Code only learns from a model response. */
+export async function fetchUsageOutcome(token: string): Promise<UsageOutcome> {
+  const outcome = await fetchJsonOutcome<unknown>(`${BASE_API_URL}/api/oauth/usage`, token);
+  if ("failure" in outcome) return outcome;
+  if (outcome.data === null || typeof outcome.data !== "object") {
+    return { failure: { error: "bad response", retryAfter: null } };
+  }
+  const raw = outcome.data as RawUsageResponse;
   return {
-    extraUsage: parseExtraUsage(raw),
-    fiveHour: parseWindow(raw.five_hour, severityOf(raw, "session")),
-    sevenDay: parseWindow(raw.seven_day, severityOf(raw, "weekly_all")),
-    extraWindows: parseExtraWindows(raw),
-    claudeCodeShare: parseClaudeCodeShare(raw),
+    usage: {
+      extraUsage: parseExtraUsage(raw),
+      fiveHour: parseWindow(raw.five_hour, severityOf(raw, "session")),
+      sevenDay: parseWindow(raw.seven_day, severityOf(raw, "weekly_all")),
+      extraWindows: parseExtraWindows(raw),
+      claudeCodeShare: parseClaudeCodeShare(raw),
+    },
   };
+}
+
+/** Exported API: fetchUsageOutcome's reading, or null on any fetch/parse failure. */
+export async function fetchUsage(token: string): Promise<UsageReading | null> {
+  const outcome = await fetchUsageOutcome(token);
+  return "usage" in outcome ? outcome.usage : null;
 }
 
 /** Plan facts from `/api/oauth/profile`, or null on failure. */
@@ -259,8 +292,18 @@ export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null>
 
 export const API_CACHE_TTL_MS = 60_000;
 /** After failures the wait doubles per failure, up to 2^4 × the TTL (16 min): a 429 or a dead token is not
- * hammered every minute. # ponytail: ignores Retry-After; upgrade path: return the status from fetchJson. */
+ * hammered every minute. A Retry-After from the server waits at least that long. */
 const MAX_BACKOFF_DOUBLINGS = 4;
+/** A Retry-After longer than this is not trusted: a wrong header must not stop the readings for a day. */
+const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
+
+/** Retry-After (seconds or an HTTP date) as epoch ms, capped; undefined when absent or unreadable. */
+function retryAtOf(header: string | null, now: number): number | undefined {
+  if (header === null || header.trim() === "") return undefined;
+  const seconds = Number(header);
+  const at = Number.isFinite(seconds) ? now + seconds * 1000 : Date.parse(header);
+  return Number.isNaN(at) ? undefined : Math.min(at, now + MAX_RETRY_AFTER_MS);
+}
 
 /** When the reading a stale cache keeps was taken; absent when no good reading is known. */
 function readAtOf(previous: ApiCache | null): { readAt?: number } {
@@ -273,11 +316,11 @@ function readAtOf(previous: ApiCache | null): { readAt?: number } {
  * spend. The plan survives either way; the caller replaces it when it re-reads the profile. */
 export function nextApiCache(
   previous: ApiCache | null,
-  fetched: Omit<ApiCache, "fetchedAt" | "stale"> | null,
+  outcome: UsageOutcome,
   now: Date,
 ): ApiCache {
   const plan = previous?.plan === undefined ? {} : { plan: previous.plan };
-  if (fetched !== null) return { fetchedAt: now.getTime(), ...plan, ...fetched };
+  if ("usage" in outcome) return { fetchedAt: now.getTime(), ...plan, ...outcome.usage };
   return {
     extraUsage: null,
     fiveHour: null,
@@ -287,11 +330,14 @@ export function nextApiCache(
     stale: true,
     ...readAtOf(previous),
     failures: (previous?.failures ?? 0) + 1,
+    lastError: outcome.failure.error,
+    retryAt: retryAtOf(outcome.failure.retryAfter, now.getTime()),
   };
 }
 
 export function isApiCacheFresh(cache: ApiCache | null, now: Date): boolean {
   if (cache === null) return false;
+  if (cache.retryAt !== undefined && now.getTime() < cache.retryAt) return true;
   const doublings = Math.min(cache.failures ?? 0, MAX_BACKOFF_DOUBLINGS);
   return now.getTime() - cache.fetchedAt < API_CACHE_TTL_MS * 2 ** doublings;
 }

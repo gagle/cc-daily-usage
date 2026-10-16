@@ -212,6 +212,28 @@ export function applyLedgerReading(usage: UsageState, usedCredits: number, now: 
 }
 
 /**
+ * Session spend seen after the ledger reading taken at `readAt`, so the month total moves between readings
+ * (and while the refresher fails). A new reading restarts the sum at 0: the ledger now holds that spend.
+ * Only a known session growing counts — a new or reset session's full cost is the phantom-spend case the
+ * ledger exists to avoid. Returns the sum to add to the reading.
+ * # ponytail: spend between the reading and the session's next render counts twice for one reading; fix
+ * with per-session cost at readAt.
+ */
+export function addSinceLedger(
+  usage: UsageState,
+  readAt: number,
+  sessionId: string,
+  currentCost: number,
+): number {
+  if (usage.sinceLedger?.readAt !== readAt) usage.sinceLedger = { readAt, usd: 0 };
+  const prior = usage.sessions[sessionId];
+  if (prior && currentCost > prior.lastSeenCost) {
+    usage.sinceLedger.usd += currentCost - prior.lastSeenCost;
+  }
+  return usage.sinceLedger.usd;
+}
+
+/**
  * Per-session capture: the delta since this session id was last seen is folded into monthlySpent.
  * A currentCost lower than the prior lastSeenCost means the session reset (e.g. `/clear`), treated as a
  * fresh baseline rather than a negative delta. Concurrently-running sessions never corrupt each other's

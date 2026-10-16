@@ -129,7 +129,7 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 11. Budget plans: `⚠ run: cc-daily-usage init` before any laboral day exists;
     else `$today/$max (pct)` on laboral days (`(over)` when the max is 0),
     `$today` on off days.
-12. Budget plans: `$month/$cap (pct)`.
+12. Budget plans: `$month/$cap (pct)`, then `Nm old` while the ledger fetch fails.
 13. `💳 pct` — Claude apps gateway spend limit, when present; `💳 63% $62.80/$100/mo`
     once Claude Code (v2.1.284+) sends the dollar amounts and period.
 14. `» <tip> ~$X/week` — the top coach finding (`docs/coach.md`), on its own

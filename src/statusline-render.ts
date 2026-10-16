@@ -220,10 +220,13 @@ function todayPart(state: StatuslineState): string {
 function monthPart(state: StatuslineState): string {
   if (state.needsInit || state.monthlyCap === undefined) return "";
   const pct = state.monthUsedPct ?? 0;
-  return rgb(
+  const month = rgb(
     ccColor(pct),
     `${money(state.monthlySpent ?? 0)}/${money(state.monthlyCap)} (${String(Math.round(pct * 100))}%)`,
   );
+  // The ledger fetch fails: the total is the old reading plus this machine's sessions, so say how old.
+  const ageMin = Math.floor((state.ledgerAgeMs ?? 0) / 60_000);
+  return ageMin >= 1 ? `${month} ${rgb("180;180;180", `${String(ageMin)}m old`)}` : month;
 }
 
 function creditsPart(state: StatuslineState): string {

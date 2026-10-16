@@ -62,6 +62,7 @@ export interface StatuslineState {
   readonly monthlySpent?: number;
   readonly monthlyCap?: number;
   readonly monthUsedPct?: number;
+  readonly ledgerAgeMs?: number | null; // age of the last good ledger reading while the refresher fails, else null
   readonly needsInit?: boolean;
   readonly capSource?: "anthropic" | "local";
   // Pro/Max only.

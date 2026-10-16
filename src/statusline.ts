@@ -2,6 +2,7 @@ import { accountKey, resolveActiveAccount } from "./account.js";
 import { forecastCache } from "./cache-forecast.js";
 import {
   addMissCauses,
+  addSinceLedger,
   applyLedgerReading,
   captureSessionCost,
   classifyHasSpendCap,
@@ -283,10 +284,17 @@ export async function buildStatuslineState(
   // cost.total_cost_usd can invent phantom spend on a brand-new session id, so session deltas only fold
   // into monthlySpent when the credits ledger is unavailable.
   const accumulateSessions = config.hasSpendCap === true && extraUsage === null;
+  // Between readings (and while the refresher fails) a known session's growth moves the total; the next
+  // reading takes it over. Read before captureSessionCost moves the session's lastSeenCost.
+  const readingAt = api?.stale === true ? api.readAt : api?.fetchedAt;
+  const sinceLedger =
+    config.hasSpendCap === true && extraUsage !== null && readingAt !== undefined
+      ? addSinceLedger(usage, readingAt, sessionId, currentCost)
+      : 0;
   captureSessionCost(usage, sessionId, currentCost, now, accumulateSessions);
   let capSource: "anthropic" | "local" = "local";
   if (config.hasSpendCap === true && extraUsage !== null) {
-    applyLedgerReading(usage, extraUsage.usedCredits, now);
+    applyLedgerReading(usage, extraUsage.usedCredits + sinceLedger, now);
     // Anthropic's monthly_limit is the source of truth for the cap — an admin change lands within one TTL.
     if (extraUsage.monthlyLimit > 0) {
       capSource = "anthropic";
@@ -371,6 +379,10 @@ export async function buildStatuslineState(
           monthlySpent: computed.monthlySpent,
           monthlyCap: computed.monthlyCap,
           monthUsedPct: computed.monthUsedPct,
+          ledgerAgeMs:
+            extraUsage !== null && api?.stale === true && readingAt !== undefined
+              ? now.getTime() - readingAt
+              : null,
           // Before `init` ever picked laboral days the today/month segments are meaningless — nudge instead.
           needsInit: Object.keys(config.laboralDays).length === 0,
           capSource,

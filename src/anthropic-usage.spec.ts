@@ -313,6 +313,39 @@ describe("anthropic-usage.ts", () => {
       );
       expect(await fetchUsage("t")).toBeNull();
     });
+
+    it("fetchUsageOutcome says why a fetch failed", async () => {
+      const { fetchUsageOutcome } = await freshModule();
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 429,
+          headers: new Headers({ "retry-after": "30" }),
+        }),
+      );
+      expect(await fetchUsageOutcome("t")).toEqual({
+        failure: { error: "HTTP 429", retryAfter: "30" },
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: false, status: 401, headers: new Headers() }),
+      );
+      expect(await fetchUsageOutcome("t")).toEqual({
+        failure: { error: "HTTP 401", retryAfter: null },
+      });
+      vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("timeout")));
+      expect(await fetchUsageOutcome("t")).toEqual({
+        failure: { error: "network", retryAfter: null },
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: true, json: () => Promise.resolve(null) }),
+      );
+      expect(await fetchUsageOutcome("t")).toEqual({
+        failure: { error: "bad response", retryAfter: null },
+      });
+    });
   });
 
   describe("nextApiCache / isApiCacheFresh", () => {
@@ -323,33 +356,64 @@ describe("anthropic-usage.ts", () => {
       sevenDay: null,
     };
 
+    const failure = (error: string, retryAfter: string | null = null) => ({
+      failure: { error, retryAfter },
+    });
+
     it("a good fetch replaces the cache", async () => {
       const { nextApiCache } = await freshModule();
-      expect(nextApiCache(null, reading, now)).toEqual({ fetchedAt: now.getTime(), ...reading });
+      expect(nextApiCache(null, { usage: reading }, now)).toEqual({
+        fetchedAt: now.getTime(),
+        ...reading,
+      });
     });
 
     it("a failed fetch keeps the last good reading, marked stale", async () => {
       const { nextApiCache } = await freshModule();
       const previous = { fetchedAt: 1, ...reading };
-      const failed = nextApiCache(previous, null, now);
+      const failed = nextApiCache(previous, failure("HTTP 500"), now);
       expect(failed).toEqual({
         fetchedAt: now.getTime(),
         ...reading,
         stale: true,
         readAt: 1,
         failures: 1,
+        lastError: "HTTP 500",
       });
       // The reading time survives further failures; a stale cache without one stays without one.
-      expect(nextApiCache(failed, null, now)).toMatchObject({ readAt: 1, failures: 2 });
-      expect(nextApiCache({ ...previous, stale: true }, null, now)).not.toHaveProperty("readAt");
-      expect(nextApiCache(null, null, now)).toEqual({
+      expect(nextApiCache(failed, failure("network"), now)).toMatchObject({
+        readAt: 1,
+        failures: 2,
+        lastError: "network",
+      });
+      expect(nextApiCache({ ...previous, stale: true }, failure("x"), now)).not.toHaveProperty(
+        "readAt",
+      );
+      expect(nextApiCache(null, failure("no token"), now)).toEqual({
         fetchedAt: now.getTime(),
         extraUsage: null,
         fiveHour: null,
         sevenDay: null,
         stale: true,
         failures: 1,
+        lastError: "no token",
       });
+    });
+
+    it("Retry-After in seconds or as a date sets retryAt, capped at 1 h", async () => {
+      const { nextApiCache } = await freshModule();
+      const t = now.getTime();
+      const retryAt = (header: string | null) =>
+        nextApiCache(null, failure("HTTP 429", header), now).retryAt;
+      expect(retryAt("120")).toBe(t + 120_000);
+      expect(retryAt(new Date(t + 300_000).toUTCString())).toBe(t + 300_000);
+      expect(retryAt("86400")).toBe(t + 3_600_000);
+      expect(retryAt("soon")).toBeUndefined();
+      expect(retryAt(" ")).toBeUndefined();
+      expect(retryAt(null)).toBeUndefined();
+      // A later failure without the header drops the old retryAt.
+      const first = nextApiCache(null, failure("HTTP 429", "120"), now);
+      expect(nextApiCache(first, failure("network"), now).retryAt).toBeUndefined();
     });
 
     it("a good fetch clears the failures and keeps the plan", async () => {
@@ -362,7 +426,7 @@ describe("anthropic-usage.ts", () => {
         trialEndsAt: null,
       };
       const previous = { fetchedAt: 1, ...reading, stale: true, failures: 3, plan };
-      expect(nextApiCache(previous, reading, now)).toEqual({
+      expect(nextApiCache(previous, { usage: reading }, now)).toEqual({
         fetchedAt: now.getTime(),
         ...reading,
         plan,
@@ -381,6 +445,14 @@ describe("anthropic-usage.ts", () => {
       expect(ago(120_000, 1)).toBe(false);
       expect(ago(959_000, 9)).toBe(true);
       expect(ago(960_000, 9)).toBe(false);
+    });
+
+    it("no attempt before retryAt, even after the backoff", async () => {
+      const { isApiCacheFresh } = await freshModule();
+      const cache = { fetchedAt: now.getTime() - 120_000, ...reading, failures: 1 };
+      expect(isApiCacheFresh(cache, now)).toBe(false);
+      expect(isApiCacheFresh({ ...cache, retryAt: now.getTime() + 1 }, now)).toBe(true);
+      expect(isApiCacheFresh({ ...cache, retryAt: now.getTime() }, now)).toBe(false);
     });
   });
 });

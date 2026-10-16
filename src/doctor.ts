@@ -229,8 +229,15 @@ function checkRefresher(
   const writtenAt = values["feed.json"]?.writtenAt;
   if (typeof writtenAt === "string")
     parts.push(`feed written ${ago(now.getTime() - Date.parse(writtenAt))}`);
-  if (values["api-cache.json"]?.stale === true)
-    return [warn(name, `${parts.join(", ")}; last fetch failed`)];
+  const cache = values["api-cache.json"];
+  if (cache?.stale === true) {
+    const error = typeof cache.lastError === "string" ? ` (${cache.lastError})` : "";
+    const readAt =
+      typeof cache.readAt === "number"
+        ? `; last good reading ${ago(now.getTime() - cache.readAt)}`
+        : "";
+    return [warn(name, `${parts.join(", ")}; last fetch failed${error}${readAt}`)];
+  }
   // Renders refresh after the TTL; much older only means no session ran since.
   return [
     ok(

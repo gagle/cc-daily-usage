@@ -251,6 +251,46 @@ describe("buildStatuslineState", () => {
     await buildStatuslineState({ session_id: "s1", cost: { total_cost_usd: 9 } }, NOW); // already in sync
   });
 
+  it("between ledger readings a known session's growth moves the total; a failed fetch shows its age", async () => {
+    writeAccount("claude_enterprise");
+    writeJson("config.json", {
+      monthlyCap: 100,
+      laboralDays: { "2026": { "10": OCTOBER_WEEKDAYS } },
+    });
+    const readAt = NOW.getTime() - 27 * 60_000;
+    const ledger = {
+      usedCredits: 44,
+      monthlyLimit: 440,
+      utilizationPct: 10,
+      currency: "USD",
+      spendLimitReached: false,
+      disabledReason: null,
+    };
+    writeJson("api-cache.json", {
+      fetchedAt: NOW.getTime(),
+      extraUsage: ledger,
+      fiveHour: null,
+      sevenDay: null,
+      stale: true,
+      readAt,
+      failures: 4,
+    });
+    const { buildStatuslineState } = await fresh();
+    const render = (cost: number) =>
+      buildStatuslineState({ session_id: "s1", cost: { total_cost_usd: cost } }, NOW);
+    expect(await render(9)).toMatchObject({ monthlySpent: 44, ledgerAgeMs: 27 * 60_000 });
+    expect(await render(12)).toMatchObject({ monthlySpent: 47 });
+    expect(readJson("usage.json").sinceLedger).toEqual({ readAt, usd: 3 });
+    // A good reading takes the session spend over: the estimate restarts.
+    writeJson("api-cache.json", {
+      fetchedAt: NOW.getTime(),
+      extraUsage: { ...ledger, usedCredits: 47 },
+      fiveHour: null,
+      sevenDay: null,
+    });
+    expect(await render(12)).toMatchObject({ monthlySpent: 47, ledgerAgeMs: null });
+  });
+
   it("a disabled/zero org limit keeps the local cap", async () => {
     writeAccount("claude_team");
     writeJson("config.json", {
