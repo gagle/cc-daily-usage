@@ -244,6 +244,27 @@ describe("checkPlan", () => {
   });
 });
 
+describe("checkIndex", () => {
+  it("no pass, up to date, or bytes behind", async () => {
+    const { checkIndex } = await fresh();
+    expect(checkIndex(null, NOW)).toMatchObject({
+      status: "warn",
+      detail: expect.stringContaining("no pass"),
+    });
+    expect(checkIndex({ at: "2026-10-15T09:59:00.000Z", bytesBehind: 0 }, NOW)).toEqual({
+      status: "ok",
+      name: "index",
+      detail: "last pass 60 s ago, up to date",
+    });
+    expect(
+      checkIndex({ at: "2026-10-15T09:00:00.000Z", bytesBehind: 3 * 1024 * 1024 }, NOW),
+    ).toMatchObject({
+      status: "warn",
+      detail: "last pass 60 min ago, 3.0 MB behind (report or insights catches up)",
+    });
+  });
+});
+
 describe("doctorReport", () => {
   it("exit 1 when a check fails; package version comes from package.json", async () => {
     const { doctorReport, packageVersion } = await fresh();
@@ -251,6 +272,7 @@ describe("doctorReport", () => {
     const report = await doctorReport(NOW);
     expect(report.code).toBe(1); // nothing installed in the temp HOME
     expect(report.text).toContain(`✔ cc-daily-usage: ${packageVersion()}`);
+    expect(report.text).toContain("⚠ index: no pass yet");
   });
 
   it("exit 0 when nothing fails", async () => {

@@ -21,9 +21,12 @@ import {
 import { schemaVersionOf } from "./migrate.js";
 import {
   addTurn,
+  contextTokens,
   emptyRollup,
+  mcpServersUsed,
   mergeRollup,
   parseActivity,
+  parseMcpLoad,
   parseTurn,
   priceTurn,
   type Rollup,
@@ -61,6 +64,7 @@ interface FileOffset {
   size: number;
   mtimeMs: number;
   recent: Array<string>;
+  context?: number; // context tokens of the file's last turn (the efficiency split needs the previous one)
 }
 
 /** Per-session totals (sessions.json). */
@@ -78,6 +82,8 @@ export interface SessionTotals {
   thinkingMs?: number;
   hookRuns?: number;
   entrypoint?: string | null;
+  mcpLoaded?: Record<string, number>; // MCP server → est. tokens of its instructions in context
+  mcpUsed?: Array<string>; // MCP servers the session called
 }
 
 export interface PassResult {
@@ -189,10 +195,34 @@ interface SessionDelta {
   subagentUsd: number;
   turnMs: number;
   hookRuns: number;
+  mcpLoaded: Map<string, number>;
+  mcpUsed: Set<string>;
 }
 
 function emptySessionDelta(): SessionDelta {
-  return { turns: [], usd: 0, unpriced: 0, subagentUsd: 0, turnMs: 0, hookRuns: 0 };
+  return {
+    turns: [],
+    usd: 0,
+    unpriced: 0,
+    subagentUsd: 0,
+    turnMs: 0,
+    hookRuns: 0,
+    mcpLoaded: new Map(),
+    mcpUsed: new Set(),
+  };
+}
+
+/** Session MCP facts: the larger instructions size per server, the union of servers called. */
+function mcpTotals(
+  prior: SessionTotals | undefined,
+  add: SessionDelta,
+): Pick<SessionTotals, "mcpLoaded" | "mcpUsed"> {
+  const loaded: Record<string, number> = { ...prior?.mcpLoaded };
+  for (const [server, tokens] of add.mcpLoaded) {
+    loaded[server] = Math.max(loaded[server] ?? 0, tokens);
+  }
+  const used = [...new Set([...(prior?.mcpUsed ?? []), ...add.mcpUsed])].sort();
+  return { mcpLoaded: loaded, mcpUsed: used };
 }
 
 function applyDelta(owner: string, delta: OwnerDelta): void {
@@ -216,9 +246,10 @@ function applyDelta(owner: string, delta: OwnerDelta): void {
       thinkingMs:
         (prior?.thinkingMs ?? 0) + add.turns.reduce((total, turn) => total + turn.thinkingMs, 0),
       hookRuns: (prior?.hookRuns ?? 0) + add.hookRuns,
+      ...mcpTotals(prior, add),
     };
     if (add.turns.length === 0) {
-      // Only system lines this pass: they extend a session the index already has, never start one.
+      // Only system or attachment lines this pass: they extend a session the index has, never start one.
       if (prior) sessions[sessionId] = { ...prior, ...timing };
       continue;
     }
@@ -303,17 +334,36 @@ export function runIndexPass(
       bytesRead += next - from;
       filesRead += 1;
       const recent = from === 0 || !prior ? [] : [...prior.recent];
+      // The previous turn's context in this thread; unknown when resuming a file indexed before it was kept.
+      let context: number | null = from === 0 ? 0 : (prior?.context ?? null);
       const scope = scopeOf(file);
+      const sessionDelta = (sessionId: string): SessionDelta => {
+        const owner = owners.get(sessionId) ?? UNATTRIBUTED;
+        const delta: OwnerDelta = deltas.get(owner) ?? { months: new Map(), sessions: new Map() };
+        deltas.set(owner, delta);
+        const session = delta.sessions.get(sessionId) ?? emptySessionDelta();
+        delta.sessions.set(sessionId, session);
+        return session;
+      };
       for (const line of lines) {
+        const called = mcpServersUsed(line);
+        if (called !== null) {
+          const session = sessionDelta(called.sessionId);
+          for (const server of called.servers) session.mcpUsed.add(server);
+        }
         const turn = parseTurn(line);
         if (turn === null) {
+          const loaded = parseMcpLoad(line);
+          if (loaded !== null) {
+            const session = sessionDelta(loaded.sessionId);
+            for (const [server, tokens] of Object.entries(loaded.servers)) {
+              session.mcpLoaded.set(server, Math.max(session.mcpLoaded.get(server) ?? 0, tokens));
+            }
+            continue;
+          }
           const activity = parseActivity(line);
           if (activity === null) continue;
-          const owner = owners.get(activity.sessionId) ?? UNATTRIBUTED;
-          const delta: OwnerDelta = deltas.get(owner) ?? { months: new Map(), sessions: new Map() };
-          deltas.set(owner, delta);
-          const session = delta.sessions.get(activity.sessionId) ?? emptySessionDelta();
-          delta.sessions.set(activity.sessionId, session);
+          const session = sessionDelta(activity.sessionId);
           session.turnMs += activity.turnMs;
           session.hookRuns += activity.hookRuns;
           continue;
@@ -335,17 +385,26 @@ export function runIndexPass(
         const row = rows.get(rowKey(key)) ?? emptyRollup();
         rows.set(rowKey(key), row);
         const cost = priceTurn(turn);
-        addTurn(row, turn, cost);
-        const usd = cost === null ? 0 : cost.input + cost.output + cost.cacheRead + cost.cacheWrite;
-        const session = delta.sessions.get(turn.sessionId) ?? emptySessionDelta();
-        delta.sessions.set(turn.sessionId, session);
+        addTurn(row, turn, cost, context);
+        context = contextTokens(turn);
+        const usd =
+          cost === null
+            ? 0
+            : cost.input + cost.output + cost.cacheRead + cost.cacheWrite + cost.webSearch;
+        const session = sessionDelta(turn.sessionId);
         session.turns.push(turn);
         session.usd += usd;
         if (cost === null) session.unpriced += 1;
         if (scope !== "main") session.subagentUsd += usd;
         turns += 1;
       }
-      offsets[file] = { offset: next, size: stat.size, mtimeMs: stat.mtimeMs, recent };
+      offsets[file] = {
+        offset: next,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        recent,
+        ...(context === null ? {} : { context }),
+      };
     }
 
     for (const [owner, delta] of deltas) applyDelta(owner, delta);
@@ -371,7 +430,10 @@ export function loadRollups(owner: string, months: ReadonlyArray<string>): Map<s
   const rows = new Map<string, Rollup>();
   for (const month of months) {
     const stored = readVersioned(path.join(ownerIndexDir(owner), `${month}.json`), "rows");
-    for (const [key, value] of Object.entries(stored)) rows.set(key, value as Rollup);
+    // Rows written before a field existed read it as 0.
+    for (const [key, value] of Object.entries(stored)) {
+      rows.set(key, { ...emptyRollup(), ...(value as Partial<Rollup>) });
+    }
   }
   return rows;
 }

@@ -20,6 +20,7 @@ import {
   upgradeUsage,
   USAGE_SCHEMA_VERSION,
   utcDateString,
+  workDayOf,
 } from "./calc.js";
 import type { Config, UsageState } from "./interfaces/config.interface.js";
 
@@ -635,5 +636,15 @@ describe("colorForPct", () => {
     [1.2, "#F8696B"],
   ])("%s → %s", (pct, color) => {
     expect(colorForPct(pct)).toBe(color);
+  });
+});
+
+describe("workDayOf", () => {
+  it("null without any laboral days; else the month's list, and every day in a month with none", () => {
+    expect(workDayOf({ monthlyCap: 1, laboralDays: {} })).toBeNull();
+    const workDay = workDayOf({ monthlyCap: 1, laboralDays: { "2026": { "10": [19, 20] } } });
+    expect(workDay?.(new Date(2026, 9, 19, 12))).toBe(true);
+    expect(workDay?.(new Date(2026, 9, 18, 12))).toBe(false);
+    expect(workDay?.(new Date(2026, 10, 3, 12))).toBe(true);
   });
 });

@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as AccountModule from "./account.js";
 import type * as CliModule from "./cli.js";
 import type * as InsightsModule from "./insights.js";
+import type * as LiveModule from "./live-tui.js";
 import type * as ReportModule from "./report.js";
 import type * as SharedModule from "./statusline-shared.js";
 
@@ -66,6 +67,16 @@ vi.mock("./report.js", async (importOriginal) => ({
   formatReport: () => "TABLE",
 }));
 
+const sessionFilesMock = vi.fn();
+vi.mock("./session-report.js", () => ({
+  sessionFiles: (prefix: string) => sessionFilesMock(prefix) as unknown,
+  loadSessionModel: (id: string) => ({ id }),
+  renderSessionReport: (_s: unknown, color: boolean, width: number) => [
+    `BURNUP ${String(color)} ${String(width)}`,
+  ],
+  sessionJson: (s: unknown) => s,
+}));
+
 const installStatuslineMock = vi.fn();
 const uninstallStatuslineMock = vi.fn();
 vi.mock("./statusline-install.js", () => ({
@@ -92,6 +103,12 @@ vi.mock("./statusline-shared.js", async (importOriginal) => ({
 const runCalendarTuiMock = vi.fn().mockResolvedValue(0);
 vi.mock("./calendar-tui.js", () => ({
   runCalendarTui: (account: unknown) => runCalendarTuiMock(account) as unknown,
+}));
+
+const runLiveMock = vi.fn().mockResolvedValue(0);
+vi.mock("./live-tui.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof LiveModule>()),
+  runLive: (args: unknown) => runLiveMock(args) as unknown,
 }));
 
 const runSettingsTuiMock = vi.fn().mockResolvedValue(0);
@@ -272,6 +289,7 @@ describe("report", () => {
       "dev_example_com",
       expect.objectContaining({ label: "last 7 days" }),
       "model",
+      null, // no limit samples yet → no $ per 1%
     );
     catchUpMock.mockReturnValueOnce(false);
     writeFeedMock.mockClear();
@@ -279,6 +297,45 @@ describe("report", () => {
     expect(log).toHaveBeenLastCalledWith(JSON.stringify({ rows: [] }, null, 2));
     expect(errors).toHaveBeenCalledWith(expect.stringContaining("Another index pass"));
     expect(writeFeedMock).not.toHaveBeenCalled();
+  });
+
+  it("--session prints one session's burn-up or JSON; a bad id throws", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    sessionFilesMock.mockReturnValue({ id: "abc", files: [] });
+    const { runCli } = await fresh();
+    expect(await runCli(["report", "--session", "abc"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith("BURNUP false 80");
+    expect(await runCli(["report", "--session", "abc", "--json"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(JSON.stringify({ id: "abc" }, null, 2));
+    sessionFilesMock.mockReturnValue("No transcript for session zz");
+    await expect(runCli(["report", "--session", "zz"])).rejects.toThrow(
+      "No transcript for session zz",
+    );
+  });
+
+  it("--chart reaches the formatter; colors and width follow the terminal", async () => {
+    buildReportMock.mockReturnValue({ rows: [] });
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    accountMock.mockReturnValue(null);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    const columns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    Object.defineProperty(process.stdout, "columns", { value: 120, configurable: true });
+    sessionFilesMock.mockReturnValue({ id: "abc", files: [] });
+    try {
+      const { runCli } = await fresh();
+      expect(await runCli(["report", "--chart"])).toBe(0);
+      expect(log).toHaveBeenLastCalledWith("TABLE");
+      expect(await runCli(["report", "--session", "abc"])).toBe(0);
+      expect(log).toHaveBeenLastCalledWith("BURNUP true 120");
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else delete (process.stdout as { isTTY?: boolean }).isTTY;
+      if (columns) Object.defineProperty(process.stdout, "columns", columns);
+      else delete (process.stdout as { columns?: number }).columns;
+    }
   });
 
   it("shows progress on a TTY; bad arguments throw", async () => {
@@ -323,6 +380,22 @@ describe("insights", () => {
     expect(log).toHaveBeenCalledWith("R1 unsnoozed");
     expect(errors).toHaveBeenCalledWith(expect.stringContaining("Another index pass"));
     await expect(runCli(["insights", "--x"])).rejects.toThrow("Unknown insights argument");
+    expect(await runCli(["insights", "--rules"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(
+      expect.stringContaining("What cc-daily-usage insights checks"),
+    );
+    expect(await runCli(["insights", "--rules", "--json"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining('"found": false'));
+  });
+});
+
+describe("live", () => {
+  it("passes --once to the live view; rejects unknown flags", async () => {
+    runLiveMock.mockResolvedValue(0);
+    const { runCli } = await fresh();
+    expect(await runCli(["live", "--once"])).toBe(0);
+    expect(runLiveMock).toHaveBeenCalledWith({ once: true });
+    await expect(runCli(["live", "--x"])).rejects.toThrow("Unknown live argument: --x");
   });
 });
 

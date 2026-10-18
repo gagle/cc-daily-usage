@@ -13,6 +13,7 @@ import { loadApiCache, loadConfig, loadUsage, saveConfig, saveUsage } from "./co
 import type { ComputedUsage } from "./interfaces/calc.interface.js";
 import type { ApiCache, Config, UsageState } from "./interfaces/config.interface.js";
 import { requestApiRefresh } from "./refresh.js";
+import { type DayBreakdown, dayBreakdown } from "./report.js";
 
 // A dependency-free terminal UI: pure model → string rendering, a pure key reducer, and a thin raw-mode
 // loop. No React/Ink: the first frame paints at Node's own startup speed.
@@ -152,6 +153,7 @@ export interface CalendarModel {
   readonly capEdit: string | null;
   readonly dayEdit: DayEditSession | null;
   readonly notice: string | null; // one-shot message under the grid, cleared by the next key
+  readonly detail: DayBreakdown | null; // `d`: where the cursor day's $ went (from the transcript index)
 }
 
 export function initialModel(snapshot: CalendarSnapshot): CalendarModel {
@@ -162,6 +164,7 @@ export function initialModel(snapshot: CalendarSnapshot): CalendarModel {
     capEdit: null,
     dayEdit: null,
     notice: null,
+    detail: null,
   };
 }
 
@@ -264,6 +267,7 @@ export interface CalendarEffects {
   saveConfig(config: Config): void;
   saveUsage(usage: UsageState): void;
   snapshot(): CalendarSnapshot;
+  dayBreakdown(day: string): DayBreakdown;
 }
 
 function arrowDelta(kind: Key["kind"]): number | null {
@@ -403,6 +407,14 @@ export function reduceKey(
   if (model.dayEdit !== null) return reduceDayEdit(base, model.dayEdit, key, effects);
   if (model.capEdit !== null) return reduceCapEdit(base, model.capEdit, key, effects);
 
+  if (key.kind === "char" && key.char === "d") {
+    const { year, month, day } = model.cursor;
+    return {
+      ...base,
+      detail: model.detail === null ? effects.dayBreakdown(isoDate(year, month, day)) : null,
+    };
+  }
+  if (key.kind === "escape" && model.detail !== null) return { ...base, detail: null };
   if (key.kind === "escape" || (key.kind === "char" && key.char === "q")) return null;
   if (key.kind === "char" && key.char === "c") {
     if (model.snapshot.capFromAnthropic) {
@@ -453,7 +465,15 @@ export function reduceKey(
     return toggleLaboral(base, effects);
   }
   const delta = arrowDelta(key.kind);
-  if (delta !== null) return { ...base, cursor: moveCursor(model.cursor, delta) };
+  if (delta !== null) {
+    const cursor = moveCursor(model.cursor, delta);
+    // An open day detail follows the cursor.
+    const detail =
+      model.detail === null
+        ? null
+        : effects.dayBreakdown(isoDate(cursor.year, cursor.month, cursor.day));
+    return { ...base, cursor, detail };
+  }
   return base;
 }
 
@@ -681,14 +701,39 @@ function renderHint(model: CalendarModel, style: RenderStyle): string {
 }
 
 /** One full frame as lines. Pure. */
+function renderDetail(detail: DayBreakdown, style: RenderStyle): Array<string> {
+  if (detail.usd === 0 && detail.sessions.length === 0) {
+    return [
+      sgr(
+        style,
+        "2",
+        `${detail.day}: no transcript spend indexed (cc-daily-usage report catches up)`,
+      ),
+    ];
+  }
+  const list = (entries: ReadonlyArray<readonly [string, number]>): string =>
+    entries.length === 0 ? "—" : entries.map(([name, usd]) => `${name} ${money(usd)}`).join(" · ");
+  return [
+    sgr(style, "1", `${detail.day} · ${money(detail.usd)} API-equivalent, from transcripts`),
+    `  sessions  ${list(detail.sessions)}`,
+    `  models    ${list(detail.models.map(([model, usd]) => [model.replace(/^claude-/, ""), usd]))}`,
+    `  projects  ${list(detail.projects)}`,
+  ];
+}
+
 export function renderCalendar(model: CalendarModel, style: RenderStyle): ReadonlyArray<string> {
   return [
     ...renderStats(model, style),
     "",
     ...renderBanners(model, style),
     ...renderGrid(model, style),
+    ...(model.detail === null ? [] : renderDetail(model.detail, style)),
     renderHint(model, style),
-    sgr(style, "2", "←→↑↓ move  Tab month  [/] year  Space laboral  u edit $  c cap  q quit"),
+    sgr(
+      style,
+      "2",
+      "←→↑↓ move  Tab month  [/] year  Space laboral  d day detail  u edit $  c cap  q quit",
+    ),
   ];
 }
 
@@ -713,6 +758,7 @@ export async function runCalendarTui(account: Account | null): Promise<number> {
       saveUsage(key, usage);
     },
     snapshot: () => computeSnapshot(account),
+    dayBreakdown: (day) => dayBreakdown(key, day),
   };
   let model = initialModel(effects.snapshot());
 

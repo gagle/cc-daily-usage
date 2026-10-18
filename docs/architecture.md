@@ -72,7 +72,15 @@ statusline-install.ts  install / upgrade / uninstall of the shim
 statusline-shared.ts   installer helpers, settings.json merges (statusLine, hooks, subagentStatusLine), atomic settings write
 statusline-capture-install.ts  capture-only fallback for a foreign statusline
 subagent-line.ts       hidden --subagent-statusline: agent-panel rows (model, effort, tokens, context %)
+meter.ts               pure terminal meters: bar, stacked bar, sparkline, the context-bar color ramp
+session-model.ts       pure per-session model from transcript turns ($ split, time series, cache estimate)
+live-render.ts         pure frame of `live`; summary rows shared with `report --session`
+live-tui.ts            `live`: tails active transcripts, reads feed.json, 1 s redraw loop (read-only)
+session-report.ts      `report --session`: one session's files → burn-up and summary
 ```
+
+`live` and `report --session` read transcripts on their own; they never write
+the index or any file. See `docs/live.md`.
 
 ## Data flow
 

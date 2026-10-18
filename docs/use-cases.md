@@ -58,7 +58,8 @@ Non-TTY: one frame on stdout, then exit.
 | `Space` / `Enter`      | toggle laboral on today or a future day; past days are locked               |
 | `u`                    | redistribute $ across the past days of the month (today and later are live) |
 | `c`                    | edit the local cap; refused with a note when Anthropic owns the cap         |
-| `q` / `Esc` / `Ctrl+C` | quit                                                                        |
+| `d`                    | day detail under the grid (top sessions, models, projects); follows arrows  |
+| `q` / `Esc` / `Ctrl+C` | quit (`Esc` first closes an open day detail)                                |
 
 Day cells: today is bold, underlined, cyan, labelled `today` with a `•` live
 amount; past days are dim; laboral green, off gray; the cursor is inverse.
@@ -79,15 +80,25 @@ the subagent line, then per account each file's `schemaVersion` (garbled or
 newer files fail), a dead `refresh.lock`, the age of the last usage reading
 and `feed.json`, and the plan (tier, subscription status, trial end; a warn
 when the subscription is not active) with the Claude Code version of the
-newest session.
+newest session. Last: the transcript index's last pass and the bytes it left
+behind (a warn when behind or never run).
 
 ## `cc-daily-usage report`
 
-API-equivalent $ from local transcripts; see `docs/transcript-index.md`.
+API-equivalent $ from local transcripts, `--chart` bars, `--session <id>` for
+one session's $ over time; see `docs/transcript-index.md`.
+
+## `cc-daily-usage live`
+
+Full-screen view of every session active in the last 30 minutes, redrawn
+each second: the advisor (scorecard against a lean session, what to do now
+and why) or, with Tab, where the $ went bar by bar. `--once` prints one frame.
+Read-only. See `docs/live.md`.
 
 ## `cc-daily-usage insights`
 
-Ranked findings with $ and the exact fix; see `docs/coach.md`.
+Ranked findings with $, why and the exact fix; `--rules` explains every rule;
+see `docs/coach.md`.
 
 ## Hidden modes
 
@@ -104,7 +115,7 @@ Ranked findings with $ and the exact fix; see `docs/coach.md`.
 Each is guarded on its own data; a missing field hides one part, and a line
 with nothing to show is dropped. `renderStatusline` places the parts by the
 layout from `statusline.json` (`loadLayout`, see `cc-daily-usage settings`);
-the default is every part but the coach tip and the limit warnings on one
+the default is every part but the next action and the limit warnings on one
 line, in this order, and those two on a second line (`DEFAULT_LAYOUT`).
 Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 
@@ -132,5 +143,6 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 12. Budget plans: `$month/$cap (pct)`, then `Nm old` while the ledger fetch fails.
 13. `💳 pct` — Claude apps gateway spend limit, when present; `💳 63% $62.80/$100/mo`
     once Claude Code (v2.1.284+) sends the dollar amounts and period.
-14. `» <tip> ~$X/week` — the top coach finding (`docs/coach.md`), on its own
-    line by default.
+14. `» <action>` — the next action: what to do now (cache about to go cold,
+    cold cache, deep context, a limit at risk) or the week's top habit with its
+    $ (`docs/coach.md`); on its own line by default.

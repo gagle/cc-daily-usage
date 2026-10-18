@@ -127,6 +127,90 @@ describe("ranges", () => {
   });
 });
 
+describe("efficiency note", () => {
+  it("shares of new work, carry and rewrite, and $ per MTok with its band; none without split rows", async () => {
+    const { formatReport } = await fresh();
+    const { emptyRollup } = await import("./transcript-parse.js");
+    const total = {
+      ...emptyRollup(),
+      usdInput: 1,
+      usdNewWork: 5,
+      usdCarry: 4,
+      usdRewrite: 1,
+      growth: 100_000,
+    };
+    const base = {
+      owner: "acct",
+      range: { label: "x", from: "2026-10-01", to: "2026-10-07" },
+      by: "model" as const,
+      rows: [{ label: "m", rollup: total }],
+      total,
+      subagentUsd: 0,
+      unattributedUsd: 0,
+      gaps: [],
+      activity: { turnMs: 0, thinkingMs: 0, hookRuns: 0, entrypoints: {} },
+    };
+    expect(formatReport(base)).toContain(
+      "Efficiency: new work 50% · carry 40% · rewrite 10% · $100/MTok of new work (high)",
+    );
+    const noGrowth = { ...total, growth: 0 };
+    expect(formatReport({ ...base, total: noGrowth })).toMatch(/rewrite 10%$/m);
+    expect(
+      formatReport({ ...base, total: { ...total, usdNewWork: 0, usdCarry: 0, usdRewrite: 0 } }),
+    ).not.toContain("Efficiency");
+  });
+});
+
+describe("dayBreakdown", () => {
+  it("one day's $ with top sessions, models and projects; empty for a day with nothing", async () => {
+    sessionsMap({ s1: 1 });
+    await indexFixtures();
+    const { dayBreakdown } = await fresh();
+    const day = dayBreakdown("acct", "2026-10-07");
+    expect(day.usd).toBeGreaterThan(0);
+    expect(day.models.map(([model]) => model)).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);
+    expect(day.projects.map(([project]) => project)).toEqual(["app", "lib"]);
+    expect(day.sessions.map(([label]) => label)).toEqual(["s1 app"]);
+    expect(dayBreakdown("acct", "2026-01-01")).toEqual({
+      day: "2026-01-01",
+      usd: 0,
+      sessions: [],
+      models: [],
+      projects: [],
+    });
+    expect(dayBreakdown("unattributed", "2026-10-07").sessions.length).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("--by session extras", () => {
+  it("$ per 100 changed lines; a session no account map knows", async () => {
+    sessionsMap({ s1: 1 });
+    await indexFixtures();
+    const file = path.join(
+      fakeHome,
+      ".config",
+      "cc-daily-usage",
+      "accounts",
+      "acct",
+      "sessions-map.json",
+    );
+    const map = JSON.parse(readFileSync(file, "utf8")) as {
+      sessions: Record<string, { linesAdded: number }>;
+    };
+    (map.sessions.s1 as { linesAdded: number }).linesAdded = 200;
+    writeFileSync(file, JSON.stringify(map));
+    const { buildReport, formatReport, resolveRange } = await fresh();
+    const week = resolveRange("week", NOW);
+    if (!week) throw new Error("range");
+    const report = buildReport("acct", week, "session");
+    const usd = report.rows[0]?.rollup.usdInput ?? 0;
+    expect(report.rows[0]?.usdPer100Lines).toBeCloseTo(usd / 2);
+    expect(formatReport(report)).toContain(`$${(usd / 2).toFixed(2)}`);
+    const unclaimed = buildReport("unattributed", week, "session");
+    expect(unclaimed.rows.every((row) => row.usdPer100Lines === null)).toBe(true);
+  });
+});
+
 describe("parseReportArgs", () => {
   it("defaults, flags and errors", async () => {
     const { parseReportArgs } = await fresh();
@@ -135,13 +219,22 @@ describe("parseReportArgs", () => {
       by: "model",
       json: false,
       account: null,
+      chart: false,
+      session: null,
     });
     expect(parseReportArgs(["2026-09", "--by", "day", "--json", "--account", "k"])).toEqual({
       period: "2026-09",
       by: "day",
       json: true,
       account: "k",
+      chart: false,
+      session: null,
     });
+    expect(parseReportArgs(["--chart", "--session", "ab12"])).toMatchObject({
+      chart: true,
+      session: "ab12",
+    });
+    expect(parseReportArgs(["--session"])).toContain("--session needs a session id");
     expect(parseReportArgs(["--by", "colour"])).toContain("--by needs one of");
     expect(parseReportArgs(["--by"])).toContain("--by needs one of");
     expect(parseReportArgs(["--account"])).toBe("--account needs an account key");
@@ -159,11 +252,11 @@ describe("buildReport / formatReport", () => {
 
     const byModel = buildReport("acct", week, "model");
     expect(byModel.rows.map((row) => row.label)).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);
-    expect(byModel.subagentUsd).toBe(6);
-    expect(byModel.unattributedUsd).toBe(0); // unpriced only
+    expect(byModel.subagentUsd).toBeCloseTo(6.01); // + one web search
+    expect(byModel.unattributedUsd).toBeCloseTo(0.01); // unpriced model: only its web search has a price
     const text = formatReport(byModel);
     expect(text).toContain("API-equivalent estimate");
-    expect(text).toMatch(/Subagents \$6\.00 \(4\d%\)/);
+    expect(text).toMatch(/Subagents \$6\.01 \(4\d%\)/);
     expect(text).toContain("thinking $");
 
     expect(buildReport("acct", week, "project").rows.map((row) => row.label)).toEqual([
@@ -182,6 +275,50 @@ describe("buildReport / formatReport", () => {
       "cache write",
     ]);
     expect(buildReport("acct", week, "session").rows[0]?.label).toBe("s1 app");
+
+    // --by session: share of the week from $ per 1%, $ per 100 changed lines from the statusline map
+    const sessions = buildReport("acct", week, "session", 2);
+    expect(sessions.rows[0]?.weekPct).toBeCloseTo((sessions.rows[0]?.rollup.usdInput ?? 0) / 2);
+    expect(sessions.rows[0]?.usdPer100Lines).toBeNull(); // no lines changed
+    const sessionText = formatReport(sessions);
+    expect(sessionText).toMatch(/% of week +\$\/100 lines/);
+    expect(sessionText).toMatch(/s1 app +— +— +— +— +\$\d+\.\d\d +≈\d+\.\d% +—/);
+    expect(buildReport("acct", week, "session", 0).rows[0]?.weekPct).toBeNull();
+    expect(buildReport("acct", week, "session").rows[0]?.weekPct).toBeNull();
+    expect(formatReport(buildReport("acct", week, "session"))).toMatch(/s1 app .* — +—$/m);
+
+    // --chart: one stacked bar per row scaled to the largest, a legend, days in time order
+    const chart = formatReport(byModel, { chart: true, color: false });
+    expect(chart).toMatch(/claude-opus-5-5 .* [iorws]{30}$/m);
+    expect(chart).toMatch(/claude-sonnet-5-5 .* [iorws]{1,29}$/m);
+    expect(chart).toContain(
+      "chart: i input · o output · r cache read · w cache write · s web search",
+    );
+    expect(formatReport(byModel, { chart: true, color: true })).toContain("\x1b[38;2;");
+    const twoDays = {
+      ...byModel,
+      by: "day" as const,
+      rows: [
+        { label: "2026-10-07", rollup: byModel.total },
+        {
+          label: "2026-10-06",
+          rollup: {
+            ...byModel.total,
+            usdInput: 0,
+            usdOutput: 0,
+            usdCacheRead: 0,
+            usdCacheWrite: 0,
+            webSearches: 0,
+          },
+        },
+      ],
+    };
+    const days = formatReport(twoDays, { chart: true, color: false }).split("\n");
+    expect(days[1]).toMatch(/^2026-10-06 .*\$0\.00$/); // a $0 day has no bar
+    expect(days[2]).toMatch(/^2026-10-07 /);
+    expect(formatReport({ ...byModel, rows: [] }, { chart: true, color: false })).toMatch(
+      /^No usage/,
+    );
     expect(byModel.activity).toEqual({ turnMs: 0, thinkingMs: 0, hookRuns: 0, entrypoints: {} });
     expect(text).not.toContain("Turn time");
     const busy = formatReport({
@@ -325,10 +462,10 @@ describe("buildReport / formatReport", () => {
     const week = resolveRange("week", NOW);
     if (!week) throw new Error("range");
     const report = buildReport("acct", week, "model");
-    expect(report.unattributedUsd).toBe(6);
+    expect(report.unattributedUsd).toBeCloseTo(6.01);
     expect(formatReport(report)).toMatch(/^No usage in last 7 days\./);
     const withRows = { ...report, rows: [{ label: "x", rollup: report.total }] };
-    expect(formatReport(withRows)).toContain("$6.00 more in sessions no account claimed");
+    expect(formatReport(withRows)).toContain("$6.01 more in sessions no account claimed");
     expect(hasUnpricedTurns("acct", NOW)).toBe(false);
     expect(formatReport({ ...withRows, unattributedUsd: 0 })).toContain("Subagents $0.00 (0%)");
   });

@@ -20,8 +20,7 @@ cache-rehydration check.
   (0.05× Opus 5.5, 0.025× Fable 5.1), 5-minute write 1.25×, 1-hour write 2×.
 - Claude Code reports it all in the statusline payload as `prompt_cache`
   (v2.1.251+): `warm`, `ttl`, `expires_at`, `recache_tokens_if_cold`,
-  `miss_recache_tokens`, `hit_ratio`, `last_miss_cause` (not shown: the
-  `$` figures already say what a miss costs).
+  `miss_recache_tokens`, `hit_ratio`, `last_miss_at`, `last_miss_cause`.
 
 ## Formulas (`forecastCache`)
 
@@ -33,6 +32,7 @@ nextWarm   = context_window.total_input_tokens × cacheRead
 nextCold   = recache_tokens_if_cold × writeRate        (null after /compact)
 premium    = max(0, nextCold − nextWarm)               what letting it expire costs
 sessionMiss= miss_recache_tokens × (writeRate − cacheRead)   already re-paid
+recentMiss = last_miss_cause.causes ("_" → " "), only within RECENT_MISS_S (120 s) of last_miss_at
 hint       = warm and premium ≥ $1 → "break" ; cold and nextCold ≥ $1 → "clear" ;
              context ≥ 60% → "compact"
 ```
@@ -59,14 +59,16 @@ Part 7 (`cache`) of the statusline layout (see `docs/use-cases.md`).
 
 ```
 🔥 cold in 4m · $0.10/msg · if cold +$2.40
-❄ cold · next msg ~$2.45
+❄ cold · next msg ~$2.45 · miss: tools changed
 ```
 
 - `$/msg` — what each message costs now with a warm cache (the table's first
   column for your context). `if cold +$` — the extra the next message costs if the cache goes cold
   first (expiry, `/model`); a forecast, not a miss that happened.
-- No advice text and no miss cause on the line: they only widened it. Miss
-  causes are booked per day (below) and feed the coach (`insights`).
+- `miss: <causes>` shows for two minutes after a miss (`recentMiss`), so the
+  cause is on screen when the $ jumps; then the line is short again. No advice
+  text. Miss causes are booked per day (below) and feed the coach
+  (`insights`).
 
 Color: warm fades green → yellow → orange with the share of the TTL left
 (`warmColor` in `src/statusline-render.ts`); cold is red. The line re-renders

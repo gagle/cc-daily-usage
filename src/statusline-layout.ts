@@ -19,7 +19,11 @@ export const PARTS = [
   { id: "today", label: "Today's budget (Team)", sample: "$4.10/$9.50 (43%)" },
   { id: "month", label: "Month's budget (Team)", sample: "$120.00/$200.00 (60%)" },
   { id: "spend", label: "Spend limit", sample: "💳 40%" },
-  { id: "coach", label: "Top saving tip", sample: "» Subagents on a premium model ~$12/week" },
+  {
+    id: "coach",
+    label: "Next action",
+    sample: "» /compact at the next break · 520k re-read each turn",
+  },
 ] as const;
 
 export type PartId = (typeof PARTS)[number]["id"];

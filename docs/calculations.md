@@ -105,3 +105,9 @@ empty/0 without a schema bump. `freshUsage(now)` seeds new files.
 - enterprise/team → `true`, pro/max → `false`, else `undefined`.
 - sessions untouched for 2 days are dropped (object kept when nothing changes).
 - color buckets: `<0.25` green · `<0.5` yellow-green · `<0.75` yellow · `<1` orange · `≥1` red. `ccColor()` in `src/statusline-render.ts` holds the same buckets as ANSI triplets.
+
+## `workDayOf(config)`
+
+The 7-day runway's work-day test (`docs/history-and-feed.md`): null (every
+day, clock time) when `laboralDays` is empty; else a local day counts when its
+month lists it, and every day of a month with no list counts.

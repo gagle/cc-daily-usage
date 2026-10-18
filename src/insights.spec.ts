@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -45,10 +45,16 @@ afterEach(() => {
 describe("parseInsightsArgs", () => {
   it("defaults, window, json, snooze, errors", async () => {
     const { parseInsightsArgs } = await fresh();
-    expect(parseInsightsArgs([])).toEqual({ window: "week", json: false, snooze: null });
-    expect(parseInsightsArgs(["--month", "--json", "--snooze", "R1", "7d"])).toEqual({
+    expect(parseInsightsArgs([])).toEqual({
+      window: "week",
+      json: false,
+      rules: false,
+      snooze: null,
+    });
+    expect(parseInsightsArgs(["--month", "--json", "--rules", "--snooze", "R1", "7d"])).toEqual({
       window: "month",
       json: true,
+      rules: true,
       snooze: { id: "R1", days: 7 },
     });
     expect(parseInsightsArgs(["--month", "--week"])).toMatchObject({ window: "week" });
@@ -65,7 +71,7 @@ describe("formatInsights", () => {
     expect(formatInsights([], "week")).toBe("Nothing to change this week.");
     const text = formatInsights(
       [
-        FINDING,
+        { ...FINDING, why: "Fast mode bills every token at 2x." },
         {
           ...FINDING,
           id: "R8",
@@ -79,13 +85,38 @@ describe("formatInsights", () => {
     );
     expect(text).toContain("R2  Fast mode  ~$4.00/week");
     expect(text).toContain("fix: Turn fast mode off (/fast) → fastMode=false");
-    expect(text).toContain("R8  Fast mode  —/week (snoozed until 2026-10-14)");
+    expect(text).toContain("    why: Fast mode bills every token at 2x.\n");
+    expect(text).toContain("\n\nR8  Fast mode (snoozed until 2026-10-14)\n"); // no $: no amount; blocks spaced
     expect(text).toContain("fix: Slow down\n");
     expect(text).toContain("fix: Switch → /model");
     expect(text).toContain("API-equivalent estimates");
+    expect(text).toContain("Every rule explained: cc-daily-usage insights --rules");
     expect(
       formatInsights([{ ...FINDING, fix: { kind: "env", key: "K", text: "t" } }], "week"),
     ).toContain("→ K=");
+  });
+});
+
+describe("formatRules / rulesWithFound", () => {
+  it("every rule with checks, why, $ and fix; ● marks the ones found", async () => {
+    const { formatRules, rulesWithFound } = await fresh();
+    const { RULE_INFO } = await import("./rules.js");
+    const text = formatRules([FINDING], "week");
+    expect(text).toMatch(/^What cc-daily-usage insights checks, over the last 7 days/);
+    expect(text).toContain(
+      "● R2  Fast mode\n       checks  Turns run in fast mode.\n       why     ",
+    );
+    expect(text).toContain("  R1  Subagents on a premium model\n");
+    for (const rule of RULE_INFO) {
+      expect(text).toContain(rule.why);
+      expect(text).toContain(rule.estimate);
+      expect(text).toContain(rule.fix);
+    }
+    expect(formatRules([], "month")).toContain("over the last 30 days");
+    expect(rulesWithFound([FINDING]).find((rule) => rule.id === "R2")).toMatchObject({
+      found: true,
+    });
+    expect(rulesWithFound([]).every((rule) => !rule.found)).toBe(true);
   });
 });
 
@@ -153,5 +184,44 @@ describe("snoozeRule / adviceFor", () => {
     expect(
       adviceFor("acct", "week", feed, { monthlyCap: 1, laboralDays: {} }, usage, NOW)[0]?.id,
     ).toBe("R2");
+  });
+});
+
+const fs = (file: string): number => statSync(file).size;
+
+describe("instructionFiles", () => {
+  it("global CLAUDE.md + its @imports; per project CLAUDE.md variants and MEMORY.md; sizes ÷ 4", async () => {
+    const claude = path.join(fakeHome, ".claude");
+    mkdirSync(path.join(claude, "rules"), { recursive: true });
+    writeFileSync(
+      path.join(claude, "CLAUDE.md"),
+      "x".repeat(40) + "\n@RULES.md\n@~/rules/a.md\n@missing.md\n",
+    );
+    writeFileSync(path.join(claude, "RULES.md"), "y".repeat(400));
+    mkdirSync(path.join(fakeHome, "rules"), { recursive: true });
+    writeFileSync(path.join(fakeHome, "rules", "a.md"), ""); // empty: not counted
+    const project = path.join(fakeHome, "work", "app");
+    mkdirSync(path.join(project, ".claude"), { recursive: true });
+    writeFileSync(path.join(project, "CLAUDE.md"), "z".repeat(8000));
+    writeFileSync(path.join(project, ".claude", "CLAUDE.md"), "w".repeat(4));
+    const memory = path.join(claude, "projects", project.replace(/[^A-Za-z0-9]/g, "-"), "memory");
+    mkdirSync(memory, { recursive: true });
+    writeFileSync(path.join(memory, "MEMORY.md"), "m".repeat(10));
+    const { instructionFiles } = await fresh();
+    const files = instructionFiles([project, ""]);
+    expect(
+      files.map((file) => [path.relative(fakeHome, file.path), file.project, file.tokens]),
+    ).toEqual([
+      [".claude/CLAUDE.md", null, Math.ceil(fs(path.join(claude, "CLAUDE.md")) / 4)],
+      [".claude/RULES.md", null, 100],
+      ["work/app/CLAUDE.md", project, 2000],
+      ["work/app/.claude/CLAUDE.md", project, 1],
+      [path.relative(fakeHome, path.join(memory, "MEMORY.md")), project, 3],
+    ]);
+  });
+
+  it("no global file: nothing global", async () => {
+    const { instructionFiles } = await fresh();
+    expect(instructionFiles([])).toEqual([]);
   });
 });

@@ -16,6 +16,7 @@ const DOC_MAP = {
     "src/notice.ts",
     "src/statusline-render.ts",
     "src/statusline-install.ts",
+    "src/rules.ts",
   ],
   "docs/README.md": ["src/**", "assets/**"],
   "docs/architecture.md": [
@@ -32,7 +33,20 @@ const DOC_MAP = {
     "bin/**",
   ],
   "docs/calculations.md": ["src/calc.ts", "src/clock.ts"],
-  "docs/coach.md": ["src/rules.ts", "src/insights.ts", "src/statusline-render.ts"],
+  "docs/coach.md": [
+    "src/rules.ts",
+    "src/insights.ts",
+    "src/statusline-render.ts",
+    "src/next-action.ts",
+  ],
+  "docs/live.md": [
+    "src/advisor.ts",
+    "src/live-tui.ts",
+    "src/live-render.ts",
+    "src/session-model.ts",
+    "src/session-report.ts",
+    "src/meter.ts",
+  ],
   "docs/transcript-index.md": [
     "src/transcript-index.ts",
     "src/transcript-parse.ts",

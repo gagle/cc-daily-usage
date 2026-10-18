@@ -84,7 +84,9 @@ export interface StatuslineState {
   readonly cache: CacheForecast | null;
   readonly runway?: { readonly fiveHour: Runway | null; readonly sevenDay: Runway | null };
   readonly coach?: {
+    readonly id?: string;
     readonly title: string;
+    readonly action?: string | null; // the rule's short action; null in feeds written before it existed
     readonly usd: number | null;
     readonly window: string;
   } | null;

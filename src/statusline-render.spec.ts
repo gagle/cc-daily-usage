@@ -46,6 +46,7 @@ function forecast(overrides: Partial<CacheForecast> = {}): CacheForecast {
     nextColdUsd: 1.24,
     missPremiumUsd: 1.2,
     sessionMissUsd: 0,
+    recentMiss: null,
     ...overrides,
   };
 }
@@ -299,7 +300,17 @@ describe("renderStatusline", () => {
           NOW,
         ),
       ),
-    ).toMatch(/❄ cold · next msg ~\$1\.24$/);
+    ).toMatch(/❄ cold · next msg ~\$1\.24$/m);
+    expect(
+      plain(
+        renderStatusline(
+          payload,
+          state({ cache: forecast({ warm: false, recentMiss: "tools changed" }) }),
+          "",
+          NOW,
+        ),
+      ),
+    ).toMatch(/❄ cold · next msg ~\$1\.24 · miss: tools changed$/m);
     expect(
       plain(
         renderStatusline(
@@ -444,17 +455,19 @@ describe("history parts", () => {
   });
 });
 
-describe("coach part", () => {
-  it("shows the top tip with its $ and window; no $ for a rule without one; hidden without a tip", () => {
-    const line = (coach: StatuslineState["coach"]): string =>
-      plain(renderStatusline(payload, state({ coach }), "", NOW, [["coach"]]));
-    expect(line({ title: "Fast mode", usd: 12.4, window: "week" })).toBe(
-      "» Fast mode ~$12.40/week",
-    );
-    expect(line({ title: "Running out early", usd: null, window: "week" })).toBe(
-      "» Running out early",
-    );
-    expect(line(null)).toBe("");
+describe("next action part", () => {
+  it("renders the next action; urgent ones orange; hidden when there is none", () => {
+    const line = (overrides: Partial<StatuslineState>, colored = false): string => {
+      const out = renderStatusline(payload, state(overrides), "", NOW, [["coach"]]);
+      return colored ? out : plain(out);
+    };
+    expect(
+      line({ coach: { title: "Fast mode", action: "/fast off", usd: 12.4, window: "week" } }),
+    ).toBe("» /fast off · ~$12.40/week");
+    const cold = line({ cache: forecast({ warm: false, nextColdUsd: 2.45 }) }, true);
+    expect(cold).toContain("244;164;96");
+    expect(plain(cold)).toBe("» new task? /clear · same task? /compact first");
+    expect(line({ coach: null })).toBe("");
     expect(plain(renderStatusline(payload, null, "", NOW, [["coach"]]))).toBe("");
   });
 });

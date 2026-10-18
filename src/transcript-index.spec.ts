@@ -231,6 +231,87 @@ describe("runIndexPass", () => {
     expect(loadSessionTotals("acct").s1).toMatchObject({ turnMs: 40_000, turns: 1 });
   });
 
+  it("efficiency split: known context per thread, kept across passes; a legacy offset skips one turn", async () => {
+    sessionsMap("acct", ["s1"]);
+    const main = path.join(projectDir(), "s1.jsonl");
+    writeFileSync(main, line("e1", {}, { input_tokens: 1000, output_tokens: 100 }));
+    const { runIndexPass, loadRollups, INDEX_DIR } = await fresh();
+    runIndexPass({ now: NOW });
+    const row = (): Record<string, number> =>
+      [...loadRollups("acct", ["2026-10"]).values()][0] as unknown as Record<string, number>;
+    expect(row()).toMatchObject({ growth: 1100, freshSplit: 1000, rewriteTokens: 0 });
+    appendFileSync(main, line("e2", {}, { input_tokens: 1000, output_tokens: 0 }));
+    runIndexPass({ now: NOW });
+    // second turn: same 1000-token context sent again → a rewrite, no growth
+    expect(row()).toMatchObject({ growth: 1100, freshSplit: 2000, rewriteTokens: 1000 });
+
+    // An offsets file from before `context` was kept: the next turn has no split.
+    const offsetsFile = path.join(INDEX_DIR, "offsets.json");
+    const offsets = JSON.parse(readFileSync(offsetsFile, "utf8")) as {
+      files: Record<string, { context?: number }>;
+    };
+    delete (offsets.files[main] as { context?: number }).context;
+    writeFileSync(offsetsFile, JSON.stringify(offsets));
+    appendFileSync(main, `${JSON.stringify({ type: "user" })}\n`); // no turn: context stays unknown
+    runIndexPass({ now: NOW });
+    appendFileSync(main, line("e3", {}, { input_tokens: 5000 }));
+    runIndexPass({ now: NOW });
+    expect(row()).toMatchObject({ freshSplit: 2000, turns: 3 });
+  });
+
+  it("records MCP servers loaded (instructions size) and called, per session", async () => {
+    sessionsMap("acct", ["s1"]);
+    const delta = (names: Array<unknown>, blocks: Array<unknown>): string =>
+      `${JSON.stringify({
+        type: "attachment",
+        sessionId: "s1",
+        attachment: { type: "mcp_instructions_delta", addedNames: names, addedBlocks: blocks },
+      })}\n`;
+    const call = (id: string, tool: string): string =>
+      line(id, {
+        message: {
+          id: `m-${id}`,
+          model: "claude-opus-5-5",
+          usage: { input_tokens: 1 },
+          content: [{ type: "tool_use", name: tool }],
+        },
+      });
+    const main = path.join(projectDir(), "s1.jsonl");
+    writeFileSync(
+      main,
+      delta(["plugin:figma:figma", "tokensave"], ["x".repeat(400), "y".repeat(40)]) +
+        call("c1", "mcp__tokensave__tokensave_context") +
+        call("c1", "mcp__zvec_grep__search"), // second copy of the same turn: still read for the call
+    );
+    const { runIndexPass, loadSessionTotals } = await fresh();
+    runIndexPass({ now: NOW });
+    expect(loadSessionTotals("acct").s1).toMatchObject({
+      turns: 1,
+      mcpLoaded: { plugin_figma_figma: 100, tokensave: 10 },
+      mcpUsed: ["tokensave", "zvec_grep"],
+    });
+    appendFileSync(main, delta(["tokensave"], ["y".repeat(8)]));
+    runIndexPass({ now: NOW });
+    expect(loadSessionTotals("acct").s1?.mcpLoaded).toEqual({
+      plugin_figma_figma: 100,
+      tokensave: 10,
+    });
+  });
+
+  it("rows indexed before a rollup field existed read it as 0", async () => {
+    const { loadRollups, ownerIndexDir } = await fresh();
+    mkdirSync(ownerIndexDir("acct"), { recursive: true });
+    writeFileSync(
+      path.join(ownerIndexDir("acct"), "2026-10.json"),
+      JSON.stringify({ schemaVersion: 1, rows: { k: { turns: 2 } } }),
+    );
+    expect(loadRollups("acct", ["2026-10"]).get("k")).toMatchObject({
+      turns: 2,
+      growth: 0,
+      usdRewrite: 0,
+    });
+  });
+
   it("remembers only the newest dedupe keys", async () => {
     const main = path.join(projectDir(), "s3.jsonl");
     writeFileSync(main, Array.from({ length: 70 }, (_, i) => line(`k${String(i)}`)).join(""));

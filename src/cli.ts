@@ -15,9 +15,12 @@ Operations:
   doctor            Check Node, Claude Code, the statusline, hooks and every account's files
   report [period]   API-equivalent $ from your local transcripts. period: today | week | month | 30d |
                     YYYY-MM (default week). --by model|project|component|subagent|session|day,
-                    --json, --account <key|unattributed>
-  insights          What to change to spend less, with $ and the exact fix. --week (default) | --month,
-                    --json, --snooze <rule> <N>d (0d clears)
+                    --chart (a stacked $ bar per row), --json, --account <key|unattributed>,
+                    --session <id> (one session's $ over time, events and where it went)
+  insights          What to change to spend less, with $, why and the exact fix. --week (default) |
+                    --month, --json, --rules (every rule explained), --snooze <rule> <N>d (0d clears)
+  live              Real-time meters of every active session: $ by component, model and subagent, cache,
+                    context, limits or budget. --once prints one frame
 
 Flags:
   -h, --help        Print this help and exit
@@ -190,20 +193,44 @@ async function runReportOperation(argv: ReadonlyArray<string>): Promise<number> 
   const report = await import("./report.js");
   const args = report.parseReportArgs(argv);
   if (typeof args === "string") throw new Error(`${args}\nUse --help for help.`);
+  const color = process.stdout.isTTY && process.env.NO_COLOR === undefined;
+  if (args.session !== null) {
+    const sessionReport = await import("./session-report.js");
+    const found = sessionReport.sessionFiles(args.session);
+    if (typeof found === "string") throw new Error(found);
+    const session = sessionReport.loadSessionModel(found.id, found.files);
+    console.log(
+      args.json
+        ? JSON.stringify(sessionReport.sessionJson(session), null, 2)
+        : sessionReport
+            .renderSessionReport(session, color, process.stdout.columns || 80)
+            .join("\n"),
+    );
+    return 0;
+  }
   const now = new Date();
   const range = report.resolveRange(args.period, now);
   if (range === null) throw new Error(`Unknown period: ${args.period}\nUse --help for help.`);
-  const [{ accountKey, resolveActiveAccount }, { catchUp }, { writeFeed }] = await Promise.all([
-    import("./account.js"),
-    import("./transcript-index.js"),
-    import("./refresh.js"),
-  ]);
+  const [{ accountKey, resolveActiveAccount }, { catchUp }, { writeFeed }, config, limits] =
+    await Promise.all([
+      import("./account.js"),
+      import("./transcript-index.js"),
+      import("./refresh.js"),
+      import("./config.js"),
+      import("./limits-history.js"),
+    ]);
   const key = args.account ?? accountKey(await resolveActiveAccount());
   if (process.stderr.isTTY) process.stderr.write("Reading new transcript lines…\r");
   if (!catchUp({ now })) console.error("Another index pass is running; numbers may lag.");
   if (key !== "unattributed") await writeFeed(key, now);
-  const built = report.buildReport(key, range, args.by);
-  console.log(args.json ? JSON.stringify(built, null, 2) : report.formatReport(built));
+  const perPercent =
+    key === "unattributed" ? null : limits.usdPerPercentWeek(config.loadLimitSamples(key), now);
+  const built = report.buildReport(key, range, args.by, perPercent);
+  console.log(
+    args.json
+      ? JSON.stringify(built, null, 2)
+      : report.formatReport(built, { chart: args.chart, color }),
+  );
   return 0;
 }
 
@@ -242,6 +269,14 @@ async function runInsightsOperation(argv: ReadonlyArray<string>): Promise<number
     now,
   );
   const advice = insights.adviceFor(key, args.window, feed, cfg, usage, now);
+  if (args.rules) {
+    console.log(
+      args.json
+        ? JSON.stringify(insights.rulesWithFound(advice), null, 2)
+        : insights.formatRules(advice, args.window),
+    );
+    return 0;
+  }
   console.log(
     args.json ? JSON.stringify(advice, null, 2) : insights.formatInsights(advice, args.window),
   );
@@ -300,6 +335,12 @@ async function dispatch(argv: ReadonlyArray<string>): Promise<number> {
 
   if (operationArg === "report") return runReportOperation(rest);
   if (operationArg === "insights") return runInsightsOperation(rest);
+  if (operationArg === "live") {
+    const live = await import("./live-tui.js");
+    const args = live.parseLiveArgs(rest);
+    if (typeof args === "string") throw new Error(`${args}\nUse --help for help.`);
+    return live.runLive(args);
+  }
   if (rest[0] !== undefined) {
     throw new Error(`Unknown argument: ${rest[0]}\nUse --help for help.`);
   }

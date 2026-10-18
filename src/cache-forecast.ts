@@ -30,7 +30,11 @@ export interface CacheForecast {
   readonly missPremiumUsd: number | null; // cold − warm: what letting the cache expire costs
   readonly sessionMissUsd: number; // already re-paid this session for misses (write − read on miss tokens)
   readonly expiresAt: number | null; // epoch seconds the cache goes cold; null = unknown/cold
+  readonly recentMiss: string | null; // causes of a miss in the last RECENT_MISS_S, e.g. "tools changed"
 }
+
+/** The statusline names a miss's cause for this long after it (the line re-renders about every 30 s). */
+export const RECENT_MISS_S = 120;
 
 /**
  * Predicts the input-side cost of the NEXT prompt from the cache state Claude Code reports. Output tokens
@@ -55,6 +59,12 @@ export function forecastCache(payload: CachePayload, nowSec: number): CacheForec
   const nextColdUsd = recache === null ? null : tokensCost(recache, writeRate);
   const missPremiumUsd = nextColdUsd === null ? null : Math.max(0, nextColdUsd - nextWarmUsd);
   const sessionMissUsd = tokensCost(cache.miss_recache_tokens ?? 0, writeRate - rates.cacheRead);
+  const missAt = cache.last_miss_at ?? null;
+  const causes = cache.last_miss_cause?.causes ?? [];
+  const recentMiss =
+    missAt !== null && nowSec - missAt <= RECENT_MISS_S && causes.length > 0
+      ? causes.map((cause) => cause.replaceAll("_", " ")).join(", ")
+      : null;
 
   return {
     warm,
@@ -65,5 +75,6 @@ export function forecastCache(payload: CachePayload, nowSec: number): CacheForec
     nextColdUsd,
     missPremiumUsd,
     sessionMissUsd,
+    recentMiss,
   };
 }

@@ -79,12 +79,17 @@ Fields added without a schema bump get their defaults in `upgradeUsage`.
 ## `limits.json`, `sessions-map.json`, `feed.json`
 
 - `LimitSample`: `{ t epoch ms, fiveHourPct, sevenDayPct, fiveHourResetsAt, sevenDayResetsAt, apiEqTotal, claudeCodeShare? }`,
-  appended only when a % changes; 8 days or 2,000 samples. Sorted by `t` on
+  appended only when a % changes; 29 days or 2,000 samples. Sorted by `t` on
   load (two racing renders can save them out of order).
 - `SessionMapEntry`: `{ transcriptPath, firstSeenAt, lastSeenAt, costUsd, linesAdded, linesRemoved, name?, claudeVersion? }`;
   35 days by `lastSeenAt`. `name` is Claude Code's `session_name`; a changed
   name is written at once.
 - A history file that is missing, garbled or of a newer version reads as empty.
+- Transcript index files (`docs/transcript-index.md`) add fields without a
+  version bump: rollups `growth`, `freshSplit`, `rewriteTokens`, `usdNewWork`,
+  `usdCarry`, `usdRewrite` (missing → 0 on load); `offsets.json` per file
+  `context`; `sessions.json` per session `mcpLoaded`, `mcpUsed` (missing →
+  none).
 - `Feed`: the shared contract with the `/cost-tracker` mod, see `docs/history-and-feed.md`.
 
 ## `ApiCache`
@@ -111,7 +116,7 @@ What `cc-daily-usage --statusline` prints and `renderStatusline` consumes:
 budget fields (absent on Pro/Max; `ledgerAgeMs` is the last good ledger
 reading's age while the refresher fails, else null), `capSource`, `extraUsage` (Pro/Max only),
 resolved `rateLimits` with their `source` and `readingAt`, `runway` per window,
-`coach` (top finding), `rateLimitsCache` (old shims),
+`coach` (top finding except R8: `{ id, title, action, usd, window }`), `rateLimitsCache` (old shims),
 `spendLimitPct`, `spendLimitUsd` (`{ used, limit, period }` or null),
 `apiDetail` (fresh API windows with dollars, severity and extra windows; null
 when stale), `cache` (a `CacheForecast`), `hasSpendCap`, `planType`.

@@ -2,15 +2,21 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   addTurn,
+  contextTokens,
   DEEP_CONTEXT_TOKENS,
   emptyRollup,
+  mcpServerKey,
+  mcpServersUsed,
   mergeRollup,
   parseActivity,
+  parseCompaction,
+  parseMcpLoad,
   parseRowKey,
   parseTurn,
   priceTurn,
   rollupUsd,
   rowKey,
+  splitTurn,
   turnRowKey,
 } from "./transcript-parse.js";
 
@@ -149,6 +155,7 @@ describe("priceTurn", () => {
       output: 2,
       cacheRead: 0.2,
       cacheWrite: 0.2 * 4 * 1.25 + 0.1 * 4 * 2,
+      webSearch: 0.02, // 2 searches × $0.01
     });
   });
 
@@ -157,6 +164,148 @@ describe("priceTurn", () => {
     expect(fast && priceTurn(fast)?.input).toBe(8);
     const unknown = parseTurn(usageLine({ message: { model: "claude-future-9", usage: {} } }));
     expect(unknown && priceTurn(unknown)).toBeNull();
+  });
+});
+
+describe("MCP lines", () => {
+  const attachment = (attachmentBody: Record<string, unknown>, type = "attachment"): string =>
+    JSON.stringify({ type, sessionId: "s1", attachment: attachmentBody });
+
+  it("mcpServerKey matches Claude Code's tool prefix", () => {
+    expect(mcpServerKey("plugin:figma:figma")).toBe("plugin_figma_figma");
+    expect(mcpServerKey("code-review-graph")).toBe("code-review-graph");
+  });
+
+  it("parseMcpLoad: names → est. tokens; skips bad names, missing blocks and other lines", () => {
+    expect(
+      parseMcpLoad(
+        attachment({
+          type: "mcp_instructions_delta",
+          addedNames: ["a", 7, "b"],
+          addedBlocks: ["12345", "x"],
+        }),
+      ),
+    ).toEqual({ sessionId: "s1", servers: { a: 2, b: 0 } });
+    expect(parseMcpLoad(attachment({ type: "mcp_instructions_delta" }))).toEqual({
+      sessionId: "s1",
+      servers: {},
+    });
+    expect(parseMcpLoad(attachment({ type: "mcp_instructions_delta" }, "user"))).toBeNull();
+    expect(parseMcpLoad('{"mcp_instructions_delta"')).toBeNull();
+    expect(parseMcpLoad(usageLine())).toBeNull();
+  });
+
+  it("mcpServersUsed: servers of mcp__ tool uses on assistant lines", () => {
+    const withContent = (content: unknown, type = "assistant"): string =>
+      JSON.stringify({ type, sessionId: "s1", message: { content } });
+    expect(
+      mcpServersUsed(
+        withContent([
+          { type: "tool_use", name: "mcp__zvec_grep__zvec_grep_search" },
+          { type: "tool_use", name: "mcp__zvec_grep__other" },
+          { type: "tool_use", name: "Read" },
+          { type: "text", text: "mcp__fake__x" },
+          { type: "tool_use", name: 5 },
+          null,
+        ]),
+      ),
+    ).toEqual({ sessionId: "s1", servers: ["zvec_grep"] });
+    expect(mcpServersUsed(withContent([{ type: "text", text: "mcp__x__y" }]))).toBeNull();
+    expect(mcpServersUsed(withContent("mcp__x__y"))).toBeNull();
+    expect(
+      mcpServersUsed(withContent([{ type: "tool_use", name: "mcp__a__b" }], "user")),
+    ).toBeNull();
+    expect(mcpServersUsed('{"mcp__')).toBeNull();
+    expect(mcpServersUsed(usageLine())).toBeNull();
+  });
+});
+
+describe("addTurn efficiency split", () => {
+  it("adds the split only when the previous context is known", () => {
+    const turn = parseTurn(usageLine());
+    if (!turn) throw new Error("turn");
+    const known = emptyRollup();
+    addTurn(known, turn, priceTurn(turn), 0);
+    expect(known.growth).toBe(contextTokens(turn) + turn.output);
+    expect(known.freshSplit).toBe(turn.input + turn.cacheWrite5m + turn.cacheWrite1h);
+    expect(known.usdCarry).toBeCloseTo(0.2);
+    const unknown = emptyRollup();
+    addTurn(unknown, turn, priceTurn(turn));
+    expect(unknown).toMatchObject({ growth: 0, usdNewWork: 0 });
+  });
+});
+
+describe("parseCompaction", () => {
+  const boundary = (extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      type: "system",
+      subtype: "compact_boundary",
+      sessionId: "s1",
+      timestamp: "2026-10-07T10:00:00.000Z",
+      compactMetadata: { trigger: "manual", preTokens: 160_000, postTokens: 15_000 },
+      ...extra,
+    });
+
+  it("reads trigger and token counts", () => {
+    expect(parseCompaction(boundary())).toEqual({
+      sessionId: "s1",
+      timestamp: "2026-10-07T10:00:00.000Z",
+      trigger: "manual",
+      preTokens: 160_000,
+      postTokens: 15_000,
+    });
+  });
+
+  it("defaults a missing metadata block; ignores other lines and garbage", () => {
+    expect(parseCompaction(boundary({ compactMetadata: undefined }))).toMatchObject({
+      trigger: "auto",
+      preTokens: 0,
+    });
+    expect(parseCompaction(boundary({ type: "user" }))).toBeNull();
+    expect(parseCompaction(usageLine())).toBeNull();
+    expect(parseCompaction('{"compact_boundary"')).toBeNull();
+  });
+});
+
+describe("splitTurn", () => {
+  const turn = parseTurn(
+    usageLine(
+      {},
+      {
+        input_tokens: 1000,
+        output_tokens: 100,
+        cache_read_input_tokens: 10_000,
+        cache_creation: { ephemeral_5m_input_tokens: 3000, ephemeral_1h_input_tokens: 0 },
+      },
+    ),
+  );
+  const cost = { input: 4, output: 2, cacheRead: 1, cacheWrite: 4, webSearch: 0 };
+
+  it("context tokens are input + read + writes", () => {
+    expect(turn && contextTokens(turn)).toBe(14_000);
+  });
+
+  it("fresh input that grows context is new work; the rest is a rewrite", () => {
+    // previous 12k → growth 2k of 4k fresh → half of the fresh $ is a rewrite
+    expect(turn && splitTurn(turn, cost, 12_000)).toEqual({
+      growth: 2000,
+      rewriteTokens: 2000,
+      newWorkUsd: 2 + 4,
+      carryUsd: 1,
+      rewriteUsd: 4,
+    });
+  });
+
+  it("a first turn (no previous context) is all new work; no fresh input → no rewrite", () => {
+    expect(turn && splitTurn(turn, cost, 0).rewriteUsd).toBe(0);
+    const readOnly = parseTurn(
+      usageLine({}, { input_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 0 } }),
+    );
+    expect(readOnly && splitTurn(readOnly, cost, 5_000_000)).toMatchObject({
+      growth: 0,
+      rewriteTokens: 0,
+      rewriteUsd: 0,
+    });
   });
 });
 
@@ -179,7 +328,7 @@ describe("rollups", () => {
       usdThinkingHigh: 0,
       deepContextReadUsd: 2 * 0.2 * (2_100_000 / 2_300_000),
     });
-    expect(rollupUsd(row)).toBeCloseTo(2 * (4 + 0.2 + 1.8) + 2);
+    expect(rollupUsd(row)).toBeCloseTo(2 * (4 + 0.2 + 1.8) + 2 + 6 * 0.01);
     const small = { ...turn, input: 1, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 };
     const shallow = emptyRollup();
     addTurn(shallow, small, priceTurn(small));

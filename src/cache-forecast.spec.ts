@@ -37,6 +37,7 @@ describe("forecastCache", () => {
       missPremiumUsd: 0.78,
       sessionMissUsd: (50_000 * (8 - 0.2)) / 1_000_000,
       expiresAt: NOW + 300,
+      recentMiss: null,
     });
   });
 
@@ -77,6 +78,27 @@ describe("forecastCache", () => {
       NOW,
     );
     expect(cold?.expiresAt).toBeNull();
+  });
+
+  it("names the causes of a miss for two minutes after it", () => {
+    const missed = (at: number, causes: Array<string> | undefined) =>
+      forecastCache(
+        payload({
+          prompt_cache: {
+            warm: true,
+            last_miss_at: at,
+            last_miss_cause: causes === undefined ? null : { causes },
+          },
+        }),
+        NOW,
+      )?.recentMiss;
+    expect(missed(NOW - 30, ["tools_changed", "model_changed"])).toBe(
+      "tools changed, model changed",
+    );
+    expect(missed(NOW - 121, ["tools_changed"])).toBeNull();
+    expect(missed(NOW - 30, [])).toBeNull();
+    expect(missed(NOW - 30, undefined)).toBeNull();
+    expect(forecastCache(payload(), NOW)?.recentMiss).toBeNull();
   });
 
   it("missing context counts as 0 tokens; fast mode doubles", () => {

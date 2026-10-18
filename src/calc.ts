@@ -28,6 +28,17 @@ export function isLaboralDay(config: Config, date: Date): boolean {
   return getLaboralDays(config, year, month).includes(date.getDate());
 }
 
+/** The 7-day runway's work-day test: the local month's laboralDays, or null (every day) for a month with
+ * none set (Pro/Max users never set them). */
+export function workDayOf(config: Config): ((date: Date) => boolean) | null {
+  if (Object.keys(config.laboralDays).length === 0) return null;
+  return (date) => {
+    const { year, month } = localYearMonth(date);
+    const days = getLaboralDays(config, year, month);
+    return days.length === 0 || days.includes(date.getDate());
+  };
+}
+
 export function utcDateString(date: Date): string {
   return date.toISOString().slice(0, 10); // "YYYY-MM-DD"
 }

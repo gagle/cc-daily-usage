@@ -79,6 +79,7 @@ describe("buildFeed", () => {
       ratePctPerHour: 20,
       exhaustsAt: new Date((nowSec + 3.5 * 3600) * 1000).toISOString(),
       verdict: "comfortable",
+      typicalPeakPct: null, // no finished window in the samples
     });
     // No API 7d window → the last sample's, an hour old.
     expect(feed.limits.sevenDay).toMatchObject({ usedPct: 5, resetsAt: null, verdict: "stale" });
@@ -161,4 +162,41 @@ describe("buildFeed", () => {
       });
     },
   );
+});
+
+describe("typical peak and milestones", () => {
+  it("median peak of finished windows; crossings of the open window only", () => {
+    const at = (minutesAgo: number, five: number, resetsAt: number): LimitSample => ({
+      ...sample(minutesAgo, five, null),
+      fiveHourResetsAt: resetsAt,
+    });
+    const samples = [
+      at(900, 10, nowSec - 600 * 60), // finished window A peaks at 40
+      at(800, 40, nowSec - 600 * 60),
+      at(500, 80, nowSec - 200 * 60), // finished window B peaks at 80
+      at(100, 70, nowSec + 3600), // open window: primed at 70, then crosses 75 and 90 at once
+      at(50, 92, nowSec + 3600),
+    ];
+    const feed = buildFeed(
+      input({
+        samples,
+        api: {
+          fetchedAt: NOW.getTime(),
+          fiveHour: { pct: 92, resetsAt: nowSec + 3600 },
+          sevenDay: null,
+          extraUsage: null,
+        } as unknown as FeedInput["api"],
+      }),
+      NOW,
+    );
+    expect(feed.limits.fiveHour?.typicalPeakPct).toBe(60);
+    expect(feed.limits.milestones).toEqual([
+      {
+        window: "fiveHour",
+        threshold: 90,
+        at: new Date(NOW.getTime() - 50 * 60_000).toISOString(),
+        resetsAt: new Date((nowSec + 3600) * 1000).toISOString(),
+      },
+    ]);
+  });
 });

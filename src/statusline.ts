@@ -9,6 +9,7 @@ import {
   computeToday,
   isLaboralDay,
   rolloverIfNeeded,
+  workDayOf,
 } from "./calc.js";
 import {
   listNewerFiles,
@@ -152,6 +153,7 @@ function trackLimits(
   api: ApiCache | null,
   apiEqTotal: number,
   now: Date,
+  workDay: ((date: Date) => boolean) | null,
 ): Pick<StatuslineState, "runway"> {
   const samples = loadLimitSamples(key);
   const five = api?.fiveHour ?? null;
@@ -177,16 +179,29 @@ function trackLimits(
   const runway = (window: "fiveHour" | "sevenDay", reading: ApiWindow | null): Runway | null =>
     reading === null
       ? null
-      : computeRunway(next, window, reading.pct, reading.resetsAt, readingAt, now);
+      : computeRunway(
+          next,
+          window,
+          reading.pct,
+          reading.resetsAt,
+          readingAt,
+          now,
+          window === "sevenDay" ? workDay : null,
+        );
   return { runway: { fiveHour: runway("fiveHour", five), sevenDay: runway("sevenDay", seven) } };
 }
 
-/** The first non-snoozed finding of feed.json (written by the refresher), or null. */
+/** The first non-snoozed finding of feed.json (written by the refresher), or null. R8 (a limit running out)
+ * is skipped: the `warnings` part already shows it, and the next action covers what to do. */
 function coachTip(key: string): StatuslineState["coach"] {
-  const top = loadFeedAdvice(key).find((finding) => finding.snoozedUntil == null);
+  const top = loadFeedAdvice(key).find(
+    (finding) => finding.snoozedUntil == null && finding.id !== "R8",
+  );
   if (typeof top?.title !== "string") return null;
   return {
+    id: typeof top.id === "string" ? top.id : "",
     title: top.title,
+    action: typeof top.action === "string" ? top.action : null,
     usd: typeof top.usd === "number" ? top.usd : null,
     window: typeof top.window === "string" ? top.window : "week",
   };
@@ -353,7 +368,7 @@ export async function buildStatuslineState(
   if (nextSessions !== sessions) saveSessionsMap(key, nextSessions);
 
   const rateLimits = resolveRateLimits(sawRateLimits, usage.rateLimitsCache, api, now);
-  const limits = trackLimits(key, api, usage.apiEqTotal, now);
+  const limits = trackLimits(key, api, usage.apiEqTotal, now, workDayOf(config));
 
   // No OAuth login (API-key user) → the usage endpoint has nothing to say; don't spawn refreshers for it.
   if (account !== null || process.env.CLAUDE_CODE_OAUTH_TOKEN) requestApiRefresh(key, now);

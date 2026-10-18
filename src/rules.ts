@@ -1,6 +1,6 @@
 import type { Feed, Finding } from "./feed.js";
 import type { MissCauseDay } from "./interfaces/config.interface.js";
-import { type ModelRates, ratesFor, tokensCost } from "./pricing.js";
+import { type ModelRates, ratesFor, tokensCost, WEB_SEARCH_USD } from "./pricing.js";
 import type { SessionTotals } from "./transcript-index.js";
 import { parseRowKey, type Rollup, rollupUsd } from "./transcript-parse.js";
 
@@ -28,6 +28,17 @@ const REPLACEMENTS: Readonly<Record<string, string>> = {
   "claude-mythos-5": "claude-mythos-5-1",
 };
 const PREMIUM = /opus|fable|mythos/;
+/** R11 (antiburn check #9): fresh input this many times the context it added means context is re-sent. */
+const CHURN_MULTIPLE = 2.35;
+/** R12: instruction files (CLAUDE.md, MEMORY.md) past this many tokens per project are worth trimming. */
+export const LEAN_INSTRUCTION_TOKENS = 2000;
+
+/** A file Claude Code loads into every turn of a project: `project` null = every project (global). */
+export interface InstructionFile {
+  readonly path: string;
+  readonly project: string | null;
+  readonly tokens: number; // estimate: bytes ÷ 4
+}
 
 export interface CoachInput {
   readonly rows: ReadonlyArray<readonly [string, Rollup]>; // rollups inside the window
@@ -38,6 +49,7 @@ export interface CoachInput {
   readonly window: "week" | "month";
   readonly snoozed: Readonly<Record<string, string>>; // rule id → ISO until
   readonly now: Date;
+  readonly instructions?: ReadonlyArray<InstructionFile>; // R12; none = rule skipped
 }
 
 const money = (usd: number): string => `$${usd.toFixed(2)}`;
@@ -56,7 +68,8 @@ function repriced(rollup: Rollup, from: ModelRates, to: ModelRates): number {
     tokensCost(rollup.input, to.input) +
     tokensCost(rollup.output, to.output) +
     tokensCost(rollup.cacheRead, to.cacheRead) +
-    rollup.usdCacheWrite * (to.input / from.input)
+    rollup.usdCacheWrite * (to.input / from.input) +
+    rollup.webSearches * WEB_SEARCH_USD // the same on any model
   );
 }
 
@@ -64,7 +77,134 @@ function sum(rows: CoachInput["rows"], pick: (key: string, rollup: Rollup) => nu
   return rows.reduce((total, [key, rollup]) => total + pick(key, rollup), 0);
 }
 
-type Draft = Omit<Finding, "snoozedUntil" | "window">;
+type Draft = Omit<Finding, "snoozedUntil" | "window" | "title" | "why">;
+
+/** What a rule looks for, why it costs money, how its $ is estimated and the usual fix: `insights --rules`, the
+ * `why` line of each finding, and the README table. */
+export interface RuleInfo {
+  readonly id: string;
+  readonly title: string;
+  readonly checks: string;
+  readonly why: string;
+  readonly estimate: string;
+  readonly fix: string;
+  readonly action: string; // a few words for the statusline's next-action part
+}
+
+export const RULE_INFO: ReadonlyArray<RuleInfo> = [
+  {
+    id: "R1",
+    title: "Subagents on a premium model",
+    checks: "Subagent turns on an Opus, Fable or Mythos model.",
+    why: "Subagents mostly search and read; a premium model bills the same tokens at 2-5x Sonnet.",
+    estimate: "What those turns would cost less on Sonnet 5.5.",
+    fix: "CLAUDE_CODE_SUBAGENT_MODEL=sonnet, or model: in the agent file.",
+    action: "subagents on Sonnet: CLAUDE_CODE_SUBAGENT_MODEL=sonnet",
+  },
+  {
+    id: "R2",
+    title: "Fast mode",
+    checks: "Turns run in fast mode.",
+    why: "Fast mode bills every token at 2x the standard rate.",
+    estimate: "Half of the fast-mode $.",
+    fix: "Turn fast mode off (/fast, setting fastMode=false).",
+    action: "/fast off",
+  },
+  {
+    id: "R3",
+    title: "High effort thinking",
+    checks: "Thinking on turns at xhigh, max or ultra effort.",
+    why: "Thinking bills as output, the most expensive token; high effort is enough for most tasks.",
+    estimate: "All thinking $ at those levels (an upper bound).",
+    fix: "Use high effort by default (/effort, setting effortLevel=high).",
+    action: "/effort high",
+  },
+  {
+    id: "R4",
+    title: "Prompt cache re-paid",
+    checks: "Prompt-cache misses the statusline saw, by cause.",
+    why: "After a miss the whole context is written again at 1.25-2x the input rate instead of read at about 0.05-0.1x.",
+    estimate: "What the misses re-paid.",
+    fix: "/compact before a break; keep the MCP servers and tools stable mid-session.",
+    action: "/compact before breaks",
+  },
+  {
+    id: "R5",
+    title: "Deep context",
+    checks: "Turns with more than 200k tokens of context.",
+    why: "Every turn, each tool call included, re-reads the whole context; the part above 200k is paid each time.",
+    estimate: "Cache-read $ for the part above 200k.",
+    fix: "Compact earlier or start fresh for a new task (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50).",
+    action: "/compact earlier",
+  },
+  {
+    id: "R6",
+    title: "Outlier session",
+    checks: "A session above 3x your median cost (and $2), once you have 8 sessions.",
+    why: "One runaway session (a loop, a huge file, the wrong model) can cost more than a normal day.",
+    estimate: "The outliers' $ above the median.",
+    fix: "cc-daily-usage report week --by session, then report --session <id> to see what it did.",
+    action: "see why: cc-daily-usage report --by session",
+  },
+  {
+    id: "R7",
+    title: "Unused MCP servers",
+    checks: "MCP servers whose instructions were in context in sessions that never called them.",
+    why: "A server loads into every turn of every session, used or not.",
+    estimate: "Those tokens re-read on each turn (a floor: tool definitions are not counted).",
+    fix: "Turn off servers a project does not use (/mcp) or remove them from .mcp.json.",
+    action: "/mcp: turn off unused servers",
+  },
+  {
+    id: "R8",
+    title: "Running out early",
+    checks: "A 5h or 7d limit on course to run out before it resets, or today's budget passed.",
+    why: "At the limit work stops until the reset; the cost is time, not $.",
+    estimate: "None.",
+    fix: "Slow down, or move routine work to a cheaper model.",
+    action: "/model sonnet for routine steps",
+  },
+  {
+    id: "R9",
+    title: "Older model",
+    checks: "Turns on a model whose newer replacement costs the same or less.",
+    why: "The newer model is at least as good for the same or a lower price.",
+    estimate: "The difference at the newer model's prices.",
+    fix: "Switch with /model, and update the default model in your settings.",
+    action: "/model: newer, same price",
+  },
+  {
+    id: "R10",
+    title: "Most spend re-reads context",
+    checks: "More than 57% of $ is cache reads.",
+    why: "Long sessions spend most of their $ re-reading history, not producing new work.",
+    estimate: "All cache-read $ (the part /compact and /clear can cut).",
+    fix: "/compact at natural breaks, /clear between unrelated tasks.",
+    action: "/clear between tasks",
+  },
+  {
+    id: "R11",
+    title: "Context sent again and again",
+    checks: "Fresh input at least 2.35x the context it added.",
+    why: "Context the model already had was sent again at write prices, often after a cold cache or a model switch.",
+    estimate: "The re-sent part.",
+    fix: "Avoid long mid-session breaks (/compact before one); do not switch models on a big context.",
+    action: "no long breaks mid-task",
+  },
+  {
+    id: "R12",
+    title: "Large instruction files",
+    checks: "CLAUDE.md and MEMORY.md over 2,000 tokens in a project.",
+    why: "They load into every turn; each extra 1k tokens is paid on every turn of every session.",
+    estimate: "The tokens above 2,000 re-read on each main turn.",
+    fix: "Trim them; move rare detail into files read on demand.",
+    action: "trim CLAUDE.md and MEMORY.md",
+  },
+];
+
+export function ruleInfo(id: string): RuleInfo | undefined {
+  return RULE_INFO.find((rule) => rule.id === id);
+}
 
 /** R1: subagents on a premium model; $ saved had they run on Sonnet. */
 function premiumSubagents(input: CoachInput): Draft | null {
@@ -83,7 +223,6 @@ function premiumSubagents(input: CoachInput): Draft | null {
   if (turns === 0) return null;
   return {
     id: "R1",
-    title: "Subagents on a premium model",
     usd,
     evidence: `${String(turns)} subagent turns on ${[...models].sort().join(", ")}`,
     fix: {
@@ -103,7 +242,6 @@ function fastMode(input: CoachInput): Draft | null {
   const sub = sum(fast, (key, rollup) => (parseRowKey(key).scope === "main" ? 0 : rollup.turns));
   return {
     id: "R2",
-    title: "Fast mode",
     usd,
     evidence: `${String(sum(fast, (_, r) => r.turns))} fast turns${sub > 0 ? `, ${String(sub)} in subagents` : ""}`,
     fix: { kind: "setting", key: "fastMode", value: "false", text: "Turn fast mode off (/fast)" },
@@ -116,7 +254,6 @@ function highEffort(input: CoachInput): Draft | null {
   if (usd === 0) return null;
   return {
     id: "R3",
-    title: "High effort thinking",
     usd,
     evidence: `${money(usd)} of thinking at xhigh/max/ultra effort`,
     fix: {
@@ -146,7 +283,6 @@ function cacheMisses(input: CoachInput): Draft | null {
     .join(", ");
   return {
     id: "R4",
-    title: "Prompt cache re-paid",
     usd,
     evidence: `misses: ${top}`,
     fix: {
@@ -163,7 +299,6 @@ function deepContext(input: CoachInput): Draft | null {
   const deepest = Math.max(...input.rows.map(([, rollup]) => rollup.maxContext));
   return {
     id: "R5",
-    title: "Deep context",
     usd,
     evidence: `re-reading context above 200k tokens (deepest ${String(Math.round(deepest / 1000))}k)`,
     fix: {
@@ -194,7 +329,6 @@ function outlierSession(input: CoachInput): Draft | null {
   const [id, top] = outliers.sort(([, a], [, b]) => b.usd - a.usd)[0] as [string, SessionTotals];
   return {
     id: "R6",
-    title: "Outlier session",
     usd: outliers.reduce((total, [, session]) => total + session.usd - middle, 0),
     evidence: `${id.slice(0, 8)} cost ${money(top.usd)} vs median ${money(middle)}${outliers.length > 1 ? ` (+${String(outliers.length - 1)} more)` : ""}`,
     fix: {
@@ -221,7 +355,6 @@ function runway(input: CoachInput): Draft | null {
   if (overToday) parts.push(`today ${money(budget.todaySpent)} of ${money(todayMax)}`);
   return {
     id: "R8",
-    title: "Running out early",
     usd: null,
     evidence: parts.join("; "),
     fix: { kind: "habit", text: "Slow down, or move routine work to a cheaper model" },
@@ -245,7 +378,6 @@ function oldModels(input: CoachInput): Draft | null {
   const pairs = [...seen].sort().map(([from, to]) => `${from} → ${to}`);
   return {
     id: "R9",
-    title: "Older model",
     usd,
     evidence: pairs.join(", "),
     fix: { kind: "command", value: "/model", text: `Switch: ${pairs.join(", ")}` },
@@ -259,10 +391,105 @@ function carryShare(input: CoachInput): Draft | null {
   if (total === 0 || carry / total <= CARRY_SHARE_BAD) return null;
   return {
     id: "R10",
-    title: "Most spend re-reads context",
     usd: carry,
     evidence: `${String(Math.round((carry / total) * 100))}% of $ is cache reads`,
     fix: { kind: "habit", text: "/compact at natural breaks, /clear between unrelated tasks" },
+  };
+}
+
+/**
+ * R7: MCP servers whose instructions sat in context for a whole session that never called them. The $ is
+ * those tokens re-read on every turn at the session's cheapest model's cache-read rate (a floor: tool
+ * definitions are not in the transcript).
+ */
+function unusedMcp(input: CoachInput): Draft | null {
+  const byServer = new Map<string, { usd: number; tokens: number; sessions: number }>();
+  for (const session of Object.values(input.sessions)) {
+    const rates = session.models
+      .map((model) => ratesFor(model))
+      .filter((rate): rate is ModelRates => rate !== null)
+      .sort((a, b) => a.cacheRead - b.cacheRead)[0];
+    if (!session.mcpLoaded || rates === undefined) continue;
+    const used = new Set(session.mcpUsed ?? []);
+    for (const [server, tokens] of Object.entries(session.mcpLoaded)) {
+      if (used.has(server) || tokens === 0) continue;
+      const entry = byServer.get(server) ?? { usd: 0, tokens: 0, sessions: 0 };
+      entry.usd += tokensCost(tokens * session.turns, rates.cacheRead);
+      entry.tokens = Math.max(entry.tokens, tokens);
+      entry.sessions += 1;
+      byServer.set(server, entry);
+    }
+  }
+  if (byServer.size === 0) return null;
+  const ranked = [...byServer].sort(([, a], [, b]) => b.usd - a.usd);
+  return {
+    id: "R7",
+    usd: ranked.reduce((total, [, entry]) => total + entry.usd, 0),
+    evidence: ranked
+      .slice(0, 3)
+      .map(
+        ([server, entry]) =>
+          `${server} ~${String(Math.round(entry.tokens / 100) / 10)}k tokens, unused in ${String(entry.sessions)} session(s) ${money(entry.usd)}`,
+      )
+      .join("; "),
+    fix: {
+      kind: "command",
+      value: "/mcp",
+      text: "Turn off servers a project does not use (/mcp), or remove them from .mcp.json",
+    },
+  };
+}
+
+/** R11: fresh input far above the context it added — the same context is sent (written) again. */
+function cacheChurn(input: CoachInput): Draft | null {
+  const fresh = sum(input.rows, (_, rollup) => rollup.freshSplit);
+  const rewrite = sum(input.rows, (_, rollup) => rollup.rewriteTokens);
+  const usd = sum(input.rows, (_, rollup) => rollup.usdRewrite);
+  if (rewrite === 0) return null;
+  const multiple = fresh - rewrite > 0 ? fresh / (fresh - rewrite) : Number.POSITIVE_INFINITY;
+  if (multiple < CHURN_MULTIPLE) return null;
+  return {
+    id: "R11",
+    usd,
+    evidence: Number.isFinite(multiple)
+      ? `fresh input is ${multiple.toFixed(1)}× the context it added`
+      : "every fresh token re-sent context the model already had",
+    fix: {
+      kind: "habit",
+      text: "Avoid long breaks mid-session (/compact before one); do not switch models on a big context",
+    },
+  };
+}
+
+/** R12: CLAUDE.md / MEMORY.md re-read on every turn; the part past a lean size, priced at cache-read rates. */
+function instructionSize(input: CoachInput): Draft | null {
+  const files = input.instructions ?? [];
+  if (files.length === 0) return null;
+  const tokensFor = (project: string): number =>
+    files
+      .filter((file) => file.project === null || file.project === project)
+      .reduce((total, file) => total + file.tokens, 0);
+  let usd = 0;
+  for (const [key, rollup] of input.rows) {
+    const parts = parseRowKey(key);
+    const rates = ratesFor(parts.model, parts.speed === "fast");
+    const over = tokensFor(parts.project) - LEAN_INSTRUCTION_TOKENS;
+    if (parts.scope !== "main" || rates === null || over <= 0) continue;
+    usd += tokensCost(over * rollup.turns, rates.cacheRead);
+  }
+  if (usd === 0) return null;
+  const largest = [...files]
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, 3)
+    .map((file) => `${file.path} ~${String(Math.round(file.tokens / 100) / 10)}k`);
+  return {
+    id: "R12",
+    usd,
+    evidence: `re-read every turn: ${largest.join(", ")} tokens`,
+    fix: {
+      kind: "habit",
+      text: "Trim CLAUDE.md and MEMORY.md; move rare detail into files read on demand",
+    },
   };
 }
 
@@ -276,12 +503,14 @@ const RULES = [
   runway,
   oldModels,
   carryShare,
+  unusedMcp,
+  cacheChurn,
+  instructionSize,
 ];
 
 /**
  * Every rule over the window, ranked: active before snoozed, then $ descending (no $ first: R8 is urgent),
- * at most 10. A finding with a $ under MIN_FINDING_USD is dropped. R7 (unused MCP servers) needs the
- * initial-context source of CLI-10 and is not here yet.
+ * at most 10. A finding with a $ under MIN_FINDING_USD is dropped.
  */
 export function coach(input: CoachInput): ReadonlyArray<Finding> {
   const nowIso = input.now.toISOString();
@@ -290,8 +519,12 @@ export function coach(input: CoachInput): ReadonlyArray<Finding> {
     .filter((draft) => draft.usd === null || draft.usd >= MIN_FINDING_USD)
     .map((draft): Finding => {
       const until = input.snoozed[draft.id];
+      const info = ruleInfo(draft.id) as RuleInfo;
       return {
         ...draft,
+        title: info.title,
+        why: info.why,
+        action: info.action,
         window: input.window,
         snoozedUntil: until && until > nowIso ? until : null,
       };

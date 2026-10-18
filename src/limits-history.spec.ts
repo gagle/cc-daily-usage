@@ -2,11 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LimitSample } from "./interfaces/config.interface.js";
 import {
+  addWorkHours,
   appendSample,
   computeRunway,
+  milestones,
   SAMPLE_MAX_AGE_MS,
   SAMPLE_MAX_COUNT,
+  typicalPeak,
   usdPerPercentWeek,
+  workHoursBetween,
 } from "./limits-history.js";
 
 const NOW = new Date("2026-10-07T12:00:00.000Z");
@@ -64,6 +68,50 @@ describe("appendSample", () => {
     const next = appendSample(many, sample(0, -1));
     expect(next).toHaveLength(SAMPLE_MAX_COUNT);
     expect(next.at(-1)).toEqual(sample(0, -1));
+  });
+});
+
+describe("work-day time", () => {
+  // Local times (any zone): Fri 2026-10-16 18:00 → Mon 2026-10-19 06:00. No DST change in those days.
+  const at = (day: number, hour: number): number => new Date(2026, 9, day, hour).getTime();
+  const weekdays = (date: Date): boolean => date.getDay() !== 0 && date.getDay() !== 6;
+
+  it("clock time without a work-day test", () => {
+    expect(workHoursBetween(at(16, 18), at(19, 6), null)).toBe(60);
+    expect(workHoursBetween(at(19, 6), at(16, 18), null)).toBe(0);
+    expect(addWorkHours(at(16, 18), 10, null)).toBe(at(17, 4));
+  });
+
+  it("skips days off; the first day always counts", () => {
+    expect(workHoursBetween(at(16, 18), at(19, 6), weekdays)).toBe(12); // Fri 6 h + Mon 6 h
+    expect(workHoursBetween(at(17, 12), at(18, 12), weekdays)).toBe(12); // a Saturday reading counts its day
+    expect(addWorkHours(at(16, 18), 10, weekdays)).toBe(at(19, 4));
+    expect(addWorkHours(at(16, 18), 2, weekdays)).toBe(at(16, 20));
+  });
+
+  it("no work day ahead: no exhaustion inside the horizon", () => {
+    expect(addWorkHours(at(16, 18), 10, () => false)).toBeNull();
+  });
+
+  it("the 7-day runway burns only on work days", () => {
+    const now = at(16, 18);
+    const samples: Array<LimitSample> = [
+      {
+        t: now - 2 * HOUR,
+        fiveHourPct: null,
+        sevenDayPct: 60,
+        fiveHourResetsAt: null,
+        sevenDayResetsAt: null,
+        apiEqTotal: 0,
+      },
+    ];
+    const resets = Math.round(at(21, 0) / 1000);
+    // 2 %/h, 36 % left → 18 work hours: Fri 6 h, then Mon 00:00 + 12 h
+    const work = computeRunway(samples, "sevenDay", 64, resets, now, new Date(now), weekdays);
+    expect(work.exhaustsAt).toBe(Math.round(at(19, 12) / 1000));
+    expect(work.verdict).toBe("at-risk");
+    const clock = computeRunway(samples, "sevenDay", 64, resets, now, new Date(now));
+    expect(clock.exhaustsAt).toBe(Math.round(at(17, 12) / 1000));
   });
 });
 
@@ -237,5 +285,42 @@ describe("usdPerPercentWeek", () => {
       withShare(sample(20, 0, 14, 9), 0.01), // too small: skipped
     ];
     expect(usdPerPercentWeek(samples, NOW)).toBe(2);
+  });
+});
+
+describe("typicalPeak and milestones", () => {
+  const at = (minutesAgo: number, seven: number | null, resetsAt: number | null): LimitSample => ({
+    ...sample(minutesAgo, null, seven),
+    sevenDayResetsAt: resetsAt,
+  });
+
+  it("typical peak: median of finished windows (odd and even counts); null under two", () => {
+    const week = (n: number): number => sec(-n * 7 * 24 * HOUR);
+    const three = [at(30_000, 50, week(3)), at(20_000, 70, week(2)), at(10_000, 90, week(1))];
+    expect(typicalPeak(three, "sevenDay", NOW)).toBe(70);
+    expect(typicalPeak(three.slice(1), "sevenDay", NOW)).toBe(80);
+    expect(typicalPeak(three.slice(2), "sevenDay", NOW)).toBeNull();
+    // the API's reset time jitters by seconds: still one window
+    expect(
+      typicalPeak(
+        [at(20_000, 70, week(2)), at(19_000, 75, week(2) + 1), ...three.slice(2)],
+        "sevenDay",
+        NOW,
+      ),
+    ).toBe(82.5);
+    expect(typicalPeak([at(10, 50, null), at(5, null, week(1))], "sevenDay", NOW)).toBeNull();
+  });
+
+  it("milestones: primed on first sight, highest of a jump, once per window", () => {
+    const open = sec(HOUR);
+    const crossings = milestones(
+      [at(60, 80, open), at(50, 85, open), at(40, 95, open), at(30, 101, open), at(20, 100, open)],
+      "sevenDay",
+    );
+    expect(crossings.map((m) => m.threshold)).toEqual([90, 100]);
+    expect(milestones([at(60, 10, open), at(50, 99, open)], "sevenDay")).toEqual([
+      { threshold: 90, at: NOW.getTime() - 50 * MIN, resetsAt: open },
+    ]);
+    expect(milestones([at(60, 95, open)], "sevenDay")).toEqual([]);
   });
 });

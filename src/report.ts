@@ -3,6 +3,9 @@ import path from "node:path";
 import { localDateKey } from "./clock.js";
 import { loadSessionsMap } from "./config.js";
 import type { SessionMapEntry } from "./interfaces/config.interface.js";
+import { paint, type Segment, stacked } from "./meter.js";
+import { WEB_SEARCH_USD } from "./pricing.js";
+import { mtokBand } from "./session-model.js";
 import {
   loadRollups,
   loadSessionTotals,
@@ -66,6 +69,8 @@ export function monthsOf(range: DayRange): ReadonlyArray<string> {
 export interface ReportRow {
   readonly label: string;
   readonly rollup: Rollup;
+  readonly weekPct?: number | null; // --by session: share of the 7-day limit (needs $ per 1%)
+  readonly usdPer100Lines?: number | null; // --by session: $ per 100 changed lines (statusline sessions)
 }
 
 export interface Report {
@@ -156,7 +161,12 @@ export function selfCheck(
   return [...stale].sort().map((model) => `price table may be stale for ${model}`);
 }
 
-export function buildReport(owner: string, range: DayRange, by: Dimension): Report {
+export function buildReport(
+  owner: string,
+  range: DayRange,
+  by: Dimension,
+  usdPerPercentWeek: number | null = null,
+): Report {
   const entries = rowsInRange(owner, range);
   const total = emptyRollup();
   let subagentUsd = 0;
@@ -180,10 +190,16 @@ export function buildReport(owner: string, range: DayRange, by: Dimension): Repo
   if (by === "component") {
     rows = COMPONENTS.map(([label, field]) => ({ label, rollup: componentRollup(total, field) }));
   } else if (by === "session") {
-    rows = inRange.map(([id, session]) => ({
-      label: `${id.slice(0, 8)} ${names[id]?.name ?? path.basename(session.project)}`,
-      rollup: { ...emptyRollup(), turns: session.turns, usdInput: session.usd },
-    }));
+    rows = inRange.map(([id, session]) => {
+      const lines = (names[id]?.linesAdded ?? 0) + (names[id]?.linesRemoved ?? 0);
+      return {
+        label: `${id.slice(0, 8)} ${names[id]?.name ?? path.basename(session.project)}`,
+        rollup: { ...emptyRollup(), turns: session.turns, usdInput: session.usd },
+        weekPct:
+          usdPerPercentWeek && usdPerPercentWeek > 0 ? session.usd / usdPerPercentWeek : null,
+        usdPer100Lines: lines > 0 ? session.usd / (lines / 100) : null,
+      };
+    });
   } else {
     rows = [...groups].map(([label, rollup]) => ({ label, rollup }));
   }
@@ -203,6 +219,46 @@ export function buildReport(owner: string, range: DayRange, by: Dimension): Repo
     gaps: owner === UNATTRIBUTED ? [] : selfCheck(totals, names, range),
     activity: activityOf(inRange.map(([, session]) => session)),
   };
+}
+
+/** One local day from the index: its $ and the top sessions (last active that day), models and projects. */
+export interface DayBreakdown {
+  readonly day: string;
+  readonly usd: number;
+  readonly sessions: ReadonlyArray<readonly [string, number]>;
+  readonly models: ReadonlyArray<readonly [string, number]>;
+  readonly projects: ReadonlyArray<readonly [string, number]>;
+}
+
+function top3(totals: ReadonlyMap<string, number>): ReadonlyArray<readonly [string, number]> {
+  return [...totals]
+    .filter(([, usd]) => usd > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3);
+}
+
+export function dayBreakdown(owner: string, day: string): DayBreakdown {
+  const models = new Map<string, number>();
+  const projects = new Map<string, number>();
+  let usd = 0;
+  for (const [key, rollup] of rowsInRange(owner, { label: day, from: day, to: day })) {
+    const value = rollupUsd(rollup);
+    usd += value;
+    const model = labelOf(key, "model");
+    const project = labelOf(key, "project");
+    models.set(model, (models.get(model) ?? 0) + value);
+    projects.set(project, (projects.get(project) ?? 0) + value);
+  }
+  const names = owner === UNATTRIBUTED ? {} : loadSessionsMap(owner);
+  const sessions = new Map<string, number>();
+  for (const [id, session] of Object.entries(loadSessionTotals(owner))) {
+    if (localDateKey(new Date(session.lastAt)) !== day) continue;
+    sessions.set(
+      `${id.slice(0, 8)} ${names[id]?.name ?? path.basename(session.project)}`,
+      session.usd,
+    );
+  }
+  return { day, usd, sessions: top3(sessions), models: top3(models), projects: top3(projects) };
 }
 
 /** Whether the account's last 30 days hold a turn with no price (totals are then a floor). */
@@ -239,38 +295,119 @@ function activityNote(activity: ReportActivity): string | null {
   return parts.length === 0 ? null : parts.join(" · ");
 }
 
+/** `Efficiency: new work 44% · carry 41% · rewrite 15% · $9/MTok of new work (good)`, or null before any
+ * turn with the split (rows indexed before 2026-10-18 have none). */
+function efficiencyNote(total: Rollup): string | null {
+  const base = total.usdNewWork + total.usdCarry + total.usdRewrite;
+  if (base <= 0) return null;
+  const share = (usd: number): string => `${String(Math.round((usd / base) * 100))}%`;
+  const perMTok = total.growth > 0 ? (base / total.growth) * 1_000_000 : null;
+  const mtok =
+    perMTok === null ? "" : ` · $${perMTok.toFixed(0)}/MTok of new work (${mtokBand(perMTok)})`;
+  return `Efficiency: new work ${share(total.usdNewWork)} · carry ${share(total.usdCarry)} · rewrite ${share(total.usdRewrite)}${mtok}`;
+}
+
 /** The report as a terminal table. */
-export function formatReport(report: Report): string {
+const CHART: ReadonlyArray<{
+  readonly rgb: string;
+  readonly glyph: string;
+  readonly label: string;
+  readonly usd: (r: Rollup) => number;
+}> = [
+  { rgb: "99;150;230", glyph: "i", label: "input", usd: (r) => r.usdInput },
+  { rgb: "200;120;220", glyph: "o", label: "output", usd: (r) => r.usdOutput },
+  { rgb: "120;200;160", glyph: "r", label: "cache read", usd: (r) => r.usdCacheRead },
+  { rgb: "240;180;80", glyph: "w", label: "cache write", usd: (r) => r.usdCacheWrite },
+  {
+    rgb: "230;110;110",
+    glyph: "s",
+    label: "web search",
+    usd: (r) => r.webSearches * WEB_SEARCH_USD,
+  },
+];
+const CHART_CELLS = 30;
+
+export interface FormatOptions {
+  readonly chart: boolean; // a stacked bar per row, scaled to the largest row
+  readonly color: boolean;
+}
+
+const pctText = (value: number | null | undefined): string =>
+  value == null ? "—" : `≈${value.toFixed(1)}%`;
+
+export function formatReport(
+  report: Report,
+  options: FormatOptions = { chart: false, color: false },
+): string {
+  const sessions = report.by === "session";
   const header = ["", "input", "output", "cache read", "cache write", "total"];
-  const cells = (label: string, r: Rollup): ReadonlyArray<string> => [
-    label,
-    money(r.usdInput),
-    money(r.usdOutput),
-    money(r.usdCacheRead),
-    money(r.usdCacheWrite),
-    money(rollupUsd(r)),
-  ];
+  if (sessions) header.push("% of week", "$/100 lines");
+  const cells = (label: string, r: Rollup, row?: ReportRow): ReadonlyArray<string> => {
+    // The index keeps only a session's total, so its parts show as —.
+    const part = (usd: number): string => (sessions && row ? "—" : money(usd));
+    const out = [
+      label,
+      part(r.usdInput),
+      part(r.usdOutput),
+      part(r.usdCacheRead),
+      part(r.usdCacheWrite),
+      money(rollupUsd(r)),
+    ];
+    if (sessions) {
+      out.push(
+        row ? pctText(row.weekPct) : "",
+        row?.usdPer100Lines == null ? (row ? "—" : "") : money(row.usdPer100Lines),
+      );
+    }
+    return out;
+  };
+  // A chart by day reads left to right in time; every other view ranks by $.
+  const rows =
+    options.chart && report.by === "day"
+      ? [...report.rows].sort((a, b) => a.label.localeCompare(b.label))
+      : report.rows;
   const body = [
     header,
-    ...report.rows.map((row) => cells(row.label, row.rollup)),
+    ...rows.map((row) => cells(row.label, row.rollup, row)),
     cells("total", report.total),
   ];
   const widths = header.map((_, column) =>
     Math.max(...body.map((row) => (row[column] as string).length)),
   );
-  const lines = body.map((row) =>
-    row
-      .map((cell, column) =>
-        column === 0 ? cell.padEnd(widths[0] as number) : cell.padStart(widths[column] as number),
-      )
-      .join("  "),
+  const largest = Math.max(0, ...rows.map((row) => rollupUsd(row.rollup)));
+  const chartOf = (index: number): string => {
+    const row = rows[index - 1];
+    if (!options.chart || row === undefined || largest <= 0) return "";
+    const usd = rollupUsd(row.rollup);
+    if (usd <= 0) return "";
+    const segments: ReadonlyArray<Segment> = CHART.map((part) => ({
+      value: part.usd(row.rollup),
+      rgb: part.rgb,
+      glyph: part.glyph,
+    }));
+    return `  ${stacked(segments, Math.max(1, Math.round((usd / largest) * CHART_CELLS)), options.color)}`;
+  };
+  const lines = body.map(
+    (row, index) =>
+      row
+        .map((cell, column) =>
+          column === 0 ? cell.padEnd(widths[0] as number) : cell.padStart(widths[column] as number),
+        )
+        .join("  ") + chartOf(index),
   );
   const totalUsd = rollupUsd(report.total);
   const share = totalUsd === 0 ? 0 : Math.round((report.subagentUsd / totalUsd) * 100);
   const notes = [
     `${report.range.label} (${report.range.from} → ${report.range.to}), by ${report.by}. API-equivalent estimate, not a bill.`,
-    `Subagents ${money(report.subagentUsd)} (${String(share)}%) · thinking ${money(report.total.usdThinking)} · web searches ${String(report.total.webSearches)}`,
+    `Subagents ${money(report.subagentUsd)} (${String(share)}%) · thinking ${money(report.total.usdThinking)} · web searches ${String(report.total.webSearches)} (${money(report.total.webSearches * WEB_SEARCH_USD)})`,
   ];
+  if (options.chart) {
+    notes.push(
+      `chart: ${CHART.map((part) => (options.color ? paint(part.rgb, part.label, true) : `${part.glyph} ${part.label}`)).join(" · ")}`,
+    );
+  }
+  const efficiency = efficiencyNote(report.total);
+  if (efficiency !== null) notes.push(efficiency);
   const activity = activityNote(report.activity);
   if (activity !== null) notes.push(activity);
   if (report.total.unpricedTurns > 0) {
@@ -293,18 +430,27 @@ export interface ReportArgs {
   readonly by: Dimension;
   readonly json: boolean;
   readonly account: string | null;
+  readonly chart: boolean;
+  readonly session: string | null; // id or id prefix: one session's burn-up instead of the table
 }
 
-/** `report [period] [--by <dim>] [--json] [--account <key>]` → args, or an error message. */
+/** `report [period] [--by <dim>] [--json] [--account <key>] [--chart] [--session <id>]` → args, or an error
+ * message. */
 export function parseReportArgs(argv: ReadonlyArray<string>): ReportArgs | string {
   let period = "week";
   let by: Dimension = "model";
   let json = false;
   let account: string | null = null;
+  let chart = false;
+  let session: string | null = null;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
     if (arg === "--json") json = true;
-    else if (arg === "--by") {
+    else if (arg === "--chart") chart = true;
+    else if (arg === "--session") {
+      session = argv[++i] ?? "";
+      if (session === "") return "--session needs a session id (or its first characters)";
+    } else if (arg === "--by") {
       const value = argv[++i] ?? "";
       if (!(DIMENSIONS as ReadonlyArray<string>).includes(value)) {
         return `--by needs one of: ${DIMENSIONS.join(", ")}`;
@@ -317,5 +463,5 @@ export function parseReportArgs(argv: ReadonlyArray<string>): ReportArgs | strin
       period = arg;
     } else return `Unknown report argument: ${arg}`;
   }
-  return { period, by, json, account };
+  return { period, by, json, account, chart, session };
 }

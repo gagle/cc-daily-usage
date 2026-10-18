@@ -15,6 +15,11 @@ const SHARED_MODULES = [
   "sessions-map.ts",
   "feed.ts",
   "rules.ts",
+  "meter.ts",
+  "session-model.ts",
+  "live-render.ts",
+  "advisor.ts",
+  "next-action.ts",
 ] as const;
 
 const SRC = path.dirname(fileURLToPath(import.meta.url));

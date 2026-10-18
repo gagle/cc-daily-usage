@@ -1,6 +1,8 @@
 import type { ApiWindow } from "./interfaces/config.interface.js";
 import type { HookPayload, StatuslineState } from "./interfaces/statusline.interface.js";
 import type { Runway } from "./limits-history.js";
+import { gradientRgb } from "./meter.js";
+import { type NextAction, nextAction } from "./next-action.js";
 import { DEFAULT_LAYOUT, type Layout, type PartId } from "./statusline-layout.js";
 
 const RESET = "\x1b[0m";
@@ -28,26 +30,10 @@ function contextBar(pct: number): string {
   const filled = Math.min(Math.floor(pct / 5), 20);
   let bar = "";
   for (let i = 1; i <= 20; i++) {
-    if (i > filled) {
-      bar += "\x1b[38;2;60;60;60m█";
-      continue;
-    }
-    const frac = Math.floor((i * 100) / 20);
-    let r: number;
-    let g: number;
-    let b: number;
-    if (frac <= 50) {
-      const t = frac * 2;
-      r = Math.floor((220 * t) / 100);
-      g = 200;
-      b = Math.floor(80 - (80 * t) / 100);
-    } else {
-      const t = (frac - 50) * 2;
-      r = 220;
-      g = Math.floor(200 - (160 * t) / 100);
-      b = Math.floor((20 * t) / 100);
-    }
-    bar += `\x1b[38;2;${String(r)};${String(g)};${String(b)}m█`;
+    bar +=
+      i > filled
+        ? "\x1b[38;2;60;60;60m█"
+        : `\x1b[38;2;${gradientRgb(Math.floor((i * 100) / 20))}m█`;
   }
   return bar + RESET;
 }
@@ -264,7 +250,7 @@ export function warmColor(secondsUntilCold: number | null, ttlSeconds: number): 
  * The current row of the cost-by-context table: what one message costs now ($/msg, cache read) and what a
  * miss would cost (re-writing the whole context), plus the move that avoids paying it.
  *   🔥 cold in 4m · $0.10/msg · if cold +$2.40
- *   ❄ cold · next msg ~$2.45
+ *   ❄ cold · next msg ~$2.45 · miss: tools changed
  */
 function cacheSegment(state: StatuslineState): string {
   const cache = state.cache;
@@ -284,15 +270,16 @@ function cacheSegment(state: StatuslineState): string {
     parts.push("❄ cold");
     parts.push(`next msg ~${money(cache.nextColdUsd ?? cache.nextWarmUsd)}`);
   }
+  if (cache.recentMiss !== null) parts.push(`miss: ${cache.recentMiss}`);
   // Cold = the costly case, in the same red as "over budget"; warm fades as the expiry nears.
   const color = cache.warm ? warmColor(cache.secondsUntilCold, cache.ttlSeconds) : ccColor(1);
   return rgb(color, parts.join(" · "));
 }
 
-/** `» Subagents on a premium model ~$12.40/week`; details in `cc-daily-usage insights`. */
-function coachPart(coach: NonNullable<StatuslineState["coach"]>): string {
-  const usd = coach.usd === null ? "" : ` ~${money(coach.usd)}/${coach.window}`;
-  return rgb("255;215;0", `» ${coach.title}${usd}`);
+/** `» /compact at the next break · 520k re-read each turn, ~$0.10`: the next action, urgent ones in orange. */
+function actionPart(action: NextAction): string {
+  const urgent = action.kind === "cold-soon" || action.kind === "cold";
+  return rgb(urgent ? "244;164;96" : "255;215;0", `» ${action.text}`);
 }
 
 /**
@@ -343,8 +330,10 @@ export function renderStatusline(
         return budget ? todayPart(state) : "";
       case "month":
         return budget ? monthPart(state) : "";
-      case "coach":
-        return state?.coach ? coachPart(state.coach) : "";
+      case "coach": {
+        const action = nextAction(payload, state);
+        return action ? actionPart(action) : "";
+      }
       case "spend":
         return state?.spendLimitPct == null
           ? ""

@@ -18,6 +18,7 @@ import {
   STATUSLINE_FILE,
   SUBAGENT_LINE_FLAG,
 } from "./statusline-shared.js";
+import { lastPass } from "./transcript-index.js";
 
 export interface Check {
   readonly status: "ok" | "warn" | "fail";
@@ -248,6 +249,18 @@ function checkRefresher(
   ];
 }
 
+/** The transcript index: when its last pass ran and how many bytes it left for the next one. */
+export function checkIndex(
+  pass: { readonly at: string; readonly bytesBehind: number } | null,
+  now: Date,
+): Check {
+  if (pass === null) return warn("index", "no pass yet (run cc-daily-usage report)");
+  const age = ago(now.getTime() - Date.parse(pass.at));
+  if (pass.bytesBehind === 0) return ok("index", `last pass ${age}, up to date`);
+  const mb = (pass.bytesBehind / (1024 * 1024)).toFixed(1);
+  return warn("index", `last pass ${age}, ${mb} MB behind (report or insights catches up)`);
+}
+
 export function formatCheck(check: Check): string {
   const mark = check.status === "ok" ? "✔" : check.status === "warn" ? "⚠" : "✖";
   return `${mark} ${check.name}: ${check.detail}`;
@@ -263,6 +276,7 @@ export async function doctorReport(
     checkClaude(await claudeVersion()),
     ...checkStatusline(),
     ...checkAccounts(now),
+    checkIndex(lastPass(), now),
   ];
   return {
     text: checks.map(formatCheck).join("\n"),

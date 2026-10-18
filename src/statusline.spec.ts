@@ -650,19 +650,29 @@ describe("coach tip", () => {
         { id: "R8", title: "Running out early", usd: null, snoozedUntil: null },
       ],
     });
-    expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toEqual({
-      title: "Running out early",
-      usd: null,
-      window: "week",
-    });
+    // R8 is skipped: the warnings part already shows the limit
+    expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toBeNull();
     writeJson("feed.json", {
       schemaVersion: 1,
-      advice: [{ id: "R1", title: "T", usd: 1, window: "month" }],
+      advice: [
+        { id: "R8", title: "Running out early", usd: null, snoozedUntil: null },
+        { id: "R1", title: "T", action: "a", usd: 1, window: "month" },
+      ],
     });
     expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toEqual({
+      id: "R1",
       title: "T",
+      action: "a",
       usd: 1,
       window: "month",
+    });
+    writeJson("feed.json", { schemaVersion: 1, advice: [{ title: "Old", usd: "x" }] });
+    expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toEqual({
+      id: "",
+      title: "Old",
+      action: null,
+      usd: null,
+      window: "week",
     });
   });
 });

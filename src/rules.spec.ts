@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { coach, type CoachInput, MAX_FINDINGS, topFinding } from "./rules.js";
+import { coach, type CoachInput, MAX_FINDINGS, RULE_INFO, ruleInfo, topFinding } from "./rules.js";
 import type { SessionTotals } from "./transcript-index.js";
 import {
   addTurn,
@@ -83,6 +83,20 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+describe("RULE_INFO", () => {
+  it("one entry per rule id, every text filled, and each finding's title comes from it", () => {
+    expect(RULE_INFO.map((rule) => rule.id)).toEqual(
+      Array.from({ length: 12 }, (_, i) => `R${String(i + 1)}`),
+    );
+    for (const rule of RULE_INFO) {
+      for (const text of [rule.title, rule.checks, rule.why, rule.estimate, rule.fix]) {
+        expect(text.length).toBeGreaterThan(3);
+      }
+    }
+    expect(ruleInfo("R99")).toBeUndefined();
+  });
+});
+
 describe("coach rules", () => {
   it("nothing to say on an empty window", () => {
     expect(coach(input())).toEqual([]);
@@ -102,6 +116,8 @@ describe("coach rules", () => {
     expect(only(findings, "R1")).toEqual({
       id: "R1",
       title: "Subagents on a premium model",
+      why: "Subagents mostly search and read; a premium model bills the same tokens at 2-5x Sonnet.",
+      action: "subagents on Sonnet: CLAUDE_CODE_SUBAGENT_MODEL=sonnet",
       usd: 3,
       window: "week",
       evidence: "1 subagent turns on claude-opus-5-5",
@@ -298,6 +314,84 @@ describe("coach rules", () => {
     const heavy = coach(input({ rows: [row({ cacheRead: 5_000_000, input: 100_000 })] }));
     expect(only(heavy, "R10")).toMatchObject({ usd: 1, evidence: "71% of $ is cache reads" });
     expect(only(coach(input({ rows: [row({ input: 1_000_000 })] })), "R10")).toBeUndefined();
+  });
+
+  it("R7: MCP instructions in context for sessions that never called the server", () => {
+    const withMcp = (overrides: Partial<SessionTotals>): SessionTotals => ({
+      ...session(1),
+      models: ["claude-opus-5-5", "claude-future-9"],
+      turns: 1000,
+      ...overrides,
+    });
+    const findings = coach(
+      input({
+        sessions: {
+          a: withMcp({
+            mcpLoaded: { figma: 5000, tokensave: 4000, empty: 0 },
+            mcpUsed: ["tokensave"],
+          }),
+          b: withMcp({ mcpLoaded: { figma: 3000 } }),
+          c: withMcp({ models: ["claude-future-9"], mcpLoaded: { figma: 5000 } }), // unpriced: skipped
+          d: withMcp({}), // indexed before MCP facts: skipped
+          e: withMcp({
+            models: ["claude-opus-5-5", "claude-haiku-5-5"],
+            mcpLoaded: { slack: 1000 },
+          }),
+        },
+      }),
+    );
+    // e: priced at the cheaper model (haiku-5-5 cache read $0.01) → $0.01, ranked last
+    expect(only(findings, "R7")?.evidence).toBe(
+      "figma ~5k tokens, unused in 2 session(s) $1.60; slack ~1k tokens, unused in 1 session(s) $0.01",
+    );
+    // 5k + 3k tokens × 1000 turns × $0.20/MTok (opus-5-5 cache read)
+    expect(only(findings, "R7")).toMatchObject({
+      usd: expect.closeTo(1.61, 5) as number,
+      fix: { kind: "command", value: "/mcp" },
+    });
+    expect(only(coach(input({ sessions: { d: withMcp({}) } })), "R7")).toBeUndefined();
+  });
+
+  it("R11: fresh input far above the context it added", () => {
+    const churned = (rewrite: number, fresh: number): readonly [string, Rollup] => {
+      const [key, rollup] = row({ input: 1_000_000 });
+      return [key, { ...rollup, freshSplit: fresh, rewriteTokens: rewrite, usdRewrite: 2 }];
+    };
+    expect(only(coach(input({ rows: [churned(700, 1000)] })), "R11")).toMatchObject({
+      usd: 2,
+      evidence: "fresh input is 3.3× the context it added",
+    });
+    expect(only(coach(input({ rows: [churned(1000, 1000)] })), "R11")?.evidence).toBe(
+      "every fresh token re-sent context the model already had",
+    );
+    expect(only(coach(input({ rows: [churned(100, 1000)] })), "R11")).toBeUndefined();
+    expect(only(coach(input({ rows: [churned(0, 1000)] })), "R11")).toBeUndefined();
+  });
+
+  it("R12: instruction files past the lean size, re-read on every main turn", () => {
+    const rows = [
+      row({ cacheRead: 1 }), // a main turn in /p…
+      row({ model: "claude-future-9" }), // …unpriced
+      row({}, "subagent:x"), // subagents load their own context
+    ].map(([key, rollup]): readonly [string, Rollup] => [key, { ...rollup, turns: 1000 }]);
+    const files = [
+      { path: "/home/.claude/CLAUDE.md", project: null, tokens: 3000 },
+      { path: "/p/CLAUDE.md", project: "/p", tokens: 4000 },
+      { path: "/q/CLAUDE.md", project: "/q", tokens: 90_000 },
+    ];
+    // (3000 + 4000 − 2000) × 1000 turns × $0.20/MTok
+    expect(only(coach(input({ rows, instructions: files })), "R12")).toMatchObject({
+      usd: expect.closeTo(1, 5) as number,
+      evidence:
+        "re-read every turn: /q/CLAUDE.md ~90k, /p/CLAUDE.md ~4k, /home/.claude/CLAUDE.md ~3k tokens",
+    });
+    expect(only(coach(input({ rows })), "R12")).toBeUndefined();
+    expect(
+      only(
+        coach(input({ rows, instructions: [{ path: "/a", project: null, tokens: 100 }] })),
+        "R12",
+      ),
+    ).toBeUndefined();
   });
 
   it("drops small $, ranks by $, puts snoozed last, caps at ten", () => {

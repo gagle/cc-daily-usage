@@ -1,4 +1,4 @@
-import { computeToday, rolloverIfNeeded } from "./calc.js";
+import { computeToday, rolloverIfNeeded, workDayOf } from "./calc.js";
 import { localDateKey } from "./clock.js";
 import type {
   ApiCache,
@@ -7,7 +7,13 @@ import type {
   SessionMapEntry,
   UsageState,
 } from "./interfaces/config.interface.js";
-import { computeRunway, type RunwayVerdict, usdPerPercentWeek } from "./limits-history.js";
+import {
+  computeRunway,
+  milestones,
+  type RunwayVerdict,
+  typicalPeak,
+  usdPerPercentWeek,
+} from "./limits-history.js";
 import { recentSessionIds } from "./sessions-map.js";
 
 /** accounts/<key>/feed.json format. Add a field freely; remove or change one → bump (the mod refuses it). */
@@ -19,12 +25,23 @@ export interface FeedWindow {
   readonly ratePctPerHour: number | null;
   readonly exhaustsAt: string | null; // ISO
   readonly verdict: RunwayVerdict;
+  readonly typicalPeakPct?: number | null; // median top % of finished windows (28 days); absent in old feeds
+}
+
+/** A 75/90/100 % crossing in the window open now (limits-history `milestones`). */
+export interface FeedMilestone {
+  readonly window: "fiveHour" | "sevenDay";
+  readonly threshold: number;
+  readonly at: string; // ISO
+  readonly resetsAt: string; // ISO
 }
 
 /** One coaching finding (shared contract with the /cost-tracker mod). */
 export interface Finding {
   readonly id: string;
   readonly title: string;
+  readonly why?: string; // what makes it cost money (absent in feeds written before 2026-10-18)
+  readonly action?: string; // a few words: what to do (absent in feeds written before 2026-10-18)
   readonly usd: number | null;
   readonly window: "week" | "month";
   readonly evidence: string;
@@ -48,6 +65,7 @@ export interface Feed {
     readonly sevenDay: FeedWindow | null;
     readonly usdPerPercentWeek: number | null;
     readonly claudeCodeShare: number | null; // 0-1 of this week's use; null when the API gave none
+    readonly milestones?: ReadonlyArray<FeedMilestone>; // absent in feeds written before 2026-10-18
   };
   readonly budget?: {
     readonly todaySpent: number;
@@ -117,6 +135,7 @@ function feedWindow(
     reading.resetsAt,
     reading.at,
     now,
+    window === "sevenDay" ? workDayOf(input.config) : null,
   );
   return {
     usedPct: reading.pct,
@@ -124,7 +143,23 @@ function feedWindow(
     ratePctPerHour: runway.ratePctPerHour,
     exhaustsAt: iso(runway.exhaustsAt),
     verdict: runway.verdict,
+    typicalPeakPct: typicalPeak(input.samples, window, now),
   };
+}
+
+/** Crossings in the windows still open. */
+function openMilestones(input: FeedInput, now: Date): ReadonlyArray<FeedMilestone> {
+  const nowS = now.getTime() / 1000;
+  return (["fiveHour", "sevenDay"] as const).flatMap((window) =>
+    milestones(input.samples, window)
+      .filter((milestone) => milestone.resetsAt > nowS)
+      .map((milestone) => ({
+        window,
+        threshold: milestone.threshold,
+        at: new Date(milestone.at).toISOString(),
+        resetsAt: new Date(milestone.resetsAt * 1000).toISOString(),
+      })),
+  );
 }
 
 /** Everything the /cost-tracker mod reads, from the files the CLI already keeps. Pure apart from the
@@ -156,6 +191,7 @@ export function buildFeed(input: FeedInput, now: Date): Feed {
       sevenDay: feedWindow(input, "sevenDay", now),
       usdPerPercentWeek: usdPerPercentWeek(input.samples, now),
       claudeCodeShare: input.api?.claudeCodeShare ?? null,
+      milestones: openMilestones(input, now),
     },
     ...(budget ? { budget } : {}),
     spend: {

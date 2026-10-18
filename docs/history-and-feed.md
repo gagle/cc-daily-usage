@@ -6,10 +6,11 @@ What the CLI keeps beyond today's budget, and `feed.json`, the file the
 ## Limit history (`src/limits-history.ts`)
 
 The render appends the resolved 5h/7d reading to `limits.json` when either %
-changes (`appendSample`; 8 days or 2,000 samples). A sample is a change point:
-its % holds until the next sample.
+changes (`appendSample`; 29 days or 2,000 samples). A sample is a change point:
+its % holds until the next sample. 29 days keep four finished weeks for the
+typical peak; the count cap bounds the file the render reads.
 
-`computeRunway(samples, window, usedPct, resetsAt, readingAt, now)`:
+`computeRunway(samples, window, usedPct, resetsAt, readingAt, now, workDay)`:
 
 | Step    | Rule                                                                                                                                       |
 | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -20,6 +21,23 @@ its % holds until the next sample.
 | rate    | `(usedPct − anchor %) / hours`, never negative                                                                                             |
 | runway  | `exhaustsAt = reading + (100 − used) / rate`; null when the rate is 0. Measured to the reading, not now: the verdict holds between fetches |
 | verdict | exhausts before reset → `at-risk`; rate ÷ (left ÷ hours to reset) ≤ 0.8 → `comfortable`; else `on-track` (also without a reset time)       |
+
+Work days (7d window only): with `workDay` (`workDayOf(config)` in
+`src/calc.ts`: the month's `laboralDays`, every day in a month with none, null
+when no laboral day is set at all), the hours to exhaustion and to reset count
+only work days (`addWorkHours`, `workHoursBetween`). The reading's own day always
+counts: a reading proves use. A work day burns at the measured rate around the
+clock. No exhaustion within 60 days → null.
+
+Window instances: samples of one window share a reset time, rounded to the hour
+(the API jitters it by seconds).
+
+- `typicalPeak(samples, window, now)`: median of the top % of each finished
+  instance (antiburn's "allowance": do you use your plan); null under two.
+- `milestones(samples, window)`: crossings of 75 / 90 / 100 %. The first
+  reading of an instance primes it (a threshold already passed is not news); a
+  jump over several reports only the highest. No state is stored: a consumer
+  (the mod's toasts) keeps which ones it showed.
 
 `usdPerPercentWeek`: between samples where the 7d % rose at least one point,
 Δ `apiEqTotal` ÷ (Δ% × `claudeCodeShare`). The share is Claude Code's part of
@@ -46,16 +64,16 @@ Written by the detached refresher after each API call (`writeFeed` in
 `src/refresh.ts`), never by the render, so it is as fresh as `api-cache.json`.
 Accounts without an OAuth login get no refresher and so no feed.
 
-| Field                     | Content                                                                                                                                                           |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schemaVersion`           | `FEED_SCHEMA_VERSION` (1). Add a field freely; remove or change one → bump                                                                                        |
-| `writtenAt`, `accountKey` | ISO time, account folder                                                                                                                                          |
-| `plan`                    | `{ organizationType, hasSpendCap }`                                                                                                                               |
-| `sessionIds`              | sessions seen in the last 7 days, newest first (the mod finds its account by these)                                                                               |
-| `limits`                  | `fiveHour`/`sevenDay`: `{ usedPct, resetsAt, ratePctPerHour, exhaustsAt, verdict }` or null with no reading; `usdPerPercentWeek`; `claudeCodeShare` (0-1 or null) |
-| `budget`                  | dollar-cap plans only: `{ todaySpent, todayMax, monthSpent, monthCap, paceLabel }`                                                                                |
-| `spend`                   | API-equivalent `today`, `week` (rolling 7 local days), `monthToDate` (local month), `last30Days`, `isFloor`                                                       |
-| `advice`                  | coaching findings, ranked; empty until the coach runs                                                                                                             |
+| Field                     | Content                                                                                                                                                                                                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `schemaVersion`           | `FEED_SCHEMA_VERSION` (1). Add a field freely; remove or change one → bump                                                                                                                                                                                         |
+| `writtenAt`, `accountKey` | ISO time, account folder                                                                                                                                                                                                                                           |
+| `plan`                    | `{ organizationType, hasSpendCap }`                                                                                                                                                                                                                                |
+| `sessionIds`              | sessions seen in the last 7 days, newest first (the mod finds its account by these)                                                                                                                                                                                |
+| `limits`                  | `fiveHour`/`sevenDay`: `{ usedPct, resetsAt, ratePctPerHour, exhaustsAt, verdict, typicalPeakPct }` or null with no reading; `usdPerPercentWeek`; `claudeCodeShare` (0-1 or null); `milestones`: `[{ window, threshold, at, resetsAt }]` of the windows still open |
+| `budget`                  | dollar-cap plans only: `{ todaySpent, todayMax, monthSpent, monthCap, paceLabel }`                                                                                                                                                                                 |
+| `spend`                   | API-equivalent `today`, `week` (rolling 7 local days), `monthToDate` (local month), `last30Days`, `isFloor`                                                                                                                                                        |
+| `advice`                  | coaching findings, ranked, each with `why` and `action` (absent in feeds written before 2026-10-18); empty until the coach runs                                                                                                                                    |
 
 A window reading comes from the fresh API reading, else the newest sample (with
 its own time, so an old one is `stale`).

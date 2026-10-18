@@ -59,6 +59,10 @@ export function cacheWriteRate(rates: ModelRates, ttl: "5m" | "1h"): number {
   return rates.input * (ttl === "1h" ? 2 : 1.25);
 }
 
+/** $ per server-side web search: $10 per 1,000 (claude-api skill, 2026-10-18). Web fetch has no fee of its own
+ * there, so fetches stay a count. */
+export const WEB_SEARCH_USD = 0.01;
+
 export function tokensCost(tokens: number, ratePerMTok: number): number {
   return (tokens * ratePerMTok) / 1_000_000;
 }

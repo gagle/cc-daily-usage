@@ -108,6 +108,16 @@ async function harness(): Promise<Harness> {
       config.saveUsage(KEY, value);
     },
     snapshot: (): CalendarSnapshot => mod.computeSnapshot(ACCOUNT, NOW),
+    dayBreakdown: (day: string) =>
+      day.endsWith("-01")
+        ? { day, usd: 0, sessions: [], models: [], projects: [] }
+        : {
+            day,
+            usd: 12.5,
+            sessions: [["s1 fix", 10]] as const,
+            models: [["claude-opus-5-5", 12.5]] as const,
+            projects: [] as const,
+          },
   };
   const h: Harness = {
     mod,
@@ -336,6 +346,31 @@ describe("reduceKey", () => {
     h.press("\x1b[Z", "\x1b[Z", "u");
     expect(h.model.dayEdit?.draft).toEqual({ "2026-09-30": 4 });
     expect(h.mod.poolForMonth(h.model, { year: 2026, month: 9 })).toBe(4);
+  });
+});
+
+describe("day detail", () => {
+  it("d opens the cursor day's breakdown, follows the cursor, Esc or d closes it", async () => {
+    const h = await harness();
+    h.press("d");
+    const text = plain(h.mod.renderCalendar(h.model, { color: false }));
+    expect(text).toMatch(/2026-10-\d\d · \$12\.50 API-equivalent, from transcripts/);
+    expect(text).toContain("  sessions  s1 fix $10.00");
+    expect(text).toContain("  models    opus-5-5 $12.50");
+    expect(text).toContain("  projects  —");
+    expect(text).toContain("d day detail");
+    h.press("\x1b[D");
+    expect(h.model.detail?.day).not.toBeUndefined();
+    h.model = { ...h.model, cursor: { ...h.model.cursor, day: 2 } };
+    h.press("\x1b[D");
+    expect(plain(h.mod.renderCalendar(h.model, { color: false }))).toContain(
+      "no transcript spend indexed",
+    );
+    expect(h.press("\x1b")?.detail).toBeNull(); // Esc closes the detail, not the calendar
+    h.press("d");
+    expect(h.press("d")?.detail).toBeNull();
+    h.press("\x1b[C");
+    expect(h.model.detail).toBeNull();
   });
 });
 
