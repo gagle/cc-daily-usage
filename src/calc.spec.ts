@@ -17,6 +17,7 @@ import {
   paceLabel,
   pruneStaleSessions,
   rolloverIfNeeded,
+  trackPrompt,
   upgradeUsage,
   USAGE_SCHEMA_VERSION,
   utcDateString,
@@ -416,6 +417,26 @@ describe("addSinceLedger", () => {
     const usage = makeUsage({ sessions: { a: seen(5) } });
     expect(addSinceLedger(usage, 100, "new", 40)).toBe(0);
     expect(addSinceLedger(usage, 100, "a", 1)).toBe(0);
+  });
+});
+
+describe("trackPrompt", () => {
+  const now = at("2026-09-03T10:00:00.000Z");
+
+  it("$ since the prompt was first seen; a new prompt starts from the cost before it", () => {
+    const usage = makeUsage();
+    expect(trackPrompt(usage, "a", "p1", 0, 1)).toBeNull(); // no session record yet
+    captureSessionCost(usage, "a", 1, now, false);
+    expect(trackPrompt(usage, "a", undefined, 0, 1)).toBeNull();
+    expect(trackPrompt(usage, "a", "p1", 0, 1)).toBe(1); // first render already holds p1's first request
+    captureSessionCost(usage, "a", 1.5, now, false);
+    expect(trackPrompt(usage, "a", "p1", 1, 1.5)).toBe(1.5);
+    captureSessionCost(usage, "a", 2, now, false);
+    expect(trackPrompt(usage, "a", "p2", 1.5, 2)).toBe(0.5); // p2 started at $1.50
+    expect(usage.sessions.a).toMatchObject({ promptId: "p2", promptStartCost: 1.5 });
+    expect(trackPrompt(usage, "a", "p2", 2, 0.2)).toBe(0.2); // session reset
+    usage.sessions.a = { lastSeenCost: 3, lastSeenAt: now.toISOString(), promptId: "p3" };
+    expect(trackPrompt(usage, "a", "p3", 3, 3)).toBe(3); // a record with no start: from $0
   });
 });
 

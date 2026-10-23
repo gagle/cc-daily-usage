@@ -33,6 +33,7 @@ function turn(overrides: Partial<Turn> = {}): Turn {
     cwd: "/work/app",
     branch: "main",
     fast: false,
+    usOnly: false,
     input: 1000,
     output: 1000,
     cacheRead: 50_000,
@@ -296,7 +297,7 @@ describe("renderLive: advisor view", () => {
     expect(out).toMatch(
       /^ {2}1\. At this pace your limits run out before they reset: 5h in 2\.0 h\.$/m,
     );
-    expect(out).toMatch(/^ {2}2\. Context is 302k: .*\n {5}.*~\$6\.04 at stake$/m);
+    expect(out).toMatch(/^ {2}2\. Context is 302k: .*\n {5}.*~\$6\.02 at stake$/m); // 301k cached × $0.20 × 100: the 1k fresh input is not re-read
     for (const line of out.split("\n")) expect(line.length).toBeLessThanOrEqual(100);
     expect(out).toMatch(/^ {5}→ /m);
     expect(out).toMatch(/^ {5}why: /m);

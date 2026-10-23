@@ -134,3 +134,51 @@ export function accountKey(account: Account | null): string {
   if (!account?.email) return "default";
   return account.email.toLowerCase().replace(UNSAFE_CHARS, "_");
 }
+
+/** One entry of account-log.json: from `t` (epoch ms) on, `key` was the login in `~/.claude.json`. */
+export interface AccountSwitch {
+  readonly t: number;
+  readonly key: string;
+}
+
+/** Entries kept: the sessions-map window, plus the newest older one (the account active when it opened). */
+const ACCOUNT_LOG_DAYS = 35;
+
+/**
+ * The log with `key` appended when it differs from the last entry, else null (nothing to write). A
+ * `/login` in any terminal changes the login of every Claude Code process, so the first render that sees
+ * the new key dates the switch for all sessions.
+ */
+export function recordAccountSwitch(
+  log: ReadonlyArray<AccountSwitch>,
+  key: string,
+  now: Date,
+): ReadonlyArray<AccountSwitch> | null {
+  if (log.at(-1)?.key === key) return null;
+  const cutoff = now.getTime() - ACCOUNT_LOG_DAYS * 24 * 60 * 60 * 1000;
+  const firstKept = log.findIndex((entry) => entry.t >= cutoff);
+  const kept = firstKept === -1 ? log.slice(-1) : log.slice(Math.max(0, firstKept - 1));
+  return [...kept, { t: now.getTime(), key }];
+}
+
+/** The login at epoch ms `t`; null before the log starts. */
+export function accountAt(log: ReadonlyArray<AccountSwitch>, t: number): string | null {
+  return latest(log, (entry) => entry.t <= t)?.key ?? null;
+}
+
+/** Epoch ms of the latest switch to `key`; null when the log never saw it. */
+export function lastSwitchTo(log: ReadonlyArray<AccountSwitch>, key: string): number | null {
+  return latest(log, (entry) => entry.key === key)?.t ?? null;
+}
+
+// Array#findLast is ES2023; the build targets ES2022.
+function latest(
+  log: ReadonlyArray<AccountSwitch>,
+  match: (entry: AccountSwitch) => boolean,
+): AccountSwitch | undefined {
+  for (let i = log.length - 1; i >= 0; i -= 1) {
+    const entry = log[i] as AccountSwitch;
+    if (match(entry)) return entry;
+  }
+  return undefined;
+}

@@ -15,11 +15,14 @@ parseTurn ─ assistant lines with message.usage (not <synthetic>)
         ▼
 priceTurn ─ src/pricing.ts; 5m and 1h cache writes priced apart; speed "fast" doubles
         ▼
-owner = account whose sessions-map.json has the session id, else "unattributed"
+owner = account whose sessions-map.json has the session id, else "unattributed";
+        a session several accounts know: the login at the turn's time
+        (account-log.json), else the account that saw it last
         ▼
 <owner>/index/YYYY-MM.json  rows: day × project × model × scope × speed → Rollup
 <owner>/index/sessions.json session → totals, first/last time, project, branch, models,
-                            turnMs, thinkingMs, hookRuns, entrypoint, mcpLoaded, mcpUsed
+                            turnMs, thinkingMs, hookRuns, entrypoint, mcpLoaded, mcpUsed,
+                            attributedUsd, apiErrors
 ```
 
 - Offsets live in `~/.config/cc-daily-usage/index/offsets.json` with the size,
@@ -29,6 +32,30 @@ owner = account whose sessions-map.json has the session id, else "unattributed"
 - A pass starts no new file after 8 MB or 2 s (`PASS_BYTES`, `PASS_MS`); the
   rest is `bytesBehind` in `index/last-pass.json`. `catchUp` has no budget.
 - One pass at a time: `index/index.lock` (stale after 2 min).
+- A response that took several API requests carries `usage.iterations`; the
+  top-level counts are their sum. `priceTurn` prices each request on its own
+  (Haiku 5.5's long-prompt tier goes by one request's prompt), and
+  `contextTokens` is the last request's prompt, not the sum.
+- `usage.speed` "fast" and `usage.inference_geo` "us" select the fast and the
+  1.1× US-only prices (see `docs/prompt-cache.md`).
+- Re-price: `index/prices.json` holds the `PRICES_VERSION` (`src/pricing.ts`)
+  the index was built at. When a pass finds an older one (or none, with an
+  index present), it copies every owner's index to
+  `index/backup-prices-<old>/`, empties it, and rebuilds it from all
+  transcripts in that pass, unbounded, keeping the lock fresh. Rows and
+  sessions the rebuild did not produce (their transcripts are gone) come back
+  from the copy at the prices they were stored with; a rebuilt row with fewer
+  turns than before (a deleted transcript shared it, `rowsShort`) gets the
+  missing part back (`missingPart`): exact token and turn counts, the main $
+  fields at the old row's own $ per token. The
+  result is in `last-pass.json` (`repriced`). A crashed re-price restarts from
+  the copy. A newer `PRICES_VERSION` is never re-priced down.
+- Attribution: `attributionSkill` and `attributionMcpServer` on a priced line
+  (Claude Code's own, not in the public docs) add that turn's $ to the
+  session's `attributedUsd` under `skill:<name>` / `mcp:<server>`.
+- API errors (`parseApiError`): `<synthetic>` lines with `isApiErrorMessage`
+  count per session in `apiErrors`, keyed `<apiErrorStatus> <apiError>`
+  (`429 usage_limit_reached`), deduped like turns.
 - An unknown model counts tokens with no $ (`unpricedTurns`); totals that
   include one are a floor (`feed.json.spend.isFloor`).
 - Thinking $ is the output $ share of `thinking_tokens` (an estimate).
@@ -76,7 +103,9 @@ owner = account whose sessions-map.json has the session id, else "unattributed"
 - Columns: input, output, cache read, cache write, total; footer with the
   subagent share, thinking $, web searches, turn time (thinking time), hook
   runs and how sessions started (`entrypoint` counts), the unattributed $ and
-  the "API-equivalent estimate" label, and the efficiency line (new work /
+  the "API-equivalent estimate" label, the top 5 attributed skills and MCP
+  servers by $ ("Attributed by Claude Code"), API errors by kind, and the
+  efficiency line (new work /
   carry / rewrite shares and $ per MTok of new work with its band: good under
   $33, high over $80; only rows with the split count). `--by session` labels a
   row with Claude Code's session name when `sessions-map.json` has one, shows
@@ -93,8 +122,12 @@ owner = account whose sessions-map.json has the session id, else "unattributed"
 - `dayBreakdown(owner, day)`: one local day's $ with the top 3 sessions (last
   active that day), models and projects; the calendar's `d` key shows it.
 - Self-check (`selfCheck`): per session in range with no unpriced turn, index
-  $ vs the statusline's last `cost.total_cost_usd`; a gap over 5% (and over a
-  cent) prints "price table may be stale for <model>".
+  $ vs the statusline's last `cost.total_cost_usd` (`sessions-map.json`
+  `costUsd`, written whenever it changes), only when that sighting is not older
+  than the session's last indexed turn; a gap over 5% (and over a
+  cent) prints "index and Claude Code's own session cost differ by over 5%
+  for <model>". Prices are checked against the official table, so a gap
+  comes from Claude Code: its total includes requests not in the transcript.
 
 ## Shared modules
 

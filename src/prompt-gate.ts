@@ -7,6 +7,13 @@ export const DEFAULT_GATE_MIN_USD = 1;
 /** A re-submit within this window after a block goes through (the user confirmed). */
 const CONFIRM_WINDOW_MS = 2 * 60 * 1000;
 
+/**
+ * The fixed prompt Claude Code sends on its own when a claude.ai usage limit resets (autoContinueAtUsageLimit).
+ * The wait outlives any cache TTL, so the re-send cannot be avoided, nobody is there to confirm, and a block
+ * ends the wait (interactive-mode docs). Not in the docs: matched on its first sentence as seen in transcripts.
+ */
+const AUTO_CONTINUE_PROMPT = "Your claude.ai usage limit has reset.";
+
 interface PromptPayload {
   readonly session_id?: string;
   readonly prompt?: string;
@@ -22,14 +29,17 @@ export type GateDecision =
 /**
  * UserPromptSubmit gate: a prompt sent while the prompt cache is cold re-writes the whole conversation. A
  * blocked prompt is never sent, so blocking costs $0. Slash commands always pass (`/clear` is the free way
- * out). State comes from what the statusline last saved for this session — no network, no tokens.
+ * out), and so does Claude Code's automatic continue after a usage-limit reset. State comes from what the statusline last saved for this session — no network, no tokens.
  */
 export async function decidePromptGate(
   payload: PromptPayload,
   now: Date = new Date(),
 ): Promise<GateDecision> {
   const sessionId = payload.session_id;
-  if (!sessionId || (payload.prompt ?? "").trimStart().startsWith("/")) return { kind: "allow" };
+  const prompt = (payload.prompt ?? "").trimStart();
+  if (!sessionId || prompt.startsWith("/") || prompt.startsWith(AUTO_CONTINUE_PROMPT)) {
+    return { kind: "allow" };
+  }
 
   const key = accountKey(await resolveActiveAccount());
   const config = loadConfig(key);

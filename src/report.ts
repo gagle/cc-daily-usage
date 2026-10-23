@@ -91,10 +91,17 @@ export interface ReportActivity {
   readonly thinkingMs: number;
   readonly hookRuns: number;
   readonly entrypoints: Readonly<Record<string, number>>; // how sessions started → session count
+  readonly attributedUsd: Readonly<Record<string, number>>; // `skill:<name>` / `mcp:<server>` → $
+  readonly apiErrors: Readonly<Record<string, number>>; // `429 usage_limit_reached` → failed requests
 }
 
 export function activityOf(sessions: ReadonlyArray<SessionTotals>): ReportActivity {
   const entrypoints: Record<string, number> = {};
+  const attributedUsd: Record<string, number> = {};
+  const apiErrors: Record<string, number> = {};
+  const add = (into: Record<string, number>, from: Readonly<Record<string, number>> = {}): void => {
+    for (const [key, value] of Object.entries(from)) into[key] = (into[key] ?? 0) + value;
+  };
   let turnMs = 0;
   let thinkingMs = 0;
   let hookRuns = 0;
@@ -102,11 +109,13 @@ export function activityOf(sessions: ReadonlyArray<SessionTotals>): ReportActivi
     turnMs += session.turnMs ?? 0;
     thinkingMs += session.thinkingMs ?? 0;
     hookRuns += session.hookRuns ?? 0;
+    add(attributedUsd, session.attributedUsd);
+    add(apiErrors, session.apiErrors);
     if (session.entrypoint) {
       entrypoints[session.entrypoint] = (entrypoints[session.entrypoint] ?? 0) + 1;
     }
   }
-  return { turnMs, thinkingMs, hookRuns, entrypoints };
+  return { turnMs, thinkingMs, hookRuns, entrypoints, attributedUsd, apiErrors };
 }
 
 /** Rollups of `owner` inside `range`, keyed by row key. */
@@ -151,14 +160,18 @@ export function selfCheck(
   const stale = new Set<string>();
   for (const [sessionId, session] of Object.entries(totals)) {
     const statusline = seen[sessionId];
-    if (!statusline || session.unpricedTurns > 0) continue;
+    // A sighting older than the session's last indexed turn misses that turn's cost: nothing to compare.
+    if (!statusline || session.unpricedTurns > 0 || statusline.lastSeenAt < session.lastAt)
+      continue;
     const day = localDateKey(new Date(session.lastAt));
     if (day < range.from || day > range.to) continue;
     const gap = Math.abs(session.usd - statusline.costUsd);
     if (gap > 0.01 && gap > statusline.costUsd * 0.05)
       for (const model of session.models) stale.add(model);
   }
-  return [...stale].sort().map((model) => `price table may be stale for ${model}`);
+  return [...stale]
+    .sort()
+    .map((model) => `index and Claude Code's own session cost differ by over 5% for ${model}`);
 }
 
 export function buildReport(
@@ -295,6 +308,25 @@ function activityNote(activity: ReportActivity): string | null {
   return parts.length === 0 ? null : parts.join(" · ");
 }
 
+/** `Attributed: skill claude-api $12.40 · mcp tokensave $3.10 · …` (top 5), or null when nothing is. */
+function attributionNote(activity: ReportActivity): string | null {
+  const top = Object.entries(activity.attributedUsd)
+    .filter(([, usd]) => usd >= 0.01)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 5);
+  if (top.length === 0) return null;
+  const items = top.map(([name, usd]) => `${name.replace(":", " ")} ${money(usd)}`);
+  return `Attributed by Claude Code: ${items.join(" · ")}`;
+}
+
+/** `API errors 11: 429 usage_limit_reached ×8, 529 ×3`, or null with none. */
+function apiErrorNote(activity: ReportActivity): string | null {
+  const kinds = Object.entries(activity.apiErrors).sort(([, a], [, b]) => b - a);
+  if (kinds.length === 0) return null;
+  const total = kinds.reduce((sum, [, count]) => sum + count, 0);
+  return `API errors ${String(total)}: ${kinds.map(([kind, count]) => `${kind} ×${String(count)}`).join(", ")}`;
+}
+
 /** `Efficiency: new work 44% · carry 41% · rewrite 15% · $9/MTok of new work (good)`, or null before any
  * turn with the split (rows indexed before 2026-10-18 have none). */
 function efficiencyNote(total: Rollup): string | null {
@@ -410,6 +442,9 @@ export function formatReport(
   if (efficiency !== null) notes.push(efficiency);
   const activity = activityNote(report.activity);
   if (activity !== null) notes.push(activity);
+  for (const note of [attributionNote(report.activity), apiErrorNote(report.activity)]) {
+    if (note !== null) notes.push(note);
+  }
   if (report.total.unpricedTurns > 0) {
     notes.push(
       `${String(report.total.unpricedTurns)} turns on models with no price: totals are a floor.`,

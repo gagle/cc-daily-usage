@@ -201,7 +201,10 @@ export function adviseNow(
     const writeShare = session.usd.cacheWrite / total;
     const resend = session.efficiency.rewriteUsd / total;
     if (writeShare > 0.3 && resend < RESEND_GOOD) {
-      const rates = session.lastMain === null ? null : ratesFor(session.lastMain.model);
+      const rates =
+        session.lastMain === null
+          ? null
+          : ratesFor(session.lastMain.model, session.lastMain.fast, session.lastMain.context);
       const rate = rates === null ? "" : ` ($${String(cacheWriteRate(rates, "5m"))}/MTok here)`;
       tips.push({
         key: "new-context",

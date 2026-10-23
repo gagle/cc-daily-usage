@@ -227,4 +227,52 @@ describe("account.ts", () => {
       ).toBe("gabriel_llamas_cc_example_com");
     });
   });
+
+  describe("account switch log", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = new Date("2026-10-23T08:00:00.000Z");
+
+    it("appends only a change of login", async () => {
+      const { recordAccountSwitch } = await freshAccountModule();
+      expect(recordAccountSwitch([], "a", now)).toEqual([{ t: now.getTime(), key: "a" }]);
+      expect(recordAccountSwitch([{ t: 1, key: "a" }], "a", now)).toBeNull();
+    });
+
+    it("keeps 35 days plus the newest older entry", async () => {
+      const { recordAccountSwitch } = await freshAccountModule();
+      const t = now.getTime();
+      const log = [
+        { t: t - 50 * DAY, key: "a" },
+        { t: t - 40 * DAY, key: "b" },
+        { t: t - 10 * DAY, key: "a" },
+      ];
+      expect(recordAccountSwitch(log, "b", now)?.map((entry) => entry.key)).toEqual([
+        "b",
+        "a",
+        "b",
+      ]);
+      // Nothing inside the window: only the login active when it opened stays.
+      expect(recordAccountSwitch(log.slice(0, 2), "a", now)).toEqual([
+        { t: t - 40 * DAY, key: "b" },
+        { t, key: "a" },
+      ]);
+      // Every entry inside the window: all kept.
+      expect(recordAccountSwitch([{ t: t - DAY, key: "a" }], "b", now)).toHaveLength(2);
+    });
+
+    it("accountAt and lastSwitchTo read the log by time", async () => {
+      const { accountAt, lastSwitchTo } = await freshAccountModule();
+      const log = [
+        { t: 10, key: "a" },
+        { t: 20, key: "b" },
+        { t: 30, key: "a" },
+      ];
+      expect(accountAt(log, 5)).toBeNull();
+      expect(accountAt(log, 20)).toBe("b");
+      expect(accountAt(log, 99)).toBe("a");
+      expect(lastSwitchTo(log, "a")).toBe(30);
+      expect(lastSwitchTo(log, "b")).toBe(20);
+      expect(lastSwitchTo(log, "c")).toBeNull();
+    });
+  });
 });

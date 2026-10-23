@@ -148,7 +148,14 @@ describe("efficiency note", () => {
       subagentUsd: 0,
       unattributedUsd: 0,
       gaps: [],
-      activity: { turnMs: 0, thinkingMs: 0, hookRuns: 0, entrypoints: {} },
+      activity: {
+        turnMs: 0,
+        thinkingMs: 0,
+        hookRuns: 0,
+        entrypoints: {},
+        attributedUsd: {},
+        apiErrors: {},
+      },
     };
     expect(formatReport(base)).toContain(
       "Efficiency: new work 50% · carry 40% · rewrite 10% · $100/MTok of new work (high)",
@@ -319,7 +326,14 @@ describe("buildReport / formatReport", () => {
     expect(formatReport({ ...byModel, rows: [] }, { chart: true, color: false })).toMatch(
       /^No usage/,
     );
-    expect(byModel.activity).toEqual({ turnMs: 0, thinkingMs: 0, hookRuns: 0, entrypoints: {} });
+    expect(byModel.activity).toEqual({
+      turnMs: 0,
+      thinkingMs: 0,
+      hookRuns: 0,
+      entrypoints: {},
+      attributedUsd: {},
+      apiErrors: {},
+    });
     expect(text).not.toContain("Turn time");
     const busy = formatReport({
       ...byModel,
@@ -328,15 +342,42 @@ describe("buildReport / formatReport", () => {
         thinkingMs: 30_000,
         hookRuns: 12,
         entrypoints: { cli: 3, "sdk-ts": 5 },
+        attributedUsd: {
+          "skill:claude-api": 12.4,
+          "mcp:tokensave": 3.1,
+          "skill:a": 0.5,
+          "skill:b": 0.4,
+          "skill:c": 0.3,
+          "skill:d": 0.2,
+          "skill:tiny": 0.001,
+        },
+        apiErrors: { "529": 3, "429 usage_limit_reached": 8 },
       },
     });
+    expect(busy).toContain(
+      "Attributed by Claude Code: skill claude-api $12.40 · mcp tokensave $3.10 · skill a $0.50 · skill b $0.40 · skill c $0.30",
+    );
+    expect(busy).toContain("API errors 11: 429 usage_limit_reached ×8, 529 ×3");
+    expect(
+      formatReport({
+        ...byModel,
+        activity: { ...byModel.activity, attributedUsd: { "skill:tiny": 0.001 } },
+      }),
+    ).not.toContain("Attributed");
     expect(busy).toContain(
       "Turn time 3h12m (thinking <1m) · 12 hook runs · started from sdk-ts 5, cli 3",
     );
     expect(
       formatReport({
         ...byModel,
-        activity: { turnMs: 0, thinkingMs: 2_400_000, hookRuns: 0, entrypoints: {} },
+        activity: {
+          turnMs: 0,
+          thinkingMs: 2_400_000,
+          hookRuns: 0,
+          entrypoints: {},
+          attributedUsd: {},
+          apiErrors: {},
+        },
       }),
     ).toContain("Turn time <1m (thinking 40m)");
 
@@ -369,8 +410,16 @@ describe("buildReport / formatReport", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       path.join(dir, "s1.jsonl"),
-      line("a", { entrypoint: "cli", thinkingDurationMs: 60_000 }) +
-        `${JSON.stringify({ type: "system", subtype: "turn_duration", sessionId: "s1", durationMs: 120_000 })}\n`,
+      line("a", {
+        entrypoint: "cli",
+        thinkingDurationMs: 60_000,
+        attributionSkill: "claude-api",
+        attributionMcpServer: "tokensave",
+      }) +
+        `${JSON.stringify({ type: "system", subtype: "turn_duration", sessionId: "s1", durationMs: 120_000 })}\n` +
+        `${JSON.stringify({ type: "assistant", sessionId: "s1", requestId: "r9", uuid: "u9", isApiErrorMessage: true, apiErrorStatus: 429, apiError: "rate_limit", message: { model: "<synthetic>", usage: {} } })}\n` +
+        `${JSON.stringify({ type: "assistant", sessionId: "s1", requestId: "r9", uuid: "u9", isApiErrorMessage: true, apiErrorStatus: 429, apiError: "rate_limit", message: { model: "<synthetic>", usage: {} } })}\n` +
+        `${JSON.stringify({ type: "assistant", sessionId: "s1", uuid: "u10", isApiErrorMessage: true })}\n`,
     );
     const { runIndexPass } = await import("./transcript-index.js");
     runIndexPass({ now: NOW });
@@ -384,7 +433,13 @@ describe("buildReport / formatReport", () => {
       thinkingMs: 60_000,
       hookRuns: 0,
       entrypoints: { cli: 1 },
+      attributedUsd: {
+        "skill:claude-api": report.activity.attributedUsd["skill:claude-api"],
+        "mcp:tokensave": report.activity.attributedUsd["skill:claude-api"],
+      },
+      apiErrors: { "429 rate_limit": 1, error: 1 }, // the repeated line counts once
     });
+    expect(report.activity.attributedUsd["skill:claude-api"]).toBeGreaterThan(0);
   });
 
   it("activityOf counts a session from an older index as zero time", async () => {
@@ -405,6 +460,8 @@ describe("buildReport / formatReport", () => {
       thinkingMs: 0,
       hookRuns: 0,
       entrypoints: {},
+      attributedUsd: {},
+      apiErrors: {},
     });
   });
 
@@ -416,10 +473,10 @@ describe("buildReport / formatReport", () => {
     if (!week) throw new Error("range");
     const report = buildReport("acct", week, "model");
     expect(report.gaps).toEqual([
-      "price table may be stale for claude-opus-5-5",
-      "price table may be stale for claude-sonnet-5-5",
+      "index and Claude Code's own session cost differ by over 5% for claude-opus-5-5",
+      "index and Claude Code's own session cost differ by over 5% for claude-sonnet-5-5",
     ]);
-    expect(formatReport(report)).toContain("price table may be stale");
+    expect(formatReport(report)).toContain("differ by over 5%");
     const session = {
       firstAt: "",
       lastAt: "2026-01-01T00:00:00.000Z",
@@ -439,7 +496,9 @@ describe("buildReport / formatReport", () => {
       linesAdded: 0,
       linesRemoved: 0,
     };
-    expect(selfCheck({ old: session }, { old: seen }, week)).toEqual([]);
+    expect(
+      selfCheck({ old: session }, { old: { ...seen, lastSeenAt: NOW.toISOString() } }, week),
+    ).toEqual([]); // out of range
     expect(
       selfCheck(
         { x: { ...session, lastAt: NOW.toISOString(), unpricedTurns: 1 } },
@@ -447,8 +506,17 @@ describe("buildReport / formatReport", () => {
         week,
       ),
     ).toEqual([]);
+    const current = { ...seen, lastSeenAt: NOW.toISOString() };
     expect(
-      selfCheck({ y: { ...session, lastAt: NOW.toISOString(), usd: 1.004 } }, { y: seen }, week),
+      selfCheck({ y: { ...session, lastAt: NOW.toISOString(), usd: 1.004 } }, { y: current }, week),
+    ).toEqual([]);
+    expect(
+      selfCheck({ z: { ...session, lastAt: NOW.toISOString(), usd: 2 } }, { z: current }, week),
+    ).toEqual(["index and Claude Code's own session cost differ by over 5% for m"]);
+    // The statusline last saw the session before its last indexed turn: its cost lags, no comparison.
+    const stale = { ...seen, lastSeenAt: new Date(NOW.getTime() - 60_000).toISOString() };
+    expect(
+      selfCheck({ z: { ...session, lastAt: NOW.toISOString(), usd: 2 } }, { z: stale }, week),
     ).toEqual([]);
   });
 

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -497,6 +497,147 @@ describe("buildStatuslineState", () => {
       warmUsd: 0,
     });
     await buildStatuslineState(payload, NOW); // same value → unchanged
+  });
+
+  it("the prompt's $: session cost since its prompt_id was first seen", async () => {
+    writeAccount("claude_enterprise");
+    const { buildStatuslineState } = await fresh();
+    const at = (promptId: string | undefined, cost: number) =>
+      buildStatuslineState(
+        {
+          session_id: "s1",
+          ...(promptId ? { prompt_id: promptId } : {}),
+          cost: { total_cost_usd: cost },
+        },
+        NOW,
+      );
+    expect((await at(undefined, 1)).promptUsd).toBeNull();
+    expect((await at("p1", 1.5)).promptUsd).toBe(0.5); // started at the last cost seen, $1
+    expect((await at("p1", 2)).promptUsd).toBe(1);
+    expect((await at("p2", 2.25)).promptUsd).toBe(0.25);
+  });
+});
+
+describe("account switch", () => {
+  const PRO = "me_gmail_com";
+  const usageOf = (key: string): Record<string, unknown> =>
+    JSON.parse(
+      readFileSync(
+        path.join(fakeHome, ".config", "cc-daily-usage", "accounts", key, "usage.json"),
+        "utf8",
+      ),
+    ) as Record<string, unknown>;
+  const login = (email: string, organizationType: string): void => {
+    writeFileSync(
+      path.join(fakeHome, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: email, organizationType } }),
+    );
+  };
+  const at = (minutes: number): Date => new Date(NOW.getTime() + minutes * 60_000);
+  const limits = (pct: number) => ({ five_hour: { used_percentage: pct, resets_at: 2e9 } });
+
+  it("a /login moves the session: each account books only its own part", async () => {
+    const { buildStatuslineState } = await fresh();
+    login("me@gmail.com", "claude_pro");
+    await buildStatuslineState(
+      { session_id: "s1", cost: { total_cost_usd: 10 }, rate_limits: limits(40) },
+      at(0),
+    );
+    expect(usageOf(PRO).apiEqTotal).toBe(10);
+
+    // The /login in another terminal: the hook still carries the Pro session's cost and limits.
+    login("dev@example.com", "claude_enterprise");
+    const first = await buildStatuslineState(
+      { session_id: "s1", cost: { total_cost_usd: 10 }, rate_limits: limits(40) },
+      at(1),
+    );
+    expect(first).toMatchObject({ monthlySpent: 0, accountSwitch: "dev@example.com" });
+    expect(usageOf(KEY)).toMatchObject({ apiEqTotal: 0 });
+    expect(usageOf(KEY).rateLimitsCache).toBeUndefined();
+
+    // The first response under the new login moves the cost: its limits count from now on.
+    const next = await buildStatuslineState(
+      { session_id: "s1", cost: { total_cost_usd: 12 }, rate_limits: limits(20) },
+      at(2),
+    );
+    expect(next).toMatchObject({ monthlySpent: 2, promptUsd: null });
+    expect(usageOf(KEY)).toMatchObject({ apiEqTotal: 2, rateLimitsCache: { fiveHourPct: 20 } });
+    expect((usageOf(KEY).sessions as Record<string, object>).s1).not.toHaveProperty("switchCost");
+
+    const later = await buildStatuslineState(
+      { session_id: "s1", cost: { total_cost_usd: 12 } },
+      at(12),
+    );
+    expect(later.accountSwitch).toBeNull();
+
+    // Back to Pro: its old baseline is older than the enterprise sighting, so only the new $3 is Pro's.
+    login("me@gmail.com", "claude_pro");
+    await buildStatuslineState({ session_id: "s1", cost: { total_cost_usd: 15 } }, at(13));
+    expect(usageOf(PRO).apiEqTotal).toBe(13);
+    const log = JSON.parse(
+      readFileSync(path.join(fakeHome, ".config", "cc-daily-usage", "account-log.json"), "utf8"),
+    ) as { switches: Array<{ key: string }> };
+    expect(log.switches.map((entry) => entry.key)).toEqual([PRO, KEY, PRO]);
+  });
+
+  it("a logout names the switch by its account key", async () => {
+    const { buildStatuslineState } = await fresh();
+    login("me@gmail.com", "claude_pro");
+    await buildStatuslineState({ session_id: "s1", cost: { total_cost_usd: 1 } }, at(0));
+    rmSync(path.join(fakeHome, ".claude.json"));
+    const state = await buildStatuslineState(
+      { session_id: "s1", cost: { total_cost_usd: 1 } },
+      at(1),
+    );
+    expect(state.accountSwitch).toBe("default");
+  });
+
+  it("a per-terminal token is not a switch of the shared login", async () => {
+    const { buildStatuslineState } = await fresh();
+    vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "tok");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    login("dev@example.com", "claude_enterprise");
+    await buildStatuslineState({ session_id: "s1", cost: { total_cost_usd: 1 } }, NOW);
+    expect(existsSync(path.join(fakeHome, ".config", "cc-daily-usage", "account-log.json"))).toBe(
+      false,
+    );
+  });
+
+  it("takeOverSession takes the newest other sighting, with its miss data", async () => {
+    const { takeOverSession } = await fresh();
+    const write = (key: string, sessions: Record<string, unknown>): void => {
+      const dir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", key);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "usage.json"), JSON.stringify({ sessions }));
+    };
+    const seen = (minutes: number, cost: number, extra: object = {}) => ({
+      lastSeenCost: cost,
+      lastSeenAt: at(minutes).toISOString(),
+      ...extra,
+    });
+    write("a", { s1: seen(1, 5) });
+    write("b", { s1: seen(3, 7, { cacheMissUsd: 0.5, missCounts: { ttl: 2 } }) });
+    write("c", { s1: seen(2, 6) });
+    write("d", {});
+    const usage = { sessions: {} } as unknown as Parameters<typeof takeOverSession>[0];
+    takeOverSession(usage, "a", "s1", null, 8, at(4));
+    expect(usage.sessions.s1).toEqual({
+      lastSeenCost: 7,
+      lastSeenAt: at(4).toISOString(),
+      cacheMissUsd: 0.5,
+      missCounts: { ttl: 2 },
+      switchedAt: at(4).getTime(),
+      switchCost: 8,
+    });
+    // Seen here after the last switch to here: nothing to read.
+    takeOverSession(usage, "a", "s1", at(3).getTime(), 9, at(5));
+    expect(usage.sessions.s1?.lastSeenCost).toBe(7);
+    // Nothing newer elsewhere: own baseline stays.
+    takeOverSession(usage, "a", "s1", at(5).getTime(), 9, at(6));
+    expect(usage.sessions.s1?.switchedAt).toBe(at(4).getTime());
+    // A brand-new session nobody saw: no baseline.
+    takeOverSession(usage, "a", "s2", null, 1, at(6));
+    expect(usage.sessions.s2).toBeUndefined();
   });
 });
 

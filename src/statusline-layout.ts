@@ -12,7 +12,7 @@ export const PARTS = [
   { id: "duration", label: "Session duration", sample: "⏲ 12m 5s" },
   { id: "model", label: "Model", sample: "🤖 Opus 5.5" },
   { id: "effort", label: "Effort", sample: "💪 high" },
-  { id: "cache", label: "Prompt cache", sample: "🔥 cold in 4m · $0.04/msg" },
+  { id: "cache", label: "Prompt cache", sample: "🔥 cold in 4m · $0.04/req" },
   { id: "limits", label: "5h / 7d limits (Pro/Max)", sample: "⏱ 25%/5h 76%/7d" },
   { id: "warnings", label: "Limit warnings (Pro/Max)", sample: "⚠ 5h resets 14:00" },
   { id: "credits", label: "Usage credits (Pro/Max)", sample: "🎫 $3.00/$50.00 (6%)" },

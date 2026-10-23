@@ -19,6 +19,7 @@ function turn(overrides: Partial<Turn> = {}): Turn {
     cwd: "/p",
     branch: "",
     fast: false,
+    usOnly: false,
     input: 0,
     output: 0,
     cacheRead: 0,

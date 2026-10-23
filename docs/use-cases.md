@@ -121,8 +121,11 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 
 1. `(🌿 branch)` when in a git repo (no repo name — Claude Code already shows the project).
 2. Context bar (20 cells) + emoji + `%`.
-3. Session cost `$X.XX`.
-4. `⏲` session duration.
+3. Session cost `$X.XX`, then `· prompt $X.XX`: the prompt being processed,
+   all its requests and subagents (`trackPrompt`: cost now − cost before its
+   `prompt_id` was first seen).
+4. `⏲` session duration, then `· api 40m`: time waiting for API responses
+   (`cost.total_api_duration_ms`).
 5. `🤖` model.
 6. `💪` effort.
 7. `🔥`/`❄` prompt-cache forecast, color fading with the TTL (see `docs/prompt-cache.md`).
@@ -146,3 +149,7 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 14. `» <action>` — the next action: what to do now (cache about to go cold,
     cold cache, deep context, a limit at risk) or the week's top habit with its
     $ (`docs/coach.md`); on its own line by default.
+
+Before every part, not set in the layout: `⇄ <email>` for 10 minutes after a
+`/login` (in any terminal) moved this session to another account (see "Account
+switch" in `docs/architecture.md`).

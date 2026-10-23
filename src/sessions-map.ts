@@ -14,10 +14,10 @@ export interface SessionSighting {
 }
 
 /**
- * Records one render's view of a session. A new session, a changed transcript path or name, or an entry last
- * touched an hour ago gives a new map (entries past SESSION_MAP_DAYS drop then); otherwise the same object
- * comes back, so the render skips the write.
- * # ponytail: cost and lines lag up to an hour; fine for $ per 100 lines, upgrade by writing on change.
+ * Records one render's view of a session. A new session, a changed transcript path, name, cost or lines, or
+ * an entry last touched an hour ago gives a new map (entries past SESSION_MAP_DAYS drop then); otherwise the
+ * same object comes back, so the render skips the write. The cost stays current: the report checks the index
+ * against it (selfCheck).
  */
 export function recordSession(
   sessions: Readonly<Record<string, SessionMapEntry>>,
@@ -30,6 +30,9 @@ export function recordSession(
     !prior ||
     prior.transcriptPath !== seen.transcriptPath ||
     (prior.name ?? null) !== seen.name ||
+    prior.costUsd !== seen.costUsd ||
+    prior.linesAdded !== seen.linesAdded ||
+    prior.linesRemoved !== seen.linesRemoved ||
     now.getTime() - new Date(prior.lastSeenAt).getTime() >= HOUR_MS;
   if (!due) return sessions;
   const cutoff = now.getTime() - SESSION_MAP_DAYS * 24 * HOUR_MS;

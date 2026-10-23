@@ -414,4 +414,28 @@ describe("config.ts", () => {
     expect(readFileSync(file, "utf8")).toBe("{}");
     expect(readdirSync(path.dirname(file))).toEqual(["f.json"]);
   });
+
+  it("lists account folders and peeks one session read-only", async () => {
+    const { listAccountKeys, peekSessionCost, ACCOUNTS_DIR } = await freshConfigModule();
+    expect(listAccountKeys()).toEqual([]);
+    expect(peekSessionCost("a", "s1")).toBeUndefined(); // no file
+    mkdirSync(path.join(ACCOUNTS_DIR, "a"), { recursive: true });
+    const file = path.join(ACCOUNTS_DIR, "a", "usage.json");
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1 }));
+    expect(listAccountKeys()).toEqual(["a"]);
+    expect(peekSessionCost("a", "s1")).toBeUndefined(); // no sessions
+    const entry = { lastSeenCost: 3, lastSeenAt: "2026-10-23T08:00:00.000Z" };
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, sessions: { s1: entry } }));
+    expect(peekSessionCost("a", "s1")).toEqual(entry);
+    expect(readdirSync(path.join(ACCOUNTS_DIR, "a"))).toEqual(["usage.json"]); // no backup, no seed
+  });
+
+  it("account-log.json round-trips; a missing or bad one is empty", async () => {
+    const { loadAccountLog, saveAccountLog, ACCOUNT_LOG_FILE } = await freshConfigModule();
+    expect(loadAccountLog()).toEqual([]);
+    saveAccountLog([{ t: 1, key: "a" }]);
+    expect(loadAccountLog()).toEqual([{ t: 1, key: "a" }]);
+    writeFileSync(ACCOUNT_LOG_FILE, JSON.stringify({ schemaVersion: 1, switches: {} }));
+    expect(loadAccountLog()).toEqual([]);
+  });
 });

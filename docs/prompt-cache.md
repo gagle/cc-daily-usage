@@ -25,12 +25,15 @@ cache-rehydration check.
 ## Formulas (`forecastCache`)
 
 ```
-rates      = ratesFor(model.id, fast_mode)            (null → no segment)
+rates      = ratesFor(model.id, fast_mode, context)   (null → ⚠ no-price warning)
 writeRate  = input × (ttl == 1h ? 2 : 1.25)
 warm       = prompt_cache.warm and (expires_at null or > now)
-nextWarm   = context_window.total_input_tokens × cacheRead
-nextCold   = recache_tokens_if_cold × writeRate        (null after /compact)
-premium    = max(0, nextCold − nextWarm)               what letting it expire costs
+cached     = current_usage.cache_read_input_tokens + cache_creation_input_tokens
+             (no current_usage → total_input_tokens)
+nextWarm   = cached × cacheRead                       the prefix the next request reads
+premium    = min(recache_tokens_if_cold, cached) × (writeRate − cacheRead)
+             (null after /compact)                    what letting it expire costs
+nextCold   = nextWarm + premium
 sessionMiss= miss_recache_tokens × (writeRate − cacheRead)   already re-paid
 recentMiss = last_miss_cause.causes ("_" → " "), only within RECENT_MISS_S (120 s) of last_miss_at
 hint       = warm and premium ≥ $1 → "break" ; cold and nextCold ≥ $1 → "clear" ;
@@ -38,11 +41,16 @@ hint       = warm and premium ≥ $1 → "break" ; cold and nextCold ≥ $1 → 
 ```
 
 The forecast is the **input-side floor** the history alone costs on the next
-prompt. Output tokens and the new prompt text are unknown in advance.
+API request. The fresh input of the last request, its output and the new
+prompt are written to the cache warm or cold alike, so they are not in the
+premium; their size is unknown in advance, so they are not in `$/req`. One
+prompt can make many requests (each tool call is one), each paying `$/req`
+again. Rates are list price (see Pricing table): on a subscription the $ is
+API-equivalent, not billed.
 
 ## Cost by context size (Opus 5.5, $4/MTok input)
 
-| Context | Each message, warm (read 0.05×) | Miss, 5m TTL (1.25×) | Miss, 1h TTL (2×) |
+| Context | Each request, warm (read 0.05×) | Miss, 5m TTL (1.25×) | Miss, 1h TTL (2×) |
 | ------- | ------------------------------- | -------------------- | ----------------- |
 | 50k     | $0.01                           | $0.25                | $0.40             |
 | 200k    | $0.04                           | $1.00                | $1.60             |
@@ -58,13 +66,15 @@ statusline segment shows the row for the current context.
 Part 7 (`cache`) of the statusline layout (see `docs/use-cases.md`).
 
 ```
-🔥 cold in 4m · $0.10/msg · if cold +$2.40
-❄ cold · next msg ~$2.45 · miss: tools changed
+🔥 cold in 4m · $0.10/req · if cold +$2.40
+❄ cold · next req ~$2.45 · miss: tools changed
 ```
 
-- `$/msg` — what each message costs now with a warm cache (the table's first
-  column for your context). `if cold +$` — the extra the next message costs if the cache goes cold
+- `$/req` — what each API request (each prompt and each tool step) costs now with a warm cache (the table's first
+  column for your context). `if cold +$` — the extra the next request costs if the cache goes cold
   first (expiry, `/model`); a forecast, not a miss that happened.
+- `2/14 req missed` — `prompt_cache.misses` of `requests` this session, when
+  any; expected rebuilds (compaction, tool-result clearing) are not misses.
 - `miss: <causes>` shows for two minutes after a miss (`recentMiss`), so the
   cause is on screen when the $ jumps; then the line is short again. No advice
   text. Miss causes are booked per day (below) and feed the coach
@@ -89,7 +99,10 @@ while the cache is cold and the re-send would cost at least
 `promptGateMinUsd` (config, default $1, `0` turns it off), the prompt is
 blocked — a blocked prompt is never sent, so it costs $0 — with the price and
 the choices: send again within 2 minutes to go ahead, or `/clear`. Slash
-commands always pass. State: `cacheGate` / `gateArmedAt` on the session in
+commands always pass, and so does Claude Code's automatic continue after a
+usage-limit reset (`AUTO_CONTINUE_PROMPT`, matched on "Your claude.ai usage
+limit has reset."): blocking it ends the unattended wait, and after a limit
+wait the cache is always cold, so the re-send cannot be avoided. State: `cacheGate` / `gateArmedAt` on the session in
 `usage.json`, written by the statusline; no network.
 
 ## Model switch (`src/model-switch.ts`)
@@ -118,8 +131,20 @@ for large sessions with breaks it is far cheaper.
 
 ## Pricing table
 
-`RATES` in `src/pricing.ts` is a dated snapshot of Anthropic list prices. An
-unknown model id is unpriced (no segment) rather than guessed. Fast mode
-doubles rates on the models that have it. The `# ponytail` note in the file
-names the upgrade path (Claude Code's `modelPricing` setting, or a pricing
-file).
+`RATES` in `src/pricing.ts` is a dated snapshot of Anthropic list prices
+(platform.claude.com pricing page), covering every model served in the last
+6 months. An unknown model id is unpriced rather than guessed: the `cache`
+part reads `⚠ <model id>: no price, $ not estimated`.
+
+- Cache writes 1.25× input (5m) / 2× (1h). Cache reads 0.1× input, except
+  Fable 5.1 / Mythos 5.1 (0.025×) and Opus 5.5 / Sonnet 5.5 (0.05×).
+- Fast mode (`FAST_MODE_MULTIPLIER`) when `usage.speed` is `fast`: 2× on Opus
+  5.5 / 5 / 4.8; 6× on Opus 4.6 / 4.7 (archived fast-mode page), whose fast
+  mode is removed, so the live forecast prices them standard
+  (`fastModeBilled`).
+- Haiku 5.5 over 100K prompt tokens (input + cache read + cache write): $0.50
+  input, $0.05 read, $2.50 output. `ratesFor` takes the prompt size.
+- `usage.inference_geo: "us"` in a transcript: 1.1× on every token price,
+  stacked on the above. The statusline payload has no geo field, so the live
+  forecast is at global prices.
+- Claude Code's `modelPricing` (contracted rates) is not read.

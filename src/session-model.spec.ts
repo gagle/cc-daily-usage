@@ -30,6 +30,7 @@ function turn(overrides: Partial<Turn> = {}): Turn {
     cwd: "/work/app",
     branch: "main",
     fast: false,
+    usOnly: false,
     input: 1000,
     output: 1000,
     cacheRead: 0,
@@ -123,7 +124,7 @@ describe("cacheState", () => {
 
     addSessionTurn(s, turn({ timestamp: at(1), cacheWrite1h: 10 }), "main", "f");
     expect(cacheState(s, T0 + 60_000)?.ttlSeconds).toBe(3600);
-    expect(cacheState(s, T0 + 60_000)?.nextColdUsd).toBeCloseTo((1010 * 8) / 1e6);
+    expect(cacheState(s, T0 + 60_000)?.nextColdUsd).toBeCloseTo((10 * 8) / 1e6, 9); // cached prefix only, not fresh input
     addSessionTurn(s, turn({ timestamp: at(2), cacheWrite5m: 10 }), "main", "f");
     expect(cacheState(s, T0)?.ttlSeconds).toBe(300);
   });

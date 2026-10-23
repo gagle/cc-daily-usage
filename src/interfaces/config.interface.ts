@@ -23,6 +23,10 @@ export interface SessionCost {
   };
   gateArmedAt?: number; // epoch ms the gate blocked a prompt; a re-submit soon after goes through
   missCounts?: Readonly<Record<string, number>>; // last-seen prompt_cache.miss_causes, for per-day deltas
+  promptId?: string; // Claude Code's prompt_id of the prompt being processed
+  promptStartCost?: number; // lastSeenCost before that prompt: its cost so far is lastSeenCost − this
+  switchedAt?: number; // epoch ms this account took the session over after a `/login` (statusline ⇄ marker)
+  switchCost?: number; // cost.total_cost_usd then; until it moves, the hook's rate_limits are the old login's
 }
 
 /** $ and count of prompt-cache misses one cause explains on one local day. */

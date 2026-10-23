@@ -11,6 +11,7 @@ import type {
 export interface HookPayload extends CachePayload {
   readonly session_id?: string;
   readonly session_name?: string;
+  readonly prompt_id?: string; // the prompt being processed; absent until the first prompt
   readonly version?: string; // Claude Code version
   readonly transcript_path?: string;
   readonly workspace?: {
@@ -24,6 +25,7 @@ export interface HookPayload extends CachePayload {
   readonly cost?: {
     readonly total_cost_usd?: number;
     readonly total_duration_ms?: number;
+    readonly total_api_duration_ms?: number;
     readonly total_lines_added?: number;
     readonly total_lines_removed?: number;
   };
@@ -82,6 +84,7 @@ export interface StatuslineState {
     readonly extraWindows: ReadonlyArray<ApiExtraWindow>;
   } | null;
   readonly cache: CacheForecast | null;
+  readonly promptUsd?: number | null; // $ of the prompt being processed (trackPrompt); null without prompt_id
   readonly runway?: { readonly fiveHour: Runway | null; readonly sevenDay: Runway | null };
   readonly coach?: {
     readonly id?: string;
@@ -92,4 +95,5 @@ export interface StatuslineState {
   } | null;
   readonly hasSpendCap: boolean;
   readonly planType: string | null;
+  readonly accountSwitch?: string | null; // the new login, for a few minutes after a `/login` moved this session
 }

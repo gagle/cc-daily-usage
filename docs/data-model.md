@@ -16,6 +16,7 @@ Types live in `src/interfaces/config.interface.ts` and
   accounts/<accountKey>/refresh.lock     present while a refresher runs (stale after 30 s)
   accounts/<accountKey>/*.corrupt-<ms>   copy of a corrupt file, kept before re-seeding
   profiles.json                          token-hash → Account, for CLAUDE_CODE_OAUTH_TOKEN users
+  account-log.json                       { schemaVersion 1, switches: { t, key }[] } — render, on a login change
   previous-statusline.json               what install replaced; read by uninstall
   statusline.json                        { rows: PartId[][] } — written by `settings`, read by every render
 ~/.claude/statusline.mjs                 the managed shim (from assets/statusline.mjs)
@@ -37,6 +38,7 @@ A missing version is 0 (the format before versioning).
 | `api-cache.json`                                | 1 (`API_CACHE_MIGRATIONS`) | none: a cache; the next refresh writes the version                  |
 | `statusline.json`                               | 1 (`LAYOUT_MIGRATIONS`)    | none on render; the next `settings` save writes the version         |
 | `limits.json`, `sessions-map.json`, `feed.json` | 1                          | new files, versioned from the start                                 |
+| `account-log.json`                              | 1                          | new file, versioned from the start                                  |
 
 - Backup: `<file>.bak-<ISO with - for :>-<pid>` next to the file; the newest 3
   are kept (`backupFile`).
@@ -58,23 +60,30 @@ A missing version is 0 (the format before versioning).
 
 ## `UsageState` (schema v2)
 
-| Field             | Meaning                                                                                           |
-| ----------------- | ------------------------------------------------------------------------------------------------- |
-| `schemaVersion`   | `2`                                                                                               |
-| `monthlySpent`    | spend in the current UTC period                                                                   |
-| `periodFrozen`    | part of `monthlySpent` frozen into past local days                                                |
-| `lastUpdated`     | ISO instant; moves only when a boundary is crossed                                                |
-| `days`            | local `YYYY-MM-DD` → frozen $                                                                     |
-| `sessions`        | session id → `{ lastSeenCost, lastSeenAt, cacheMissUsd?, cacheGate?, gateArmedAt?, missCounts? }` |
-| `ledgerBaseline`  | ledger reading at this period's start                                                             |
-| `sinceLedger`     | `{ readAt, usd }`: known sessions' growth since the ledger reading taken at `readAt`              |
-| `rateLimitsCache` | last hook `rate_limits` snapshot + `seenAt`                                                       |
-| `extraUsageCache` | v1 only; read once as a fallback until `api-cache.json` exists                                    |
-| `apiEqDays`       | local `YYYY-MM-DD` → API-equivalent $ of every session seen, any plan; 62 days kept               |
-| `apiEqTotal`      | monotone sum of the same deltas; limit samples difference it                                      |
-| `missCauses`      | local `YYYY-MM-DD` → cache-miss cause → `{ count, usd }`; 62 days kept                            |
+| Field             | Meaning                                                                                                                                                  |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`   | `2`                                                                                                                                                      |
+| `monthlySpent`    | spend in the current UTC period                                                                                                                          |
+| `periodFrozen`    | part of `monthlySpent` frozen into past local days                                                                                                       |
+| `lastUpdated`     | ISO instant; moves only when a boundary is crossed                                                                                                       |
+| `days`            | local `YYYY-MM-DD` → frozen $                                                                                                                            |
+| `sessions`        | session id → `{ lastSeenCost, lastSeenAt, cacheMissUsd?, cacheGate?, gateArmedAt?, missCounts?, promptId?, promptStartCost?, switchedAt?, switchCost? }` |
+| `ledgerBaseline`  | ledger reading at this period's start                                                                                                                    |
+| `sinceLedger`     | `{ readAt, usd }`: known sessions' growth since the ledger reading taken at `readAt`                                                                     |
+| `rateLimitsCache` | last hook `rate_limits` snapshot + `seenAt`                                                                                                              |
+| `extraUsageCache` | v1 only; read once as a fallback until `api-cache.json` exists                                                                                           |
+| `apiEqDays`       | local `YYYY-MM-DD` → API-equivalent $ of every session seen, any plan; 62 days kept                                                                      |
+| `apiEqTotal`      | monotone sum of the same deltas; limit samples difference it                                                                                             |
+| `missCauses`      | local `YYYY-MM-DD` → cache-miss cause → `{ count, usd }`; 62 days kept                                                                                   |
 
 Fields added without a schema bump get their defaults in `upgradeUsage`.
+
+`switchedAt` (epoch ms) and `switchCost` mark a session this account took over
+after a `/login` (see "Account switch" in `docs/architecture.md`).
+`switchCost` is removed when the session's cost moves.
+
+`account-log.json` is global, not per account: the login is one per machine.
+It keeps 35 days of switches plus the newest older one.
 
 ## `limits.json`, `sessions-map.json`, `feed.json`
 
@@ -88,8 +97,10 @@ Fields added without a schema bump get their defaults in `upgradeUsage`.
 - Transcript index files (`docs/transcript-index.md`) add fields without a
   version bump: rollups `growth`, `freshSplit`, `rewriteTokens`, `usdNewWork`,
   `usdCarry`, `usdRewrite` (missing → 0 on load); `offsets.json` per file
-  `context`; `sessions.json` per session `mcpLoaded`, `mcpUsed` (missing →
-  none).
+  `context`; `sessions.json` per session `mcpLoaded`, `mcpUsed`,
+  `attributedUsd`, `apiErrors` (missing → none). `index/prices.json` holds the
+  `PRICES_VERSION` the index was priced at; `index/backup-prices-<version>/`
+  is the copy taken before a re-price.
 - `Feed`: the shared contract with the `/cost-tracker` mod, see `docs/history-and-feed.md`.
 
 ## `ApiCache`

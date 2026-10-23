@@ -21,6 +21,7 @@ const BASE_TURN: Turn = {
   cwd: "/p",
   branch: "",
   fast: false,
+  usOnly: false,
   input: 0,
   output: 0,
   cacheRead: 0,
@@ -136,7 +137,7 @@ describe("coach rules", () => {
     expect(only(findings, "R1")?.usd).toBe(2.5); // $5 of writes at Opus → $2.50 at Sonnet
   });
 
-  it("R2: fast mode costs half its $ extra", () => {
+  it("R2: the fast-mode surcharge: half the $ at 2×, five sixths at 6×", () => {
     const findings = coach(
       input({
         rows: [
@@ -153,6 +154,15 @@ describe("coach rules", () => {
     expect(
       only(coach(input({ rows: [row({ input: 1_000_000, fast: true })] })), "R2")?.evidence,
     ).toBe("1 fast turns");
+    // Opus 4.6 fast was 6×: $30 paid, $5 at standard → $25 surcharge.
+    const opus46 = coach(
+      input({ rows: [row({ input: 1_000_000, fast: true, model: "claude-opus-4-6" })] }),
+    );
+    expect(only(opus46, "R2")?.usd).toBeCloseTo(25, 9);
+    const unpriced = coach(
+      input({ rows: [row({ input: 1_000_000, fast: true, model: "claude-future-9" })] }),
+    );
+    expect(only(unpriced, "R2")?.usd ?? 0).toBe(0); // no price, no surcharge claimed
   });
 
   it("R3: thinking at high effort", () => {
@@ -300,11 +310,13 @@ describe("coach rules", () => {
           row({ input: 1_000_000, model: "claude-opus-4-8" }),
           row({ input: 1_000_000, model: "claude-sonnet-4-6" }),
           row({ input: 1_000_000, model: "claude-haiku-4-5" }),
+          // Old tokenizer → new: ~1.3× the tokens, $4 × 1.3 = $5.20 > $5, so not cheaper.
+          row({ input: 1_000_000, model: "claude-opus-4-6" }),
         ],
       }),
     );
     expect(only(findings, "R9")).toMatchObject({
-      usd: 2,
+      usd: 1.4, // opus 4.8 → 5.5: $5 − $4; sonnet 4.6 → 5.5: $3 − $2 × 1.3
       evidence: "claude-opus-4-8 → claude-opus-5-5, claude-sonnet-4-6 → claude-sonnet-5-5",
       fix: { kind: "command", value: "/model" },
     });

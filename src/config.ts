@@ -11,11 +11,13 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 
+import type { AccountSwitch } from "./account.js";
 import { freshUsage, upgradeUsage, USAGE_SCHEMA_VERSION } from "./calc.js";
 import type {
   ApiCache,
   Config,
   LimitSample,
+  SessionCost,
   SessionMapEntry,
   UsageState,
 } from "./interfaces/config.interface.js";
@@ -310,6 +312,38 @@ export function saveSessionsMap(
   writeVersionedFile(
     sessionsMapFile(accountKey),
     JSON.stringify({ schemaVersion: HISTORY_SCHEMA_VERSION, sessions }),
+  );
+}
+
+/** Every account folder; empty before the first render. */
+export function listAccountKeys(): ReadonlyArray<string> {
+  try {
+    return readdirSync(ACCOUNTS_DIR);
+  } catch {
+    return [];
+  }
+}
+
+/** One session's entry in another account's usage.json, read only: no seed, migration or backup. */
+export function peekSessionCost(accountKey: string, sessionId: string): SessionCost | undefined {
+  const result = readObjectFile(usageFile(accountKey));
+  if (result.kind !== "ok") return undefined;
+  const sessions = result.value.sessions as Record<string, SessionCost> | undefined;
+  return sessions?.[sessionId];
+}
+
+/** Global, not per account: the login is one per machine. */
+export const ACCOUNT_LOG_FILE = path.join(CONFIG_ROOT_DIR, "account-log.json");
+
+export function loadAccountLog(): ReadonlyArray<AccountSwitch> {
+  const switches = loadHistoryRecord(ACCOUNT_LOG_FILE, "switches");
+  return Array.isArray(switches) ? (switches as Array<AccountSwitch>) : [];
+}
+
+export function saveAccountLog(switches: ReadonlyArray<AccountSwitch>): void {
+  writeVersionedFile(
+    ACCOUNT_LOG_FILE,
+    JSON.stringify({ schemaVersion: HISTORY_SCHEMA_VERSION, switches }),
   );
 }
 

@@ -138,6 +138,30 @@ Every account is scoped by `accountKey()` under
   `~/.config/cc-daily-usage/profiles.json` under a token hash.
 - A one-time migration moves pre-multi-account files into `accounts/legacy/`.
 
+### Account switch
+
+A `/login` in any terminal changes the login of every running Claude Code
+process: there is one Keychain entry and one `oauthAccount` per machine. So a
+running session moves to the new account, and its later spend is billed there.
+
+- The render appends the login to `account-log.json` when it differs from the
+  last entry (not under a `CLAUDE_CODE_OAUTH_TOKEN` override, which is per
+  terminal). The first render that sees the new login dates the switch.
+- `takeOverSession` (`src/statusline.ts`): when this account has no entry for
+  the session, or has not seen it since the last switch to this account, the
+  newest sighting under another account becomes the baseline
+  (`lastSeenCost`, `cacheMissUsd`, `missCounts`). Only the cost after that
+  sighting goes to this account. It reads the other accounts' `usage.json` only
+  in that case.
+- Until the session's cost moves (its first API response under the new login),
+  the hook's `rate_limits` are the old account's and are ignored.
+- For 10 minutes after the switch, the line starts with `⇄ <email>`.
+- The transcript index splits such a session by the login at each turn's time
+  (`docs/transcript-index.md`).
+- Known gap: Claude Code keeps the old token in memory for a short time (up to
+  30 s in the 2026-03 source, not checked for later versions). A turn in that
+  gap goes to the new account.
+
 ## `hasSpendCap` branching
 
 | `organizationType`                 | `hasSpendCap` (dollar self-budget)        |

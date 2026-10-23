@@ -121,6 +121,13 @@ describe("decidePromptGate", () => {
       "allow",
     );
     expect((await decidePromptGate({ session_id: "other", prompt: "x" }, NOW)).kind).toBe("allow");
+    // Claude Code's automatic continue after a usage-limit reset: unattended, and the re-send is unavoidable.
+    const resume =
+      "Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete.";
+    expect((await decidePromptGate({ session_id: "s1", prompt: resume }, NOW)).kind).toBe("allow");
+    expect(
+      (await decidePromptGate({ session_id: "s1", prompt: "my usage limit has reset?" }, NOW)).kind,
+    ).toBe("block");
     expect((await decidePromptGate({ prompt: "x" }, NOW)).kind).toBe("allow");
     expect((await decidePromptGate({ session_id: "s1" })).kind).toBe("block"); // default now, no prompt text
   });

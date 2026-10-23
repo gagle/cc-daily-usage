@@ -1,4 +1,4 @@
-import { cacheWriteRate, ratesFor, tokensCost } from "./pricing.js";
+import { cacheWriteRate, fastModeBilled, ratesFor, tokensCost } from "./pricing.js";
 
 /** The parts of Claude Code's statusline payload this module reads (v2.1.251+ for `prompt_cache`). */
 export interface CachePayload {
@@ -7,12 +7,18 @@ export interface CachePayload {
   readonly context_window?: {
     readonly total_input_tokens?: number;
     readonly used_percentage?: number | null;
+    readonly current_usage?: {
+      readonly cache_read_input_tokens?: number;
+      readonly cache_creation_input_tokens?: number;
+    } | null;
   };
   readonly prompt_cache?: {
     readonly warm?: boolean;
     readonly ttl?: string;
     readonly expires_at?: number | null;
     readonly miss_recache_tokens?: number;
+    readonly requests?: number;
+    readonly misses?: number; // excludes expected rebuilds (compaction, tool-result clearing)
     readonly recache_tokens_if_cold?: number | null;
     readonly hit_ratio?: number | null;
     readonly last_miss_at?: number | null; // epoch seconds (v2.1.260+ for the two cause fields)
@@ -30,6 +36,8 @@ export interface CacheForecast {
   readonly missPremiumUsd: number | null; // cold − warm: what letting the cache expire costs
   readonly sessionMissUsd: number; // already re-paid this session for misses (write − read on miss tokens)
   readonly expiresAt: number | null; // epoch seconds the cache goes cold; null = unknown/cold
+  readonly requests: number | null; // main-conversation API requests this session; null = not reported
+  readonly misses: number | null; // of those, re-processed what the cache held (not expected rebuilds)
   readonly recentMiss: string | null; // causes of a miss in the last RECENT_MISS_S, e.g. "tools changed"
 }
 
@@ -45,19 +53,34 @@ export function forecastCache(payload: CachePayload, nowSec: number): CacheForec
   const cache = payload.prompt_cache;
   const modelId = payload.model?.id;
   if (!cache || !modelId) return null;
-  const rates = ratesFor(modelId, payload.fast_mode === true);
+  const contextTokens = payload.context_window?.total_input_tokens ?? 0;
+  const rates = ratesFor(
+    modelId,
+    payload.fast_mode === true && fastModeBilled(modelId),
+    contextTokens,
+  );
   if (!rates) return null;
 
   const ttl = cache.ttl === "1h" ? "1h" : "5m";
   const writeRate = cacheWriteRate(rates, ttl);
-  const contextTokens = payload.context_window?.total_input_tokens ?? 0;
   const expiresAt = cache.expires_at ?? null;
   const warm = cache.warm === true && (expiresAt === null || expiresAt > nowSec);
   const recache = cache.recache_tokens_if_cold ?? null;
 
-  const nextWarmUsd = tokensCost(contextTokens, rates.cacheRead);
-  const nextColdUsd = recache === null ? null : tokensCost(recache, writeRate);
-  const missPremiumUsd = nextColdUsd === null ? null : Math.max(0, nextColdUsd - nextWarmUsd);
+  // The cached prefix: what the last request read or wrote to the cache. Its fresh input_tokens were never
+  // cached, so the next request writes them warm or cold alike. Older payloads: the whole context.
+  const usage = payload.context_window?.current_usage;
+  const cachedTokens = usage
+    ? (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
+    : contextTokens;
+  const nextWarmUsd = tokensCost(cachedTokens, rates.cacheRead);
+  // Cold, the prefix the warm request would read is written instead: (write − read) per re-cached token.
+  // Re-cached tokens beyond the prefix are new content, written either way.
+  const missPremiumUsd =
+    recache === null
+      ? null
+      : tokensCost(Math.min(recache, cachedTokens), writeRate - rates.cacheRead);
+  const nextColdUsd = missPremiumUsd === null ? null : nextWarmUsd + missPremiumUsd;
   const sessionMissUsd = tokensCost(cache.miss_recache_tokens ?? 0, writeRate - rates.cacheRead);
   const missAt = cache.last_miss_at ?? null;
   const causes = cache.last_miss_cause?.causes ?? [];
@@ -73,6 +96,8 @@ export function forecastCache(payload: CachePayload, nowSec: number): CacheForec
     expiresAt: warm ? expiresAt : null,
     nextWarmUsd,
     nextColdUsd,
+    requests: cache.requests ?? null,
+    misses: cache.misses ?? null,
     missPremiumUsd,
     sessionMissUsd,
     recentMiss,

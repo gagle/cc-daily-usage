@@ -9,6 +9,7 @@ import {
   mcpServersUsed,
   mergeRollup,
   parseActivity,
+  parseApiError,
   parseCompaction,
   parseMcpLoad,
   parseRowKey,
@@ -65,6 +66,7 @@ describe("parseTurn", () => {
       cwd: "/work/app",
       branch: "main",
       fast: false,
+      usOnly: false,
       input: 1_000_000,
       output: 100_000,
       cacheRead: 1_000_000,
@@ -147,6 +149,20 @@ describe("parseTurn", () => {
   });
 });
 
+describe("parseApiError", () => {
+  it("reads status and code; anything else is null", () => {
+    const error = (fields: Record<string, unknown>): string =>
+      JSON.stringify({ type: "assistant", isApiErrorMessage: true, ...fields });
+    expect(
+      parseApiError(error({ sessionId: "s1", requestId: "r", uuid: "u", apiErrorStatus: 529 })),
+    ).toEqual({ key: "error|r|u", sessionId: "s1", kind: "529" });
+    expect(parseApiError(error({ apiError: "overloaded" }))?.kind).toBe("error overloaded");
+    expect(parseApiError(error({ type: "user" }))).toBeNull();
+    expect(parseApiError('{"isApiErrorMessage":true')).toBeNull();
+    expect(parseApiError(usageLine())).toBeNull();
+  });
+});
+
 describe("priceTurn", () => {
   it("prices each component with the 5m/1h write split", () => {
     const turn = parseTurn(usageLine());
@@ -164,6 +180,59 @@ describe("priceTurn", () => {
     expect(fast && priceTurn(fast)?.input).toBe(8);
     const unknown = parseTurn(usageLine({ message: { model: "claude-future-9", usage: {} } }));
     expect(unknown && priceTurn(unknown)).toBeNull();
+  });
+
+  it("multi-request turns: context is the last request; each request is priced on its own", () => {
+    const request = (read: number) => ({
+      type: "message",
+      input_tokens: 1000,
+      output_tokens: 10,
+      cache_read_input_tokens: read,
+      cache_creation_input_tokens: 0,
+      cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 0 },
+    });
+    const haiku = (reads: ReadonlyArray<number>): string =>
+      JSON.stringify({
+        type: "assistant",
+        requestId: "r",
+        message: {
+          id: "m",
+          model: "claude-haiku-5-5",
+          usage: {
+            input_tokens: 1000 * reads.length,
+            output_tokens: 10 * reads.length,
+            cache_read_input_tokens: reads.reduce((a, b) => a + b, 0),
+            iterations: [...reads.map(request), null],
+          },
+        },
+      });
+    // 60k + 70k prompts: 130k summed, but each request is under 100K → the base tier for both.
+    const turn = parseTurn(haiku([59_000, 69_000]));
+    expect(turn?.requests).toHaveLength(2);
+    expect(turn && contextTokens(turn)).toBe(70_000);
+    expect(turn && priceTurn(turn)?.cacheRead).toBeCloseTo((128_000 * 0.01) / 1e6, 12);
+    expect(turn && priceTurn(turn)?.input).toBeCloseTo((2000 * 0.1) / 1e6, 12);
+    // One request over 100K: that request alone pays the long-prompt tier.
+    const long = parseTurn(haiku([59_000, 109_000]));
+    expect(long && priceTurn(long)?.cacheRead).toBeCloseTo(
+      (59_000 * 0.01 + 109_000 * 0.05) / 1e6,
+      12,
+    );
+    expect(parseTurn(usageLine())?.requests).toBeUndefined(); // one request: the totals
+  });
+
+  it("inference_geo us: 1.1× every component, stacked on fast mode", () => {
+    const us = parseTurn(usageLine({}, { inference_geo: "us" }));
+    expect(us?.usOnly).toBe(true);
+    const cost = us && priceTurn(us);
+    expect(cost?.input).toBeCloseTo(4.4, 9);
+    expect(cost?.output).toBeCloseTo(2.2, 9);
+    expect(cost?.cacheRead).toBeCloseTo(0.22, 9);
+    expect(cost?.cacheWrite).toBeCloseTo((0.2 * 4 * 1.25 + 0.1 * 4 * 2) * 1.1, 9);
+    expect(cost?.webSearch).toBe(0.02); // not a token price
+    const usFast = parseTurn(usageLine({}, { inference_geo: "us", speed: "fast" }));
+    expect(usFast && priceTurn(usFast)?.input).toBeCloseTo(8.8, 9);
+    expect(parseTurn(usageLine({}, { inference_geo: "global" }))?.usOnly).toBe(false);
   });
 });
 

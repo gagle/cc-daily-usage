@@ -14,7 +14,7 @@ Know where your Claude Code spend stands, and what your next prompt costs.
   countdown, and a gate that stops a costly cold-cache prompt before it is sent.
 
 ```
-(🌿 main) | ████████░░ ⚡ 42% | $1.80 | 🤖 Opus 5.5 | 🔥 cold in 4m · $0.04/msg · if cold +$1.20 | $12.40/$30.00 (41%) | $210.00/$650.00 (32%)
+(🌿 main) | ████████░░ ⚡ 42% | $1.80 | 🤖 Opus 5.5 | 🔥 cold in 4m · $0.04/req · if cold +$1.20 | $12.40/$30.00 (41%) | $210.00/$650.00 (32%)
 ```
 
 ## Install

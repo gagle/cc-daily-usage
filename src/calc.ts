@@ -280,6 +280,28 @@ export function captureSessionCost(
   return usage;
 }
 
+/**
+ * $ of the prompt being processed (Claude Code's `prompt_id`), all its API requests and subagents included:
+ * the session cost now minus the cost before the prompt was first seen. Call after captureSessionCost, with
+ * the session's lastSeenCost from before it. Null without a prompt id.
+ */
+export function trackPrompt(
+  usage: UsageState,
+  sessionId: string,
+  promptId: string | undefined,
+  costBefore: number,
+  currentCost: number,
+): number | null {
+  const session = usage.sessions[sessionId];
+  if (!promptId || !session) return null;
+  if (session.promptId !== promptId) {
+    usage.sessions[sessionId] = { ...session, promptId, promptStartCost: costBefore };
+  }
+  const start = usage.sessions[sessionId]?.promptStartCost ?? 0;
+  // A lower cost than at the prompt's start is a session reset: all of it is this prompt's.
+  return currentCost >= start ? currentCost - start : currentCost;
+}
+
 /** `record` without the local day keys older than DAY_HISTORY_DAYS before `now`'s local day. */
 function dropOldDays<T>(record: Record<string, T>, now: Date): Record<string, T> {
   const cutoff = localDateKey(

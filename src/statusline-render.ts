@@ -3,6 +3,7 @@ import type { HookPayload, StatuslineState } from "./interfaces/statusline.inter
 import type { Runway } from "./limits-history.js";
 import { gradientRgb } from "./meter.js";
 import { type NextAction, nextAction } from "./next-action.js";
+import { ratesFor } from "./pricing.js";
 import { DEFAULT_LAYOUT, type Layout, type PartId } from "./statusline-layout.js";
 
 const RESET = "\x1b[0m";
@@ -247,10 +248,10 @@ export function warmColor(secondsUntilCold: number | null, ttlSeconds: number): 
 }
 
 /**
- * The current row of the cost-by-context table: what one message costs now ($/msg, cache read) and what a
+ * The current row of the cost-by-context table: what one API request costs now ($/req, cache read) and what a
  * miss would cost (re-writing the whole context), plus the move that avoids paying it.
- *   🔥 cold in 4m · $0.10/msg · if cold +$2.40
- *   ❄ cold · next msg ~$2.45 · miss: tools changed
+ *   🔥 cold in 4m · $0.10/req · if cold +$2.40
+ *   ❄ cold · next req ~$2.45 · miss: tools changed
  */
 function cacheSegment(state: StatuslineState): string {
   const cache = state.cache;
@@ -262,18 +263,27 @@ function cacheSegment(state: StatuslineState): string {
         ? "🔥 warm"
         : `🔥 cold in ${countdown(cache.secondsUntilCold)}`,
     );
-    parts.push(`${money(cache.nextWarmUsd)}/msg`);
+    parts.push(`${money(cache.nextWarmUsd)}/req`);
     if (cache.missPremiumUsd !== null && cache.missPremiumUsd >= 0.01) {
       parts.push(`if cold +${money(cache.missPremiumUsd)}`);
     }
   } else {
     parts.push("❄ cold");
-    parts.push(`next msg ~${money(cache.nextColdUsd ?? cache.nextWarmUsd)}`);
+    parts.push(`next req ~${money(cache.nextColdUsd ?? cache.nextWarmUsd)}`);
+  }
+  if (cache.misses !== null && cache.misses > 0 && cache.requests !== null && cache.requests > 0) {
+    parts.push(`${String(cache.misses)}/${String(cache.requests)} req missed`);
   }
   if (cache.recentMiss !== null) parts.push(`miss: ${cache.recentMiss}`);
   // Cold = the costly case, in the same red as "over budget"; warm fades as the expiry nears.
   const color = cache.warm ? warmColor(cache.secondsUntilCold, cache.ttlSeconds) : ccColor(1);
   return rgb(color, parts.join(" · "));
+}
+
+/** `⚠ claude-x: no price, $ not estimated` — a model src/pricing.ts does not know (too old or too new). */
+function unpricedPart(payload: HookPayload): string {
+  const id = payload.model?.id;
+  return id && ratesFor(id) === null ? rgb("244;164;96", `⚠ ${id}: no price, $ not estimated`) : "";
 }
 
 /** `» /compact at the next break · 520k re-read each turn, ~$0.10`: the next action, urgent ones in orange. */
@@ -298,6 +308,7 @@ export function renderStatusline(
   const pct = Math.trunc(payload.context_window?.used_percentage ?? 0) || 0;
   const { emoji, color } = contextEmoji(pct);
   const totalMs = payload.cost?.total_duration_ms;
+  const apiMs = payload.cost?.total_api_duration_ms;
   const effort = payload.effort?.level;
   // Pro/Max parts and budget parts never show together: the plan picks one family.
   const subscription = state !== null && !state.hasSpendCap;
@@ -311,15 +322,25 @@ export function renderStatusline(
       case "context":
         return `${contextBar(pct)} ${emoji} ${rgb(color, `${String(pct)}%`)}`;
       case "cost":
-        return rgb("220;200;0", money(payload.cost?.total_cost_usd ?? 0));
+        return rgb(
+          "220;200;0",
+          `${money(payload.cost?.total_cost_usd ?? 0)}${
+            state?.promptUsd == null ? "" : ` · prompt ${money(state.promptUsd)}`
+          }`,
+        );
       case "duration":
-        return totalMs === undefined ? "" : rgb("150;150;150", `⏲ ${duration(totalMs)}`);
+        return totalMs === undefined
+          ? ""
+          : rgb(
+              "150;150;150",
+              `⏲ ${duration(totalMs)}${apiMs === undefined ? "" : ` · api ${duration(apiMs)}`}`,
+            );
       case "model":
         return rgb("200;0;200", `🤖 ${payload.model?.display_name ?? ""}`);
       case "effort":
         return effort ? rgb("150;150;250", `💪 ${effort}`) : "";
       case "cache":
-        return state ? cacheSegment(state) : "";
+        return (state ? cacheSegment(state) : "") || unpricedPart(payload);
       case "limits":
         return subscription ? limitsPart(state) : "";
       case "warnings":
@@ -341,13 +362,18 @@ export function renderStatusline(
     }
   };
 
-  return layout
+  const rows = layout
     .map((row) =>
       row
         .map(part)
         .filter((text) => text !== "")
         .join(` ${SEP} `),
     )
-    .filter((row) => row !== "")
-    .join("\n");
+    .filter((row) => row !== "");
+  // A `/login` in another terminal moves this session too: say so where it is seen, whatever the layout.
+  if (state?.accountSwitch) {
+    const marker = rgb("220;200;0", `⇄ ${state.accountSwitch}`, true);
+    rows[0] = rows[0] === undefined ? marker : `${marker} ${SEP} ${rows[0]}`;
+  }
+  return rows.join("\n");
 }

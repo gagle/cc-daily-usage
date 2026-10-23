@@ -70,6 +70,7 @@ export interface SessionModel {
     readonly model: string;
     readonly fast: boolean;
     readonly context: number;
+    readonly cached: number; // cache read + cache write: the prefix the next request reads or re-writes
   } | null;
   ttlSeconds: number; // TTL of the last cache write on the main thread
   readonly seen: Set<string>; // turn keys: Claude Code repeats a line per content block
@@ -145,7 +146,13 @@ export function addSessionTurn(
     if (turn.cacheWrite1h > 0) session.ttlSeconds = ONE_HOUR_TTL;
     else if (turn.cacheWrite5m > 0) session.ttlSeconds = FIVE_MIN_TTL;
     if (session.lastMain === null || ms >= session.lastMain.ms) {
-      session.lastMain = { ms, model: turn.model, fast: turn.fast, context };
+      session.lastMain = {
+        ms,
+        model: turn.model,
+        fast: turn.fast,
+        context,
+        cached: context - (turn.requests?.at(-1) ?? turn).input, // the last request's cache read + write
+      };
     }
   }
   if (cost === null) {
@@ -247,12 +254,12 @@ export interface CacheState {
 
 /**
  * Estimate from the transcript alone: the cache stays warm for one TTL after the last main turn; the next
- * prompt re-reads (warm) or re-writes (cold) that turn's context. Null before a priced main turn.
+ * prompt re-reads (warm) or re-writes (cold) that turn's cached prefix (its fresh input was never cached). Null before a priced main turn.
  */
 export function cacheState(session: SessionModel, nowMs: number): CacheState | null {
   const last = session.lastMain;
   if (last === null) return null;
-  const rates = ratesFor(last.model, last.fast);
+  const rates = ratesFor(last.model, last.fast, last.context);
   if (rates === null) return null;
   const ttl = session.ttlSeconds;
   const secondsLeft = Math.max(0, Math.round((last.ms + ttl * 1000 - nowMs) / 1000));
@@ -261,11 +268,8 @@ export function cacheState(session: SessionModel, nowMs: number): CacheState | n
     secondsLeft,
     ttlSeconds: ttl,
     context: last.context,
-    nextWarmUsd: tokensCost(last.context, rates.cacheRead),
-    nextColdUsd: tokensCost(
-      last.context,
-      cacheWriteRate(rates, ttl === ONE_HOUR_TTL ? "1h" : "5m"),
-    ),
+    nextWarmUsd: tokensCost(last.cached, rates.cacheRead),
+    nextColdUsd: tokensCost(last.cached, cacheWriteRate(rates, ttl === ONE_HOUR_TTL ? "1h" : "5m")),
   };
 }
 

@@ -1,6 +1,12 @@
 import type { Feed, Finding } from "./feed.js";
 import type { MissCauseDay } from "./interfaces/config.interface.js";
-import { type ModelRates, ratesFor, tokensCost, WEB_SEARCH_USD } from "./pricing.js";
+import {
+  type ModelRates,
+  ratesFor,
+  tokenizerRatio,
+  tokensCost,
+  WEB_SEARCH_USD,
+} from "./pricing.js";
 import type { SessionTotals } from "./transcript-index.js";
 import { parseRowKey, type Rollup, rollupUsd } from "./transcript-parse.js";
 
@@ -22,6 +28,11 @@ const REPLACEMENTS: Readonly<Record<string, string>> = {
   "claude-opus-4-8": "claude-opus-5-5",
   "claude-opus-4-7": "claude-opus-5-5",
   "claude-opus-4-6": "claude-opus-5-5",
+  "claude-opus-4-5": "claude-opus-5-5",
+  "claude-opus-4-1": "claude-opus-5-5",
+  "claude-opus-4": "claude-opus-5-5",
+  "claude-sonnet-4-5": "claude-sonnet-5-5",
+  "claude-sonnet-4": "claude-sonnet-5-5",
   "claude-sonnet-5": "claude-sonnet-5-5",
   "claude-sonnet-4-6": "claude-sonnet-5-5",
   "claude-fable-5": "claude-fable-5-1",
@@ -62,13 +73,18 @@ function localWhen(date: Date): string {
   return `${WEEKDAYS[date.getDay()] as string} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** The rollup's $ had its tokens been priced at `to` instead of `from` (cache writes scale with input). */
-function repriced(rollup: Rollup, from: ModelRates, to: ModelRates): number {
+/**
+ * The rollup's $ had its tokens been priced at `to` instead of `from`. Each component scales by its rate
+ * ratio, so multipliers already in the $ (US-only inference) carry over; `tokens` is how many tokens the
+ * same text is on `to` (see tokenizerRatio).
+ */
+function repriced(rollup: Rollup, from: ModelRates, to: ModelRates, tokens = 1): number {
   return (
-    tokensCost(rollup.input, to.input) +
-    tokensCost(rollup.output, to.output) +
-    tokensCost(rollup.cacheRead, to.cacheRead) +
-    rollup.usdCacheWrite * (to.input / from.input) +
+    (rollup.usdInput * (to.input / from.input) +
+      rollup.usdOutput * (to.output / from.output) +
+      rollup.usdCacheRead * (to.cacheRead / from.cacheRead) +
+      rollup.usdCacheWrite * (to.input / from.input)) * // cache writes are a fixed multiple of input
+      tokens +
     rollup.webSearches * WEB_SEARCH_USD // the same on any model
   );
 }
@@ -216,7 +232,8 @@ function premiumSubagents(input: CoachInput): Draft | null {
     const parts = parseRowKey(key);
     const rates = ratesFor(parts.model, parts.speed === "fast");
     if (parts.scope === "main" || !PREMIUM.test(parts.model) || rates === null) continue;
-    usd += Math.max(0, rollupUsd(rollup) - repriced(rollup, rates, target));
+    const tokens = tokenizerRatio(parts.model, SUBAGENT_MODEL);
+    usd += Math.max(0, rollupUsd(rollup) - repriced(rollup, rates, target, tokens));
     turns += rollup.turns;
     models.add(parts.model);
   }
@@ -234,11 +251,16 @@ function premiumSubagents(input: CoachInput): Draft | null {
   };
 }
 
-/** R2: fast mode costs twice the standard rate on the same tokens. */
+/** R2: fast mode multiplies every token price (2×; 6× on Opus 4.6 / 4.7); the $ is that surcharge. */
 function fastMode(input: CoachInput): Draft | null {
   const fast = input.rows.filter(([key]) => parseRowKey(key).speed === "fast");
   if (fast.length === 0) return null;
-  const usd = sum(fast, (_, rollup) => rollupUsd(rollup)) / 2;
+  const usd = sum(fast, (key, rollup) => {
+    const model = parseRowKey(key).model;
+    const fastRates = ratesFor(model, true);
+    const standard = ratesFor(model);
+    return fastRates && standard ? rollupUsd(rollup) - repriced(rollup, fastRates, standard) : 0;
+  });
   const sub = sum(fast, (key, rollup) => (parseRowKey(key).scope === "main" ? 0 : rollup.turns));
   return {
     id: "R2",
@@ -370,8 +392,10 @@ function oldModels(input: CoachInput): Draft | null {
     const replacement = REPLACEMENTS[parts.model];
     const from = ratesFor(parts.model, parts.speed === "fast");
     const to = replacement ? ratesFor(replacement, parts.speed === "fast") : null;
-    if (!replacement || !from || !to || to.input > from.input || to.output > from.output) continue;
-    usd += Math.max(0, rollupUsd(rollup) - repriced(rollup, from, to));
+    if (!replacement || !from || !to) continue;
+    const tokens = tokenizerRatio(parts.model, replacement);
+    if (to.input * tokens > from.input || to.output * tokens > from.output) continue;
+    usd += Math.max(0, rollupUsd(rollup) - repriced(rollup, from, to, tokens));
     seen.set(parts.model, replacement);
   }
   if (seen.size === 0) return null;

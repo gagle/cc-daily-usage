@@ -26,11 +26,18 @@ describe("recordSession", () => {
     });
   });
 
-  it("returns the same map inside the hour with the same path and name", () => {
+  it("returns the same map inside the hour when nothing changed", () => {
     const sessions = { a: entry(30 * 60 * 1000) };
-    expect(recordSession(sessions, "a", { ...seen, costUsd: 5 }, NOW)).toBe(sessions);
+    expect(recordSession(sessions, "a", seen, NOW)).toBe(sessions);
     const legacy = { a: { ...entry(30 * 60 * 1000), name: undefined } }; // written before names
     expect(recordSession(legacy, "a", seen, NOW)).toBe(legacy);
+  });
+
+  it("a new cost or line count is written at once", () => {
+    const sessions = { a: entry(30 * 60 * 1000) };
+    expect(recordSession(sessions, "a", { ...seen, costUsd: 5 }, NOW).a?.costUsd).toBe(5);
+    expect(recordSession(sessions, "a", { ...seen, linesAdded: 3 }, NOW).a?.linesAdded).toBe(3);
+    expect(recordSession(sessions, "a", { ...seen, linesRemoved: 1 }, NOW).a?.linesRemoved).toBe(1);
   });
 
   it("a new session name is written at once", () => {

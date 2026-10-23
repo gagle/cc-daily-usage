@@ -1,5 +1,6 @@
 import {
   closeSync,
+  cpSync,
   existsSync,
   openSync,
   readdirSync,
@@ -7,18 +8,23 @@ import {
   readSync,
   rmSync,
   statSync,
+  utimesSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
+import { accountAt } from "./account.js";
 import {
   ACCOUNTS_DIR,
   CONFIG_ROOT_DIR,
+  listAccountKeys,
+  loadAccountLog,
   loadSessionsMap,
   markNewerFile,
   writeVersionedFile,
 } from "./config.js";
 import { schemaVersionOf } from "./migrate.js";
+import { PRICES_VERSION } from "./pricing.js";
 import {
   addTurn,
   contextTokens,
@@ -26,6 +32,7 @@ import {
   mcpServersUsed,
   mergeRollup,
   parseActivity,
+  parseApiError,
   parseMcpLoad,
   parseTurn,
   priceTurn,
@@ -84,6 +91,8 @@ export interface SessionTotals {
   entrypoint?: string | null;
   mcpLoaded?: Record<string, number>; // MCP server → est. tokens of its instructions in context
   mcpUsed?: Array<string>; // MCP servers the session called
+  attributedUsd?: Record<string, number>; // `skill:<name>` / `mcp:<server>` → $ Claude Code attributed to it
+  apiErrors?: Record<string, number>; // `429 usage_limit_reached`, … → failed requests
 }
 
 export interface PassResult {
@@ -91,6 +100,20 @@ export interface PassResult {
   readonly bytesRead: number;
   readonly bytesBehind: number; // bytes left for later passes
   readonly turns: number;
+  readonly repriced?: RepriceResult; // set on the pass that re-priced the index after a price change
+}
+
+/** What a re-price kept from the old index because no transcript could rebuild it. */
+export interface RepriceResult {
+  readonly from: string; // the old PRICES_VERSION, or "none" for an index written before it existed
+  readonly rowsKept: number; // rows of sessions whose transcripts are gone, kept at the old prices
+  readonly sessionsKept: number;
+  readonly rowsShort: number; // rebuilt rows a deleted transcript shared; its part is added back (missingPart)
+}
+
+interface OwnerSnapshot {
+  readonly months: Map<string, Record<string, Rollup>>;
+  readonly sessions: Record<string, SessionTotals>;
 }
 
 function readVersioned(file: string, key: string): Record<string, unknown> {
@@ -168,19 +191,33 @@ function readNewLines(
   return { lines: buffer.subarray(0, end).toString("utf8").split("\n"), next: offset + end + 1 };
 }
 
-/** sessionId → account key, from every account's sessions-map.json. */
-function sessionOwners(): Map<string, string> {
-  const owners = new Map<string, string>();
-  let keys: ReadonlyArray<string> = [];
-  try {
-    keys = readdirSync(ACCOUNTS_DIR);
-  } catch {
-    return owners;
+/**
+ * sessionId → owner of a line at an ISO time. A session one account's sessions-map.json knows is that
+ * account's. A `/login` moves a running session to another account, so a session several accounts know
+ * gives each turn to the login at the turn's time (account-log.json); a line with no time, or a time
+ * before the log, goes to the account that saw the session last.
+ */
+function sessionOwners(): (sessionId: string, at?: string) => string {
+  const owners = new Map<string, Array<{ readonly key: string; readonly lastSeenAt: string }>>();
+  for (const key of listAccountKeys()) {
+    for (const [sessionId, entry] of Object.entries(loadSessionsMap(key))) {
+      owners.set(sessionId, [
+        ...(owners.get(sessionId) ?? []),
+        { key, lastSeenAt: entry.lastSeenAt },
+      ]);
+    }
   }
-  for (const key of keys) {
-    for (const sessionId of Object.keys(loadSessionsMap(key))) owners.set(sessionId, key);
-  }
-  return owners;
+  const log = loadAccountLog();
+  return (sessionId, at) => {
+    const seen = owners.get(sessionId);
+    if (seen === undefined) return UNATTRIBUTED;
+    const last = (
+      [...seen].sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))[0] as (typeof seen)[0]
+    ).key;
+    if (seen.length === 1 || at === undefined) return last;
+    const atTurn = accountAt(log, Date.parse(at));
+    return seen.some((owner) => owner.key === atTurn) ? (atTurn as string) : last;
+  };
 }
 
 interface OwnerDelta {
@@ -197,6 +234,8 @@ interface SessionDelta {
   hookRuns: number;
   mcpLoaded: Map<string, number>;
   mcpUsed: Set<string>;
+  attributedUsd: Map<string, number>;
+  apiErrors: Map<string, number>;
 }
 
 function emptySessionDelta(): SessionDelta {
@@ -209,7 +248,19 @@ function emptySessionDelta(): SessionDelta {
     hookRuns: 0,
     mcpLoaded: new Map(),
     mcpUsed: new Set(),
+    attributedUsd: new Map(),
+    apiErrors: new Map(),
   };
+}
+
+/** Adds the delta's counts to the prior record's, key by key. */
+function addCounts(
+  prior: Readonly<Record<string, number>> | undefined,
+  add: ReadonlyMap<string, number>,
+): Record<string, number> {
+  const out: Record<string, number> = { ...prior };
+  for (const [key, value] of add) out[key] = (out[key] ?? 0) + value;
+  return out;
 }
 
 /** Session MCP facts: the larger instructions size per server, the union of servers called. */
@@ -247,6 +298,8 @@ function applyDelta(owner: string, delta: OwnerDelta): void {
         (prior?.thinkingMs ?? 0) + add.turns.reduce((total, turn) => total + turn.thinkingMs, 0),
       hookRuns: (prior?.hookRuns ?? 0) + add.hookRuns,
       ...mcpTotals(prior, add),
+      attributedUsd: addCounts(prior?.attributedUsd, add.attributedUsd),
+      apiErrors: addCounts(prior?.apiErrors, add.apiErrors),
     };
     if (add.turns.length === 0) {
       // Only system or attachment lines this pass: they extend a session the index has, never start one.
@@ -273,6 +326,113 @@ function applyDelta(owner: string, delta: OwnerDelta): void {
     };
   }
   writeVersioned(file, "sessions", sessions);
+}
+
+/** Every owner with an index directory: the accounts' and the shared unattributed one. */
+function indexOwners(): ReadonlyArray<string> {
+  let keys: ReadonlyArray<string> = [];
+  try {
+    keys = readdirSync(ACCOUNTS_DIR).filter((key) => existsSync(ownerIndexDir(key)));
+  } catch {
+    keys = [];
+  }
+  return existsSync(ownerIndexDir(UNATTRIBUTED)) ? [...keys, UNATTRIBUTED] : keys;
+}
+
+const MONTH_FILE = /^\d{4}-\d{2}\.json$/;
+
+/**
+ * Starts a re-price: copies every owner's index to `index/backup-prices-<from>/` (once: a crashed re-price
+ * restarts from that copy), loads it, and empties the live index so the pass rebuilds it from transcripts.
+ */
+function startReprice(from: string): Map<string, OwnerSnapshot> {
+  const backup = path.join(INDEX_DIR, `backup-prices-${from}`);
+  const restarted = existsSync(backup);
+  const snapshots = new Map<string, OwnerSnapshot>();
+  for (const owner of restarted ? readdirSync(backup) : indexOwners()) {
+    const saved = path.join(backup, owner);
+    if (!restarted) cpSync(ownerIndexDir(owner), saved, { recursive: true });
+    const months = new Map<string, Record<string, Rollup>>();
+    for (const name of readdirSync(saved).filter((file) => MONTH_FILE.test(file))) {
+      months.set(
+        name.slice(0, 7),
+        readVersioned(path.join(saved, name), "rows") as Record<string, Rollup>,
+      );
+    }
+    const sessions = readVersioned(path.join(saved, "sessions.json"), "sessions") as Record<
+      string,
+      SessionTotals
+    >;
+    snapshots.set(owner, { months, sessions });
+    rmSync(ownerIndexDir(owner), { recursive: true, force: true });
+  }
+  return snapshots;
+}
+
+/** $ fields priced from a token field: the row's own $ per token prices its missing tokens. */
+const PRICED: ReadonlyArray<readonly [keyof Rollup, keyof Rollup]> = [
+  ["usdInput", "input"],
+  ["usdOutput", "output"],
+  ["usdCacheRead", "cacheRead"],
+  ["usdCacheWrite", "cacheWrite"],
+  ["usdThinking", "thinking"],
+];
+
+/**
+ * The part of an old row its rebuild lacks: turns of a transcript that is gone. Counts are the exact
+ * difference; the main $ fields price the missing tokens at the old row's own rates (the prices it was stored
+ * with), so the price change of the turns that were rebuilt is not counted again. Other $ fields (thinking at
+ * high effort, deep context, the efficiency split) take the plain difference.
+ */
+export function missingPart(old: Rollup, rebuilt: Rollup): Rollup {
+  const part = emptyRollup();
+  for (const field of Object.keys(part) as Array<keyof Rollup>) {
+    part[field] = field === "maxContext" ? 0 : Math.max(0, old[field] - rebuilt[field]);
+  }
+  for (const [usd, tokens] of PRICED) {
+    part[usd] = old[tokens] > 0 ? part[tokens] * (old[usd] / old[tokens]) : 0;
+  }
+  part.usdThinkingHigh =
+    old.usdThinking > 0 ? old.usdThinkingHigh * (part.usdThinking / old.usdThinking) : 0;
+  return part;
+}
+
+/**
+ * Ends a re-price: rows and sessions the rebuild did not produce (their transcripts are gone) come back from
+ * the snapshot, at the prices they were stored with. A row the rebuild made with fewer turns (a gone
+ * transcript shared it) gets its missing part back (missingPart).
+ */
+function finishReprice(from: string, snapshots: Map<string, OwnerSnapshot>): RepriceResult {
+  let rowsKept = 0;
+  let sessionsKept = 0;
+  let rowsShort = 0;
+  for (const [owner, snapshot] of snapshots) {
+    const dir = ownerIndexDir(owner);
+    for (const [month, oldRows] of snapshot.months) {
+      const file = path.join(dir, `${month}.json`);
+      const rows = readVersioned(file, "rows") as Record<string, Rollup>;
+      for (const [key, row] of Object.entries(oldRows)) {
+        const rebuilt = rows[key];
+        if (rebuilt === undefined) {
+          rows[key] = row;
+          rowsKept += 1;
+        } else if (rebuilt.turns < row.turns) {
+          mergeRollup(rebuilt, missingPart({ ...emptyRollup(), ...row }, rebuilt));
+          rowsShort += 1;
+        }
+      }
+      writeVersioned(file, "rows", rows);
+    }
+    const file = path.join(dir, "sessions.json");
+    const sessions = readVersioned(file, "sessions") as Record<string, SessionTotals>;
+    for (const [id, totals] of Object.entries(snapshot.sessions)) {
+      if (sessions[id] !== undefined) continue;
+      sessions[id] = totals;
+      sessionsKept += 1;
+    }
+    writeVersioned(file, "sessions", sessions);
+  }
+  return { from, rowsKept, sessionsKept, rowsShort };
 }
 
 /** Takes the global index lock; false while a live pass holds it. Wall clock: the lock's mtime is real. */
@@ -303,8 +463,20 @@ export function runIndexPass(
   const lockFile = path.join(INDEX_DIR, "index.lock");
   try {
     const offsetsFile = path.join(INDEX_DIR, "offsets.json");
-    const offsets = readVersioned(offsetsFile, "files") as Record<string, FileOffset>;
-    const owners = sessionOwners();
+    const pricesFile = path.join(INDEX_DIR, "prices.json");
+    const storedPrices = readVersioned(pricesFile, "prices").version;
+    const priorOffsets = readVersioned(offsetsFile, "files") as Record<string, FileOffset>;
+    // An index built at other prices is rebuilt from the transcripts, whole, in this pass.
+    const from = typeof storedPrices === "string" ? storedPrices : "none";
+    const reprice =
+      // Only forward: an older build never re-prices what a newer one wrote (versions are ISO dates).
+      Object.keys(priorOffsets).length > 0 &&
+      (typeof storedPrices !== "string" || storedPrices < PRICES_VERSION)
+        ? { from, snapshots: startReprice(from) }
+        : null;
+    const offsets = reprice === null ? priorOffsets : {};
+    const unbounded = options.unbounded === true || reprice !== null;
+    const ownerOf = sessionOwners();
     const deltas = new Map<string, OwnerDelta>();
     const started = Date.now();
     let bytesRead = 0;
@@ -324,8 +496,9 @@ export function runIndexPass(
       const from = prior && stat.size >= prior.offset ? prior.offset : 0;
       // Unchanged since the last pass (a partial last line waits here too).
       if (prior?.size === stat.size && prior.mtimeMs === stat.mtimeMs) continue;
-      const out =
-        !options.unbounded && (bytesRead >= PASS_BYTES || Date.now() - started >= PASS_MS);
+      const out = !unbounded && (bytesRead >= PASS_BYTES || Date.now() - started >= PASS_MS);
+      // A long re-price keeps its lock fresh so no second pass takes it over as stale.
+      if (reprice !== null) utimesSync(lockFile, new Date(), new Date());
       if (out) {
         bytesBehind += stat.size - from;
         continue;
@@ -337,8 +510,14 @@ export function runIndexPass(
       // The previous turn's context in this thread; unknown when resuming a file indexed before it was kept.
       let context: number | null = from === 0 ? 0 : (prior?.context ?? null);
       const scope = scopeOf(file);
-      const sessionDelta = (sessionId: string): SessionDelta => {
-        const owner = owners.get(sessionId) ?? UNATTRIBUTED;
+      // Claude Code repeats a line once per content block: true for a key seen in the last RECENT_KEYS.
+      const repeated = (key: string): boolean => {
+        if (recent.includes(key)) return true;
+        recent.push(key);
+        if (recent.length > RECENT_KEYS) recent.shift();
+        return false;
+      };
+      const sessionDelta = (sessionId: string, owner = ownerOf(sessionId)): SessionDelta => {
         const delta: OwnerDelta = deltas.get(owner) ?? { months: new Map(), sessions: new Map() };
         deltas.set(owner, delta);
         const session = delta.sessions.get(sessionId) ?? emptySessionDelta();
@@ -361,6 +540,13 @@ export function runIndexPass(
             }
             continue;
           }
+          const error = parseApiError(line);
+          if (error !== null) {
+            if (repeated(error.key)) continue;
+            const session = sessionDelta(error.sessionId);
+            session.apiErrors.set(error.kind, (session.apiErrors.get(error.kind) ?? 0) + 1);
+            continue;
+          }
           const activity = parseActivity(line);
           if (activity === null) continue;
           const session = sessionDelta(activity.sessionId);
@@ -368,12 +554,10 @@ export function runIndexPass(
           session.hookRuns += activity.hookRuns;
           continue;
         }
-        if (recent.includes(turn.key)) continue;
-        recent.push(turn.key);
-        if (recent.length > RECENT_KEYS) recent.shift();
+        if (repeated(turn.key)) continue;
         const key = turnRowKey(turn, scope);
         if (key === null) continue;
-        const owner = owners.get(turn.sessionId) ?? UNATTRIBUTED;
+        const owner = ownerOf(turn.sessionId, turn.timestamp);
         let delta = deltas.get(owner);
         if (!delta) {
           delta = { months: new Map(), sessions: new Map() };
@@ -391,9 +575,15 @@ export function runIndexPass(
           cost === null
             ? 0
             : cost.input + cost.output + cost.cacheRead + cost.cacheWrite + cost.webSearch;
-        const session = sessionDelta(turn.sessionId);
+        const session = sessionDelta(turn.sessionId, owner);
         session.turns.push(turn);
         session.usd += usd;
+        for (const name of [
+          turn.skill && `skill:${turn.skill}`,
+          turn.mcpServer && `mcp:${turn.mcpServer}`,
+        ]) {
+          if (name) session.attributedUsd.set(name, (session.attributedUsd.get(name) ?? 0) + usd);
+        }
         if (cost === null) session.unpriced += 1;
         if (scope !== "main") session.subagentUsd += usd;
         turns += 1;
@@ -408,13 +598,18 @@ export function runIndexPass(
     }
 
     for (const [owner, delta] of deltas) applyDelta(owner, delta);
+    const repriced = reprice === null ? undefined : finishReprice(reprice.from, reprice.snapshots);
     writeVersioned(offsetsFile, "files", offsets);
+    if (reprice !== null || typeof storedPrices !== "string") {
+      writeVersioned(pricesFile, "prices", { version: PRICES_VERSION });
+    }
     writeVersioned(path.join(INDEX_DIR, "last-pass.json"), "pass", {
       at: now.toISOString(),
       bytesRead,
       bytesBehind,
+      ...(repriced ? { repriced } : {}),
     });
-    return { filesRead, bytesRead, bytesBehind, turns };
+    return { filesRead, bytesRead, bytesBehind, turns, ...(repriced ? { repriced } : {}) };
   } finally {
     rmSync(lockFile, { force: true });
   }

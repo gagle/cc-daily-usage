@@ -7,6 +7,15 @@ import {
   WEB_SEARCH_USD,
 } from "./pricing.js";
 
+/** Token counts of one API request. */
+export interface RequestTokens {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite5m: number;
+  readonly cacheWrite1h: number;
+}
+
 /** One billed model response from a transcript line (Claude Code `~/.claude/projects/**.jsonl`). */
 export interface Turn {
   readonly key: string; // requestId + message id: Claude Code repeats the line once per content block
@@ -16,6 +25,7 @@ export interface Turn {
   readonly cwd: string;
   readonly branch: string;
   readonly fast: boolean;
+  readonly usOnly: boolean; // usage.inference_geo "us": 1.1× every token price
   readonly input: number;
   readonly output: number;
   readonly cacheRead: number;
@@ -27,6 +37,13 @@ export interface Turn {
   readonly effort: string | null;
   readonly thinkingMs: number; // time spent thinking (`thinkingDurationMs`, on the first copy of the line)
   readonly entrypoint: string | null; // cli, sdk-ts, … (how the session was started)
+  // Claude Code's own attribution of the request (`attributionSkill`, `attributionMcpServer` on the line;
+  // not in the public docs): the skill or MCP server it ran for.
+  readonly skill?: string;
+  readonly mcpServer?: string;
+  // `usage.iterations` when the response took more than one API request; the totals above are their sum.
+  // Absent: one request, the totals.
+  readonly requests?: ReadonlyArray<RequestTokens>;
 }
 
 /** Time and hook facts from Claude Code's own system lines (no tokens, never priced). */
@@ -64,11 +81,11 @@ export function parseTurn(line: string): Turn | null {
   const usage = message?.usage as Record<string, unknown> | undefined;
   if (entry.type !== "assistant" || !usage || typeof message?.model !== "string") return null;
   if (message.model === "<synthetic>") return null;
-  const creation = usage.cache_creation as Record<string, unknown> | undefined;
-  const write5m = num(creation?.ephemeral_5m_input_tokens);
-  const write1h = num(creation?.ephemeral_1h_input_tokens);
-  // Older lines have only the total; it was the 5-minute TTL then.
-  const writeTotal = num(usage.cache_creation_input_tokens);
+  const tokens = requestTokens(usage);
+  const iterations = Array.isArray(usage.iterations) ? (usage.iterations as Array<unknown>) : [];
+  const requests = iterations
+    .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
+    .map(requestTokens);
   const details = usage.output_tokens_details as Record<string, unknown> | undefined;
   const server = usage.server_tool_use as Record<string, unknown> | undefined;
   return {
@@ -79,18 +96,66 @@ export function parseTurn(line: string): Turn | null {
     cwd: str(entry.cwd, ""),
     branch: str(entry.gitBranch, ""),
     fast: usage.speed === "fast",
-    input: num(usage.input_tokens),
-    output: num(usage.output_tokens),
-    cacheRead: num(usage.cache_read_input_tokens),
-    cacheWrite5m: creation ? write5m : writeTotal,
-    cacheWrite1h: creation ? write1h : 0,
+    usOnly: usage.inference_geo === "us",
+    ...tokens,
     thinking: num(details?.thinking_tokens),
     webSearches: num(server?.web_search_requests),
     webFetches: num(server?.web_fetch_requests),
     effort: typeof entry.effort === "string" ? entry.effort : null,
     thinkingMs: num(entry.thinkingDurationMs),
     entrypoint: typeof entry.entrypoint === "string" ? entry.entrypoint : null,
+    ...(requests.length > 1 ? { requests } : {}),
+    ...(typeof entry.attributionSkill === "string" ? { skill: entry.attributionSkill } : {}),
+    ...(typeof entry.attributionMcpServer === "string"
+      ? { mcpServer: entry.attributionMcpServer }
+      : {}),
   };
+}
+
+/** A failed API request Claude Code logged as a `<synthetic>` assistant line. */
+export interface ApiErrorLine {
+  readonly key: string; // dedupe key, like Turn.key
+  readonly sessionId: string;
+  readonly kind: string; // `429 usage_limit_reached`, `529`, …
+}
+
+/** An API error line (`isApiErrorMessage`, `apiErrorStatus`) → ApiErrorLine; anything else → null. */
+export function parseApiError(line: string): ApiErrorLine | null {
+  if (!line.includes('"isApiErrorMessage":true')) return null;
+  let entry: Record<string, unknown>;
+  try {
+    entry = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (entry.type !== "assistant" || entry.isApiErrorMessage !== true) return null;
+  const status = typeof entry.apiErrorStatus === "number" ? String(entry.apiErrorStatus) : "error";
+  const code = typeof entry.apiError === "string" ? ` ${entry.apiError}` : "";
+  return {
+    key: `error|${str(entry.requestId, "")}|${str(entry.uuid, "")}`,
+    sessionId: str(entry.sessionId, "unknown"),
+    kind: `${status}${code}`,
+  };
+}
+
+/** The token counts of a `usage` object or of one of its `iterations`. */
+function requestTokens(usage: Record<string, unknown>): RequestTokens {
+  const creation = usage.cache_creation as Record<string, unknown> | undefined;
+  return {
+    input: num(usage.input_tokens),
+    output: num(usage.output_tokens),
+    cacheRead: num(usage.cache_read_input_tokens),
+    // Older lines have only the total; it was the 5-minute TTL then.
+    cacheWrite5m: creation
+      ? num(creation.ephemeral_5m_input_tokens)
+      : num(usage.cache_creation_input_tokens),
+    cacheWrite1h: creation ? num(creation.ephemeral_1h_input_tokens) : 0,
+  };
+}
+
+/** Prompt tokens of one request: fresh input + cache read + cache write. */
+function promptTokens(request: RequestTokens): number {
+  return request.input + request.cacheRead + request.cacheWrite5m + request.cacheWrite1h;
 }
 
 /** A `turn_duration` or `stop_hook_summary` system line → Activity; anything else → null. The substring test
@@ -142,9 +207,9 @@ export function parseCompaction(line: string): Compaction | null {
   };
 }
 
-/** Tokens the model saw on a turn: fresh input + cache read + cache write. */
+/** Tokens the model saw on the turn's last request (fresh input + cache read + cache write): the context. */
 export function contextTokens(turn: Turn): number {
-  return turn.input + turn.cacheRead + turn.cacheWrite5m + turn.cacheWrite1h;
+  return promptTokens(turn.requests?.at(-1) ?? turn);
 }
 
 /**
@@ -177,17 +242,23 @@ export function splitTurn(turn: Turn, cost: TurnCost, previousContext: number): 
 }
 
 export function priceTurn(turn: Turn): TurnCost | null {
-  const rates = ratesFor(turn.model, turn.fast);
-  if (!rates) return null;
-  return {
-    input: tokensCost(turn.input, rates.input),
-    output: tokensCost(turn.output, rates.output),
-    cacheRead: tokensCost(turn.cacheRead, rates.cacheRead),
-    cacheWrite:
-      tokensCost(turn.cacheWrite5m, cacheWriteRate(rates, "5m")) +
-      tokensCost(turn.cacheWrite1h, cacheWriteRate(rates, "1h")),
-    webSearch: turn.webSearches * WEB_SEARCH_USD,
-  };
+  let cost: TurnCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, webSearch: 0 };
+  // Each request is priced on its own (the Haiku 5.5 long-prompt tier goes by one request's prompt).
+  for (const request of turn.requests ?? [turn]) {
+    const rates = ratesFor(turn.model, turn.fast, promptTokens(request), turn.usOnly);
+    if (!rates) return null;
+    cost = {
+      input: cost.input + tokensCost(request.input, rates.input),
+      output: cost.output + tokensCost(request.output, rates.output),
+      cacheRead: cost.cacheRead + tokensCost(request.cacheRead, rates.cacheRead),
+      cacheWrite:
+        cost.cacheWrite +
+        tokensCost(request.cacheWrite5m, cacheWriteRate(rates, "5m")) +
+        tokensCost(request.cacheWrite1h, cacheWriteRate(rates, "1h")),
+      webSearch: 0,
+    };
+  }
+  return { ...cost, webSearch: turn.webSearches * WEB_SEARCH_USD };
 }
 
 /** Rollup totals for one day × project × model × scope × speed. */

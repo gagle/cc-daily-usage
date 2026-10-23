@@ -11,6 +11,8 @@ function forecast(overrides: Partial<CacheForecast> = {}): CacheForecast {
     secondsUntilCold: 245,
     ttlSeconds: 300,
     expiresAt: null,
+    requests: null,
+    misses: null,
     nextWarmUsd: 0.02,
     nextColdUsd: 1.24,
     missPremiumUsd: 1.22,

@@ -42,6 +42,8 @@ function forecast(overrides: Partial<CacheForecast> = {}): CacheForecast {
     secondsUntilCold: 245,
     ttlSeconds: 300,
     expiresAt: null,
+    requests: null,
+    misses: null,
     nextWarmUsd: 0.04,
     nextColdUsd: 1.24,
     missPremiumUsd: 1.2,
@@ -74,8 +76,39 @@ describe("renderStatusline", () => {
     expect(line).not.toContain("named");
     expect(line.startsWith("(🌿 main) |")).toBe(true);
     expect(line).toContain("⏲ 1h 2m");
+    const api = plain(
+      renderStatusline(
+        {
+          cost: {
+            total_cost_usd: 1.8,
+            total_duration_ms: 3_725_000,
+            total_api_duration_ms: 65_000,
+          },
+        },
+        state({ promptUsd: 0.4 }),
+        "",
+        NOW,
+        [["cost", "duration"]],
+      ),
+    );
+    expect(api).toBe("$1.80 · prompt $0.40 | ⏲ 1h 2m · api 1m 5s");
+    expect(plain(renderStatusline(payload, state({ promptUsd: null }), "", NOW, [["cost"]]))).toBe(
+      "$1.23",
+    );
     expect(line).not.toContain("+5"); // lines-changed segment was removed
     expect(line).toContain("💪 high");
+  });
+
+  it("an account switch puts ⇄ first, on an empty line too", () => {
+    const payload = { cost: { total_cost_usd: 1.23 } };
+    const switched = state({ accountSwitch: "dev@example.com" });
+    expect(plain(renderStatusline(payload, switched, "", NOW, [["cost"], ["branch"]]))).toBe(
+      "⇄ dev@example.com | $1.23",
+    );
+    expect(plain(renderStatusline(payload, switched, "", NOW, [["branch"]]))).toBe(
+      "⇄ dev@example.com",
+    );
+    expect(plain(renderStatusline(payload, state(), "", NOW, [["cost"]]))).toBe("$1.23");
   });
 
   it("minutes/seconds duration, removed-only lines, every context bucket", () => {
@@ -250,7 +283,7 @@ describe("renderStatusline", () => {
     const line = plain(renderStatusline(payload, pro, "main", NOW));
     expect(line).not.toContain("\n");
     expect(line).toMatch(
-      /🤖 Opus 5\.5 \| 🔥 cold in 4m · \$0\.04\/msg · if cold \+\$1\.20 \| ⏱ —\/5h —\/7d$/,
+      /🤖 Opus 5\.5 \| 🔥 cold in 4m · \$0\.04\/req · if cold \+\$1\.20 \| ⏱ —\/5h —\/7d$/,
     );
   });
 
@@ -259,13 +292,24 @@ describe("renderStatusline", () => {
     const rows = plain(
       renderStatusline(payload, pro, "main", NOW, [["model", "branch"], ["effort"], ["cache"]]),
     ).split("\n");
-    expect(rows).toEqual(["🤖 Opus 5.5 | (🌿 main)", "🔥 cold in 4m · $0.04/msg · if cold +$1.20"]);
+    expect(rows).toEqual(["🤖 Opus 5.5 | (🌿 main)", "🔥 cold in 4m · $0.04/req · if cold +$1.20"]);
     expect(plain(renderStatusline(payload, null, "", NOW, [["branch", "effort"]]))).toBe("");
+  });
+
+  it("cache part warns on a model with no price, and only then", () => {
+    const unknown = { ...payload, model: { id: "claude-opus-3", display_name: "Opus 3" } };
+    expect(plain(renderStatusline(unknown, state(), "", NOW, [["cache"]]))).toBe(
+      "⚠ claude-opus-3: no price, $ not estimated",
+    );
+    expect(plain(renderStatusline(unknown, null, "", NOW, [["cache"]]))).toContain("no price");
+    const known = { ...payload, model: { id: "claude-opus-5-5", display_name: "Opus 5.5" } };
+    expect(plain(renderStatusline(known, state(), "", NOW, [["cache"]]))).toBe("");
+    expect(plain(renderStatusline(payload, state(), "", NOW, [["cache"]]))).toBe("");
   });
 
   it("cache segment: warm countdown + premium, cold, no hints", () => {
     expect(plain(renderStatusline(payload, state({ cache: forecast() }), "", NOW))).toContain(
-      "🔥 cold in 4m · $0.04/msg · if cold +$1.20",
+      "🔥 cold in 4m · $0.04/req · if cold +$1.20",
     );
     expect(
       plain(
@@ -276,7 +320,7 @@ describe("renderStatusline", () => {
           NOW,
         ),
       ),
-    ).toMatch(/🔥 cold in <1m · \$0\.04\/msg$/);
+    ).toMatch(/🔥 cold in <1m · \$0\.04\/req$/);
     expect(
       plain(
         renderStatusline(
@@ -288,7 +332,7 @@ describe("renderStatusline", () => {
           NOW,
         ),
       ),
-    ).toMatch(/🔥 warm · \$0\.04\/msg$/);
+    ).toMatch(/🔥 warm · \$0\.04\/req$/);
     expect(
       plain(
         renderStatusline(
@@ -300,7 +344,7 @@ describe("renderStatusline", () => {
           NOW,
         ),
       ),
-    ).toMatch(/❄ cold · next msg ~\$1\.24$/m);
+    ).toMatch(/❄ cold · next req ~\$1\.24$/m);
     expect(
       plain(
         renderStatusline(
@@ -310,7 +354,22 @@ describe("renderStatusline", () => {
           NOW,
         ),
       ),
-    ).toMatch(/❄ cold · next msg ~\$1\.24 · miss: tools changed$/m);
+    ).toMatch(/❄ cold · next req ~\$1\.24 · miss: tools changed$/m);
+    const counted = (requests: number | null, misses: number | null): string =>
+      plain(
+        renderStatusline(
+          payload,
+          state({ cache: forecast({ warm: false, requests, misses }) }),
+          "",
+          NOW,
+          [["cache"]],
+        ),
+      );
+    expect(counted(14, 2)).toBe("❄ cold · next req ~$1.24 · 2/14 req missed");
+    expect(counted(14, 0)).toBe("❄ cold · next req ~$1.24");
+    expect(counted(null, 2)).toBe("❄ cold · next req ~$1.24");
+    expect(counted(0, 2)).toBe("❄ cold · next req ~$1.24");
+    expect(counted(14, null)).toBe("❄ cold · next req ~$1.24");
     expect(
       plain(
         renderStatusline(
@@ -320,7 +379,7 @@ describe("renderStatusline", () => {
           NOW,
         ),
       ),
-    ).toContain("❄ cold · next msg ~$0.04");
+    ).toContain("❄ cold · next req ~$0.04");
   });
 
   it("warm color fades green → yellow → orange with the TTL; cold is red", () => {

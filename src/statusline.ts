@@ -1,4 +1,4 @@
-import { accountKey, resolveActiveAccount } from "./account.js";
+import { accountKey, lastSwitchTo, recordAccountSwitch, resolveActiveAccount } from "./account.js";
 import { forecastCache } from "./cache-forecast.js";
 import {
   addMissCauses,
@@ -9,16 +9,21 @@ import {
   computeToday,
   isLaboralDay,
   rolloverIfNeeded,
+  trackPrompt,
   workDayOf,
 } from "./calc.js";
 import {
+  listAccountKeys,
   listNewerFiles,
+  loadAccountLog,
   loadApiCache,
   loadConfig,
   loadFeedAdvice,
   loadLimitSamples,
   loadSessionsMap,
   loadUsage,
+  peekSessionCost,
+  saveAccountLog,
   saveConfig,
   saveLimitSamples,
   saveSessionsMap,
@@ -29,6 +34,7 @@ import type {
   ApiCache,
   ApiWindow,
   RateLimitsCache,
+  SessionCost,
   UsageState,
 } from "./interfaces/config.interface.js";
 import type {
@@ -216,6 +222,46 @@ function apiCacheOrLegacy(key: string, usage: UsageState): ApiCache | null {
   return { fetchedAt: legacy.fetchedAt, extraUsage: legacy.data, fiveHour: null, sevenDay: null };
 }
 
+/** How long the ⇄ marker shows after a `/login` moved a session to another account. */
+const SWITCH_NOTICE_MS = 10 * 60 * 1000;
+
+/**
+ * A `/login` in any terminal moves every running session to the new login (Claude Code re-reads its
+ * credentials), so the session's cost, cache-miss $ and miss counts up to its newest sighting under
+ * another account were billed there: they become this account's baseline, never its spend. Reads the
+ * other accounts only for a session new to this account or not seen here since the last switch to it.
+ * # ponytail: an idle session keeps re-reading until its cost moves or the hourly touch; 2 small reads.
+ */
+export function takeOverSession(
+  usage: UsageState,
+  key: string,
+  sessionId: string,
+  switchedToAt: number | null,
+  currentCost: number,
+  now: Date,
+): void {
+  const own = usage.sessions[sessionId];
+  const ownAt = own ? Date.parse(own.lastSeenAt) : -Infinity;
+  if (own && (switchedToAt === null || switchedToAt <= ownAt)) return;
+  let newest: SessionCost | undefined;
+  for (const other of listAccountKeys()) {
+    if (other === key) continue;
+    const seen = peekSessionCost(other, sessionId);
+    if (!seen) continue;
+    const seenAt = Date.parse(seen.lastSeenAt);
+    if (seenAt > ownAt && (!newest || seenAt > Date.parse(newest.lastSeenAt))) newest = seen;
+  }
+  if (!newest) return;
+  usage.sessions[sessionId] = {
+    lastSeenCost: newest.lastSeenCost,
+    lastSeenAt: now.toISOString(),
+    ...(newest.cacheMissUsd === undefined ? {} : { cacheMissUsd: newest.cacheMissUsd }),
+    ...(newest.missCounts === undefined ? {} : { missCounts: newest.missCounts }),
+    switchedAt: now.getTime(),
+    switchCost: currentCost,
+  };
+}
+
 /**
  * Everything one render needs, with zero network on the hot path: local files only, plus at most one
  * detached refresher spawn when the API cache is older than its TTL. Account resolution runs fresh on every
@@ -235,11 +281,32 @@ export async function buildStatuslineState(
   let config = loadConfig(key);
   const usage = loadUsage(key, now);
 
+  // Only the shared login dates a switch: a per-terminal token override is not one.
+  let log = loadAccountLog();
+  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    const next = recordAccountSwitch(log, key, now);
+    if (next) {
+      saveAccountLog(next);
+      log = next;
+    }
+  }
+  takeOverSession(usage, key, sessionId, lastSwitchTo(log, key), currentCost, now);
+  // Until this session's first API response under the new login, its rate_limits are the old login's.
+  let hookLimits = payload.rate_limits;
+  const takenOver = usage.sessions[sessionId];
+  if (takenOver?.switchCost !== undefined) {
+    if (takenOver.switchCost === currentCost) hookLimits = undefined;
+    else {
+      const { switchCost: _cost, ...rest } = takenOver;
+      usage.sessions[sessionId] = rest;
+    }
+  }
+
   // organizationType classifies the dollar self-budget (`hasSpendCap`). Seat-window `rate_limits` are
   // separate: Team/Enterprise seats have them too. A recognized organizationType always wins (mismatch
   // re-derives either direction). `rate_limits` may demote an *unrecognized* org's true guess to false
   // (subscription seat, no dollar budget) — never a known enterprise/team classification.
-  const sawRateLimits = payload.rate_limits !== undefined;
+  const sawRateLimits = hookLimits !== undefined;
   const classified = classifyHasSpendCap(account?.organizationType ?? null);
   const mismatch = classified !== undefined && classified !== config.hasSpendCap;
   if (
@@ -260,15 +327,15 @@ export async function buildStatuslineState(
 
   // Claude Code attaches `rate_limits` only after the session's first model response. Keep the last-seen
   // snapshot (with when it was seen) so later renders can fall back; an absent window keeps its prior side.
-  if (payload.rate_limits) {
+  if (hookLimits) {
     const prev = usage.rateLimitsCache;
     const five = mergeRateLimitWindow(
-      payload.rate_limits.five_hour,
+      hookLimits.five_hour,
       prev?.fiveHourPct,
       prev?.fiveHourResetsAt,
     );
     const seven = mergeRateLimitWindow(
-      payload.rate_limits.seven_day,
+      hookLimits.seven_day,
       prev?.sevenDayPct,
       prev?.sevenDayResetsAt,
     );
@@ -306,7 +373,15 @@ export async function buildStatuslineState(
     config.hasSpendCap === true && extraUsage !== null && readingAt !== undefined
       ? addSinceLedger(usage, readingAt, sessionId, currentCost)
       : 0;
+  const costBefore = usage.sessions[sessionId]?.lastSeenCost ?? 0;
   captureSessionCost(usage, sessionId, currentCost, now, accumulateSessions);
+  const promptUsd = trackPrompt(
+    usage,
+    sessionId,
+    typeof payload.prompt_id === "string" ? payload.prompt_id : undefined,
+    costBefore,
+    currentCost,
+  );
   let capSource: "anthropic" | "local" = "local";
   if (config.hasSpendCap === true && extraUsage !== null) {
     applyLedgerReading(usage, extraUsage.usedCredits + sinceLedger, now);
@@ -375,8 +450,9 @@ export async function buildStatuslineState(
 
   const computed = computeToday(usage, config, now);
   const showTodayPace = config.hasSpendCap !== false && isLaboralDay(config, now);
-  const spendLimit = payload.rate_limits?.spend_limit?.used_percentage;
-  const { used_usd: usedUsd, limit_usd: limitUsd, period } = payload.rate_limits?.spend_limit ?? {};
+  const spendLimit = hookLimits?.spend_limit?.used_percentage;
+  const { used_usd: usedUsd, limit_usd: limitUsd, period } = hookLimits?.spend_limit ?? {};
+  const switchedAt = usage.sessions[sessionId]?.switchedAt;
   return {
     // Dollar self-budget: omitted entirely for Pro/Max. todayUsage always ships so off-days still show
     // spent-today; avgPerDay/todayUsedPct only on laboral days (pace vs max).
@@ -418,8 +494,13 @@ export async function buildStatuslineState(
         ? null
         : { fiveHour: api.fiveHour, sevenDay: api.sevenDay, extraWindows: api.extraWindows ?? [] },
     cache,
+    promptUsd,
     hasSpendCap: config.hasSpendCap === true, // always resolved by the classification above
     planType: config.planType ?? null,
+    accountSwitch:
+      switchedAt !== undefined && now.getTime() - switchedAt < SWITCH_NOTICE_MS
+        ? (account?.email ?? key)
+        : null,
   };
 }
 
