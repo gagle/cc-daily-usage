@@ -13,6 +13,14 @@ const CONFIRM_WINDOW_MS = 2 * 60 * 1000;
  * ends the wait (interactive-mode docs). Not in the docs: matched on its first sentence as seen in transcripts.
  */
 const AUTO_CONTINUE_PROMPT = "Your claude.ai usage limit has reset.";
+/**
+ * The prompt Claude Code sends on its own when a background task or subagent finishes. Nobody is there to
+ * re-send it, so a block drops the result and stops the flow that waited on it. The hook input has no origin
+ * field; matched on the tag as seen in transcripts.
+ * ponytail: a scheduled task or `/loop` firing with plain text is not detectable and can still be blocked;
+ * allow on the hook input's origin once Claude Code passes it.
+ */
+const TASK_NOTIFICATION_PROMPT = "<task-notification>";
 
 interface PromptPayload {
   readonly session_id?: string;
@@ -29,7 +37,7 @@ export type GateDecision =
 /**
  * UserPromptSubmit gate: a prompt sent while the prompt cache is cold re-writes the whole conversation. A
  * blocked prompt is never sent, so blocking costs $0. Slash commands always pass (`/clear` is the free way
- * out), and so does Claude Code's automatic continue after a usage-limit reset. State comes from what the statusline last saved for this session — no network, no tokens.
+ * out), and so do Claude Code's automatic continue after a usage-limit reset and its background-task notices. State comes from what the statusline last saved for this session — no network, no tokens.
  */
 export async function decidePromptGate(
   payload: PromptPayload,
@@ -37,7 +45,12 @@ export async function decidePromptGate(
 ): Promise<GateDecision> {
   const sessionId = payload.session_id;
   const prompt = (payload.prompt ?? "").trimStart();
-  if (!sessionId || prompt.startsWith("/") || prompt.startsWith(AUTO_CONTINUE_PROMPT)) {
+  if (
+    !sessionId ||
+    prompt.startsWith("/") ||
+    prompt.startsWith(AUTO_CONTINUE_PROMPT) ||
+    prompt.startsWith(TASK_NOTIFICATION_PROMPT)
+  ) {
     return { kind: "allow" };
   }
 

@@ -121,6 +121,10 @@ describe("decidePromptGate", () => {
       "allow",
     );
     expect((await decidePromptGate({ session_id: "other", prompt: "x" }, NOW)).kind).toBe("allow");
+    // Background task finished: unattended, a block drops the result. Does not arm the
+    // confirm window: the blocks below still block.
+    const notice = "<task-notification>\n<task-id>b0g3jjg0t</task-id>\n<status>completed</status>";
+    expect((await decidePromptGate({ session_id: "s1", prompt: notice }, NOW)).kind).toBe("allow");
     // Claude Code's automatic continue after a usage-limit reset: unattended, and the re-send is unavoidable.
     const resume =
       "Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete.";

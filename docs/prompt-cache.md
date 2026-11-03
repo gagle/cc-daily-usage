@@ -102,7 +102,10 @@ the choices: send again within 2 minutes to go ahead, or `/clear`. Slash
 commands always pass, and so does Claude Code's automatic continue after a
 usage-limit reset (`AUTO_CONTINUE_PROMPT`, matched on "Your claude.ai usage
 limit has reset."): blocking it ends the unattended wait, and after a limit
-wait the cache is always cold, so the re-send cannot be avoided. State: `cacheGate` / `gateArmedAt` on the session in
+wait the cache is always cold, so the re-send cannot be avoided. Background-task and subagent notices
+(`TASK_NOTIFICATION_PROMPT`, matched on `<task-notification>`) also pass: nobody is there to re-send them, so a
+block drops the result. Known gap: a scheduled task or `/loop` firing with plain text has no marker in the hook
+input and can still be blocked; set `promptGateMinUsd` to `0` in sessions that run one. State: `cacheGate` / `gateArmedAt` on the session in
 `usage.json`, written by the statusline; no network.
 
 ## Model switch (`src/model-switch.ts`)
