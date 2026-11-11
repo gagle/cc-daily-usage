@@ -82,9 +82,10 @@ describe("config.ts", () => {
     const dir = path.join(ACCOUNTS_DIR, "acct");
     mkdirSync(dir, { recursive: true });
     const file = path.join(dir, "usage.json");
+    const now = new Date("2026-10-10T10:00:00.000Z"); // one instant: every fresh usage serializes the same
     for (const raw of ["null", "[]", "42"]) {
       writeFileSync(file, raw);
-      expect(loadUsage("acct").monthlySpent).toBe(0);
+      expect(loadUsage("acct", now).monthlySpent).toBe(0);
       expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ monthlySpent: 0 });
     }
   });

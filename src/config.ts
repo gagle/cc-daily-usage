@@ -232,6 +232,8 @@ export function loadUsage(accountKey: string, now: Date = new Date()): UsageStat
   const result = readObjectFile(file);
   if (result.kind !== "ok") {
     if (result.kind === "corrupt") quarantine(file);
+    // The file no longer holds what was last written: the skip-unchanged check must not apply.
+    lastUsageRaw.delete(accountKey);
     const usage = freshUsage(now);
     saveUsage(accountKey, usage);
     return usage;
