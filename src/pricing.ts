@@ -6,15 +6,17 @@ export interface ModelRates {
 }
 
 /**
- * Anthropic first-party list prices, $/MTok — snapshot 2026-10-18 of platform.claude.com/docs/en/about-claude/pricing.
+ * Anthropic first-party list prices, $/MTok — snapshot 2026-11-11 of platform.claude.com/docs/en/about-claude/pricing.
  * Unknown models stay unpriced (no $ shown) rather than guessed.
  * # ponytail: static snapshot; a price change needs a release. Upgrade path: honour Claude Code's
  * `modelPricing` setting, or fetch a pricing file.
  */
 /** Date of the price snapshot below. A change makes the transcript index re-price its rows (see runIndexPass). */
-export const PRICES_VERSION = "2026-10-18";
+export const PRICES_VERSION = "2026-11-11";
 
 const RATES: Readonly<Record<string, ModelRates>> = {
+  "claude-fable-5-2": { input: 8, output: 40, cacheRead: 0.2 },
+  "claude-mythos-5-2": { input: 8, output: 40, cacheRead: 0.2 },
   "claude-fable-5-1": { input: 10, output: 50, cacheRead: 0.25 },
   "claude-mythos-5-1": { input: 10, output: 50, cacheRead: 0.25 },
   "claude-fable-5": { input: 10, output: 50, cacheRead: 1 },
@@ -46,6 +48,8 @@ const LONG_PROMPT_RATES: Readonly<Record<string, ModelRates>> = {
 /** Fast-mode price ÷ standard price per model, as billed when `usage.speed` is "fast" (pricing page; Opus 4.6 /
  * 4.7 at $30/$150 from the fast-mode page as archived 2026-04-28, before their fast mode was removed). */
 const FAST_MODE_MULTIPLIER: Readonly<Record<string, number>> = {
+  "claude-fable-5-2": 2,
+  "claude-mythos-5-2": 2,
   "claude-opus-5-5": 2,
   "claude-opus-5": 2,
   "claude-opus-4-8": 2,
@@ -66,7 +70,7 @@ export function fastModeBilled(modelId: string): boolean {
 }
 
 /** Canonical model key: lowercase, no `[1m]`-style suffix, no provider prefix (`us.anthropic.`,
- * `anthropic.`, `vendor/`), no Vertex `@date`, no trailing `-YYYYMMDD`. */
+ * `anthropic.`, `vendor/`), no Vertex `@date`, no trailing `-YYYYMMDD`, a version dot as a dash. */
 export function normalizeModelId(modelId: string): string {
   let key = modelId.trim().toLowerCase();
   key = key.replace(/\[[^\]]*\]$/, "");
@@ -76,6 +80,7 @@ export function normalizeModelId(modelId: string): string {
   const claudeAt = key.indexOf("claude-");
   if (claudeAt > 0) key = key.slice(claudeAt);
   key = key.replace(/-\d{8}$/, "");
+  key = key.replace(/(\d)\.(\d)/g, "$1-$2"); // gateway spelling `claude-opus-4.8`
   return key;
 }
 

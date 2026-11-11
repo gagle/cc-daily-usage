@@ -17,7 +17,7 @@ cache-rehydration check.
   Main conversation on a subscription within plan: `1h`; on usage credits /
   API key / cloud: `5m`. Subagents: `5m`.
 - Prices per MTok, relative to the model's input rate: cache read ≈ 0.1×
-  (0.05× Opus 5.5, 0.025× Fable 5.1), 5-minute write 1.25×, 1-hour write 2×.
+  (0.05× Opus 5.5, 0.025× Fable 5.2 / 5.1), 5-minute write 1.25×, 1-hour write 2×.
 - Claude Code reports it all in the statusline payload as `prompt_cache`
   (v2.1.251+): `warm`, `ttl`, `expires_at`, `recache_tokens_if_cold`,
   `miss_recache_tokens`, `hit_ratio`, `last_miss_at`, `last_miss_cause`.
@@ -140,9 +140,9 @@ for large sessions with breaks it is far cheaper.
 part reads `⚠ <model id>: no price, $ not estimated`.
 
 - Cache writes 1.25× input (5m) / 2× (1h). Cache reads 0.1× input, except
-  Fable 5.1 / Mythos 5.1 (0.025×) and Opus 5.5 / Sonnet 5.5 (0.05×).
-- Fast mode (`FAST_MODE_MULTIPLIER`) when `usage.speed` is `fast`: 2× on Opus
-  5.5 / 5 / 4.8; 6× on Opus 4.6 / 4.7 (archived fast-mode page), whose fast
+  Fable 5.2 / 5.1 and Mythos 5.2 / 5.1 (0.025×) and Opus 5.5 / Sonnet 5.5 (0.05×).
+- Fast mode (`FAST_MODE_MULTIPLIER`) when `usage.speed` is `fast`: 2× on Fable /
+  Mythos 5.2 and Opus 5.5 / 5 / 4.8; 6× on Opus 4.6 / 4.7 (archived fast-mode page), whose fast
   mode is removed, so the live forecast prices them standard
   (`fastModeBilled`).
 - Haiku 5.5 over 100K prompt tokens (input + cache read + cache write): $0.50

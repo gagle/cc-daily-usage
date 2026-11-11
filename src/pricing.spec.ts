@@ -16,6 +16,8 @@ describe("pricing.ts", () => {
     ["us.anthropic.claude-sonnet-5-5", "claude-sonnet-5-5"],
     ["anthropic/claude-haiku-4-5-20251001", "claude-haiku-4-5"],
     ["claude-opus-4-5@20251101", "claude-opus-4-5"],
+    ["anthropic/claude-opus-4.8", "claude-opus-4-8"],
+    ["claude-fable-5.2[1m]", "claude-fable-5-2"],
   ])("normalizeModelId(%s) = %s", (raw, key) => {
     expect(normalizeModelId(raw)).toBe(key);
   });
@@ -23,6 +25,8 @@ describe("pricing.ts", () => {
   it("known models are priced, unknown ones are not", () => {
     expect(ratesFor("claude-opus-5-5")).toEqual({ input: 4, output: 20, cacheRead: 0.2 });
     expect(ratesFor("claude-fable-5-1")?.cacheRead).toBe(0.25);
+    expect(ratesFor("claude-fable-5-2")).toEqual({ input: 8, output: 40, cacheRead: 0.2 });
+    expect(ratesFor("claude-fable-5-2", true)).toEqual({ input: 16, output: 80, cacheRead: 0.4 });
     expect(ratesFor("gpt-5")).toBeNull();
   });
 
