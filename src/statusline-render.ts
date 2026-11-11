@@ -1,4 +1,4 @@
-import type { ApiWindow } from "./interfaces/config.interface.js";
+import type { ApiResetGrant, ApiWindow } from "./interfaces/config.interface.js";
 import type { HookPayload, StatuslineState } from "./interfaces/statusline.interface.js";
 import type { Runway } from "./limits-history.js";
 import { gradientRgb } from "./meter.js";
@@ -216,6 +216,26 @@ function monthPart(state: StatuslineState): string {
   return ageMin >= 1 ? `${month} ${rgb("180;180;180", `${String(ageMin)}m old`)}` : month;
 }
 
+/** `↺ 1 reset · by Nov 17`, or `↺ 2 resets · 1 by Nov 17`: limit resets left, and how many of them end
+ * first. Expired grants drop out. */
+function resetsPart(grants: ReadonlyArray<ApiResetGrant>, now: Date): string {
+  const live = grants.filter((grant) => grant.endsAt === null || grant.endsAt > now.getTime());
+  const total = live.reduce((sum, grant) => sum + grant.left, 0);
+  if (total === 0) return "";
+  const ends = live.flatMap((grant) => (grant.endsAt === null ? [] : [grant.endsAt]));
+  const label = `↺ ${String(total)} ${total === 1 ? "reset" : "resets"}`;
+  if (ends.length === 0) return rgb("120;220;160", label);
+  const first = Math.min(...ends);
+  const firstLeft = live
+    .filter((grant) => grant.endsAt === first)
+    .reduce((sum, grant) => sum + grant.left, 0);
+  const by = `by ${shortWhen(first / 1000, now)}`;
+  return rgb(
+    "120;220;160",
+    `${label} · ${firstLeft === total ? by : `${String(firstLeft)} ${by}`}`,
+  );
+}
+
 function creditsPart(state: StatuslineState): string {
   const extra = state.extraUsage;
   if (!extra) return "";
@@ -313,6 +333,9 @@ export function renderStatusline(
   // Pro/Max parts and budget parts never show together: the plan picks one family.
   const subscription = state !== null && !state.hasSpendCap;
   const budget = state !== null && state.hasSpendCap;
+  const windowed =
+    state !== null &&
+    (state.rateLimits.fiveHourPct !== null || state.rateLimits.sevenDayPct !== null);
 
   const part = (id: PartId): string => {
     switch (id) {
@@ -347,6 +370,9 @@ export function renderStatusline(
         return subscription ? warningsPart(state, now) : "";
       case "credits":
         return subscription ? creditsPart(state) : "";
+      // Only where the 5h/7d windows apply to this session: a reset clears those windows.
+      case "resets":
+        return subscription && windowed ? resetsPart(state.apiDetail?.resets ?? [], now) : "";
       case "today":
         return budget ? todayPart(state) : "";
       case "month":

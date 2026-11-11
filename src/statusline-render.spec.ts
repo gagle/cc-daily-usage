@@ -484,6 +484,64 @@ describe("history parts", () => {
     expect(spend({ used: 1, limit: 2, period: null })).toBe("💳 63% $1.00/$2.00");
   });
 
+  it("shows limit resets left on Pro/Max sessions the 5h/7d windows apply to", () => {
+    vi.stubEnv("TZ", "UTC");
+    const day = 24 * 3600 * 1000;
+    const windowed = { ...NO_LIMITS, fiveHourPct: 10 };
+    const resets = (
+      grants: ReadonlyArray<{ left: number; endsAt: number | null }>,
+      overrides: Partial<StatuslineState> = {},
+    ): string =>
+      plain(
+        renderStatusline(
+          payload,
+          state({
+            hasSpendCap: false,
+            rateLimits: windowed,
+            apiDetail: { fiveHour: null, sevenDay: null, extraWindows: [], resets: grants },
+            ...overrides,
+          }),
+          "",
+          NOW,
+          [["resets"]],
+        ),
+      );
+    const soon = NOW.getTime() + 7 * day;
+    const later = NOW.getTime() + 30 * day;
+    expect(resets([{ left: 1, endsAt: soon }])).toBe("↺ 1 reset · by Oct 17");
+    expect(
+      resets([
+        { left: 1, endsAt: soon },
+        { left: 1, endsAt: later },
+      ]),
+    ).toBe("↺ 2 resets · 1 by Oct 17");
+    expect(resets([{ left: 2, endsAt: null }])).toBe("↺ 2 resets");
+    expect(resets([{ left: 1, endsAt: NOW.getTime() - 1 }])).toBe("");
+    expect(resets([])).toBe("");
+    // Budget plans, sessions outside the windows, and stale readings (no apiDetail) show nothing.
+    expect(resets([{ left: 1, endsAt: null }], { hasSpendCap: true })).toBe("");
+    expect(resets([{ left: 1, endsAt: null }], { rateLimits: NO_LIMITS })).toBe("");
+    expect(
+      resets([{ left: 1, endsAt: null }], { rateLimits: { ...NO_LIMITS, sevenDayPct: 3 } }),
+    ).toBe("↺ 1 reset");
+    expect(resets([], { apiDetail: null })).toBe("");
+    const legacy = plain(
+      renderStatusline(
+        payload,
+        state({
+          hasSpendCap: false,
+          rateLimits: windowed,
+          apiDetail: { fiveHour: null, sevenDay: null, extraWindows: [] },
+        }),
+        "",
+        NOW,
+        [["resets"]],
+      ),
+    );
+    expect(legacy).toBe("");
+    expect(plain(renderStatusline(payload, null, "", NOW, [["resets"]]))).toBe("");
+  });
+
   it("writes short times: 12-hour and 24-hour locales, a weekday within a week, a date after", () => {
     vi.stubEnv("TZ", "UTC"); // NOW is 10:00 UTC
     const at = (hours: number): number => nowSec + hours * 3600;

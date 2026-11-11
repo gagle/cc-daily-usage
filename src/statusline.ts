@@ -492,7 +492,12 @@ export async function buildStatuslineState(
     apiDetail:
       api === null || api.stale === true
         ? null
-        : { fiveHour: api.fiveHour, sevenDay: api.sevenDay, extraWindows: api.extraWindows ?? [] },
+        : {
+            fiveHour: api.fiveHour,
+            sevenDay: api.sevenDay,
+            extraWindows: api.extraWindows ?? [],
+            resets: api.resets ?? [],
+          },
     cache,
     promptUsd,
     hasSpendCap: config.hasSpendCap === true, // always resolved by the classification above

@@ -31,7 +31,17 @@ function addVersionOnly(value: Record<string, unknown>): Record<string, unknown>
 }
 export const CONFIG_MIGRATIONS: ReadonlyArray<Migration> = [addVersionOnly];
 export const API_CACHE_MIGRATIONS: ReadonlyArray<Migration> = [addVersionOnly];
-export const LAYOUT_MIGRATIONS: ReadonlyArray<Migration> = [addVersionOnly];
+/** Layout 1 → 2: the `resets` part is new and on by default, so a saved layout gets it at the end of its
+ * first row (unless a row already has it). */
+function addResetsPart(value: Record<string, unknown>): Record<string, unknown> {
+  const rows = value.rows;
+  if (!Array.isArray(rows) || rows.some((row) => Array.isArray(row) && row.includes("resets")))
+    return value;
+  const [first, ...rest] = rows as Array<unknown>;
+  const head: Array<unknown> = Array.isArray(first) ? (first as Array<unknown>) : [];
+  return { ...value, rows: [[...head, "resets"], ...rest] };
+}
+export const LAYOUT_MIGRATIONS: ReadonlyArray<Migration> = [addVersionOnly, addResetsPart];
 
 export const NEWER_FILE_HINT =
   "A file was written by a newer cc-daily-usage. Run: npm i -g cc-daily-usage";

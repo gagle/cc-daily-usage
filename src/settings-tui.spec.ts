@@ -49,8 +49,8 @@ describe("initialSettings / cellsToLayout", () => {
     ).toEqual({
       layout: [["model"], ["cache", "cost"]],
     });
-    expect(cellsToLayout([["0"]])).toEqual({ error: "0 is not a part number (1-14)" });
-    expect(cellsToLayout([["99"]])).toEqual({ error: "99 is not a part number (1-14)" });
+    expect(cellsToLayout([["0"]])).toEqual({ error: "0 is not a part number (1-15)" });
+    expect(cellsToLayout([["99"]])).toEqual({ error: "99 is not a part number (1-15)" });
     expect(cellsToLayout([["5", "5"]])).toEqual({ error: "part 5 is placed twice" });
     expect(cellsToLayout([[""]])).toEqual({ error: "place at least one part" });
   });
@@ -123,7 +123,7 @@ describe("renderSettings", () => {
 
   it("an invalid grid previews the error; colour marks the cursor with inverse video", () => {
     const frame = renderSettings(press(empty(), ["0"]) ?? empty(), { color: true }).join("\n");
-    expect(frame).toContain("✗ 0 is not a part number (1-14)");
+    expect(frame).toContain("✗ 0 is not a part number (1-15)");
     expect(frame).toContain("\x1b[7m  0 \x1b[0m");
   });
 });

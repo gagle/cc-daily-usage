@@ -5,6 +5,10 @@ that exercises all of this: `adrs/2026-10-10-manual-test-plan.md`.
 
 ## `cc-daily-usage init` (first run)
 
+`init` and `statusline` refuse to run from an `npx` / `pnpm dlx` cache (the shim
+and hooks would point at files that are cleared later) and ask for
+`npm install -g cc-daily-usage`. `-v` / `--version` prints the version.
+
 1. Prints the resolved account.
 2. Asks to install the statusline (Y → full shim + prompt gate hook, n → capture-only line).
 3. Offers `"promptCacheTtl": "1h"` when unset (see `docs/prompt-cache.md`).
@@ -149,6 +153,10 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 14. `» <action>` — the next action: what to do now (cache about to go cold,
     cold cache, deep context, a limit at risk) or the week's top habit with its
     $ (`docs/coach.md`); on its own line by default.
+15. Pro/Max, when the 5h/7d windows apply to the session: `↺ 1 reset · by Nov 17`
+    (or `↺ 2 resets · 1 by Nov 17`), the limit resets the account can still
+    use and how many end first. Hidden with none left. Last in the first row
+    by default; older saved layouts get it there too.
 
 Before every part, not set in the layout: `⇄ <email>` for 10 minutes after a
 `/login` (in any terminal) moved this session to another account (see "Account

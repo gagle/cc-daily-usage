@@ -53,7 +53,7 @@ describe("loadLayout / saveLayout", () => {
     expect(loadLayout()).toBe(DEFAULT_LAYOUT);
     saveLayout([["cost"], ["cache"]]);
     expect(JSON.parse(readFileSync(LAYOUT_FILE, "utf8"))).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       rows: [["cost"], ["cache"]],
     });
     expect(loadLayout()).toEqual([["cost"], ["cache"]]);
@@ -63,10 +63,25 @@ describe("loadLayout / saveLayout", () => {
     expect(loadLayout()).toBe(DEFAULT_LAYOUT);
   });
 
+  it("an older statusline.json gets the new resets part at the end of its first row, in memory", async () => {
+    const { loadLayout, LAYOUT_FILE } = await fresh();
+    mkdirSync(path.dirname(LAYOUT_FILE), { recursive: true });
+    const v1 = JSON.stringify({ schemaVersion: 1, rows: [["cost", "limits"], ["coach"]] });
+    writeFileSync(LAYOUT_FILE, v1);
+    expect(loadLayout()).toEqual([["cost", "limits", "resets"], ["coach"]]);
+    expect(readFileSync(LAYOUT_FILE, "utf8")).toBe(v1);
+    writeFileSync(LAYOUT_FILE, JSON.stringify({ rows: [["cost"], ["resets"]] }));
+    expect(loadLayout()).toEqual([["cost"], ["resets"]]);
+    writeFileSync(LAYOUT_FILE, JSON.stringify({ schemaVersion: 1, rows: ["x", ["cost"]] }));
+    expect(loadLayout()).toEqual([["resets"], ["cost"]]);
+    writeFileSync(LAYOUT_FILE, JSON.stringify({ schemaVersion: 1, rows: "x" }));
+    expect(loadLayout()).toEqual((await fresh()).DEFAULT_LAYOUT);
+  });
+
   it("a newer statusline.json still renders but is never overwritten", async () => {
     const { loadLayout, saveLayout, LAYOUT_FILE } = await fresh();
     const { listNewerFiles } = await import("./config.js");
-    const newer = JSON.stringify({ schemaVersion: 2, rows: [["cost", "future-part"]] });
+    const newer = JSON.stringify({ schemaVersion: 3, rows: [["cost", "future-part"]] });
     mkdirSync(path.dirname(LAYOUT_FILE), { recursive: true });
     writeFileSync(LAYOUT_FILE, newer);
     expect(loadLayout()).toEqual([["cost"]]);

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { CONFIG_ROOT_DIR, LAYOUT_MIGRATIONS, markNewerFile, writeVersionedFile } from "./config.js";
-import { schemaVersionOf } from "./migrate.js";
+import { migrateRecord } from "./migrate.js";
 
 /** Every statusline part, in the default left-to-right order. `sample` is what `settings` previews. */
 export const PARTS = [
@@ -19,6 +19,7 @@ export const PARTS = [
   { id: "today", label: "Today's budget (Team)", sample: "$4.10/$9.50 (43%)" },
   { id: "month", label: "Month's budget (Team)", sample: "$120.00/$200.00 (60%)" },
   { id: "spend", label: "Spend limit", sample: "💳 40%" },
+  { id: "resets", label: "Limit resets left (Pro/Max)", sample: "↺ 1 reset · by Nov 17" },
   {
     id: "coach",
     label: "Next action",
@@ -65,13 +66,17 @@ export function parseLayout(raw: unknown): Layout {
 }
 
 /** A newer file's rows still render (unknown ids drop), but `settings` will not write over it. A legacy
- * file is not rewritten here: the render must not write, and the next `settings` save adds the version. */
+ * file is migrated in memory, not rewritten: the render must not write; the next `settings` save does. */
 export function loadLayout(): Layout {
   try {
     const raw: unknown = JSON.parse(readFileSync(LAYOUT_FILE, "utf8"));
     const record = raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-    if (schemaVersionOf(record) > LAYOUT_MIGRATIONS.length) markNewerFile(LAYOUT_FILE);
-    return parseLayout(raw);
+    const migrated = migrateRecord(record, LAYOUT_MIGRATIONS);
+    if (migrated.kind === "future") {
+      markNewerFile(LAYOUT_FILE);
+      return parseLayout(raw);
+    }
+    return parseLayout(migrated.value);
   } catch {
     return DEFAULT_LAYOUT;
   }

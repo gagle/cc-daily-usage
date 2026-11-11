@@ -253,6 +253,7 @@ describe("anthropic-usage.ts", () => {
         sevenDay: { ...window, pct: 7, resetsAt: null },
         extraWindows: [{ ...window, key: "opus", pct: 30, resetsAt: null }],
         claudeCodeShare: 0.8,
+        resets: [],
       });
     });
 
@@ -272,7 +273,44 @@ describe("anthropic-usage.ts", () => {
         sevenDay: null,
         extraWindows: [],
         claudeCodeShare: null,
+        resets: [],
       });
+    });
+
+    it("reads unused, unpaused reset grants only when the account is eligible", async () => {
+      const grants = [
+        { resets_left: 1, ends_at: "2026-11-17T07:59:00+00:00", paused: false },
+        { resets_left: 2, ends_at: null },
+        { resets_left: 1, ends_at: "nope" },
+        { resets_left: 0, ends_at: null },
+        { resets_left: 1, paused: true },
+        { ends_at: null },
+      ];
+      const fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ cedar_ember: { eligible: true, grants } }),
+      });
+      vi.stubGlobal("fetch", fetch);
+      const { fetchUsage } = await freshModule();
+      expect((await fetchUsage("t"))?.resets).toEqual([
+        { left: 1, endsAt: Date.parse("2026-11-17T07:59:00Z") },
+        { left: 2, endsAt: null },
+        { left: 1, endsAt: null },
+      ]);
+      expect(String(fetch.mock.calls[0]?.[0])).toContain("/api/oauth/usage?cedar_ember=1");
+      expect(fetch.mock.calls[0]?.[1]).toMatchObject({
+        headers: { "User-Agent": expect.stringMatching(/^claude-cli\//) as unknown },
+      });
+      fetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ cedar_ember: { eligible: false, grants } }),
+      });
+      expect((await fetchUsage("t"))?.resets).toEqual([]);
+      fetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ cedar_ember: { eligible: true, grants: null } }),
+      });
+      expect((await fetchUsage("t"))?.resets).toEqual([]);
     });
 
     it("fetchPlan maps the profile's organization; null without one", async () => {

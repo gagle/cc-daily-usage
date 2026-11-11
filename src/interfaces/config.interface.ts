@@ -70,6 +70,12 @@ export interface ApiExtraWindow extends ApiWindow {
   readonly key: string;
 }
 
+/** One limit-reset grant (`cedar_ember.grants` of `/api/oauth/usage?cedar_ember=1`, not in the public docs). */
+export interface ApiResetGrant {
+  readonly left: number; // `resets_left`
+  readonly endsAt: number | null; // epoch ms the grant expires (`ends_at`); null = no end given
+}
+
 /** Plan facts from `/api/oauth/profile`, refreshed at most daily by the refresher (`doctor` shows them). */
 export interface ApiPlan {
   readonly fetchedAt: number; // epoch ms
@@ -94,6 +100,7 @@ export interface ApiCache {
   readonly extraWindows?: ReadonlyArray<ApiExtraWindow>;
   readonly claudeCodeShare?: number | null; // 0-1: Claude Code's part of the 7d window (`seven_day_breakdown`)
   readonly plan?: ApiPlan;
+  readonly resets?: ReadonlyArray<ApiResetGrant>; // unused, unpaused reset grants; absent before this field
 }
 
 export interface UsageState {
