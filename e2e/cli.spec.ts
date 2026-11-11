@@ -1,5 +1,5 @@
 import { execFile, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -81,6 +81,47 @@ describe("cc-daily-usage CLI (built)", () => {
         ),
       ) as { days: Record<string, number> };
       expect(Object.keys(usage.days)).toHaveLength(0);
+      rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    });
+
+    it("Pro: a fresh API reading with limit resets shows them at the end of a saved layout's first row", () => {
+      const home = sandbox("claude_pro");
+      const root = path.join(home, ".config", "cc-daily-usage");
+      const dir = path.join(root, "accounts", "e2e_example_com");
+      mkdirSync(dir, { recursive: true });
+      const now = Date.now();
+      const day = 24 * 3600 * 1000;
+      // Fresh fetchedAt: the render uses it and starts no refresher.
+      writeFileSync(
+        path.join(dir, "api-cache.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          fetchedAt: now,
+          extraUsage: null,
+          fiveHour: { pct: 40, resetsAt: null },
+          sevenDay: { pct: 5, resetsAt: null },
+          resets: [
+            { left: 1, endsAt: now + 40 * day },
+            { left: 1, endsAt: now + 10 * day },
+            { left: 3, endsAt: now - day },
+          ],
+        }),
+      );
+      // A layout saved before the resets part existed (v1).
+      writeFileSync(
+        path.join(root, "statusline.json"),
+        JSON.stringify({ schemaVersion: 1, rows: [["model", "limits"]] }),
+      );
+      const payload = JSON.stringify({
+        session_id: "e2e",
+        model: { display_name: "Opus" },
+        rate_limits: { five_hour: { used_percentage: 40 }, seven_day: { used_percentage: 5 } },
+      });
+      const line = run(home, ["--statusline-line"], payload).stdout.replace(
+        new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"),
+        "",
+      );
+      expect(line).toMatch(/^🤖 Opus \| ⏱ 40%\/5h 5%\/7d \| ↺ 2 resets · 1 by \S+/);
       rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     });
 
