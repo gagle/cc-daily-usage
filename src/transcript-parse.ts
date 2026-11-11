@@ -179,6 +179,63 @@ export function parseActivity(line: string): Activity | null {
   return null;
 }
 
+/** Tokens and $ Claude Code kept for one model over one run (`cost-state` `modelUsage`). */
+export interface CcModelUsage {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite5m: number;
+  readonly cacheWrite1h: number;
+  readonly cacheWriteOther: number; // cache writes with no TTL split; Claude Code bills them at the 5m rate
+  readonly webSearches: number;
+  readonly usd: number;
+}
+
+/** Claude Code's own cost of one process run of a session, from the `cost-state` line it writes when the run
+ * ends (not in the public docs). It counts every request of the run, also those no transcript line shows. */
+export interface CostState {
+  readonly sessionId: string;
+  readonly startTime: number; // epoch ms the run started; a resumed session starts a new run at $0
+  readonly usd: number;
+  readonly models: Readonly<Record<string, CcModelUsage>>; // normalized model id → usage
+}
+
+export function parseCostState(line: string): CostState | null {
+  if (!line.includes('"type":"cost-state"')) return null;
+  let entry: Record<string, unknown>;
+  try {
+    entry = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (entry.type !== "cost-state" || typeof entry.startTime !== "number") return null;
+  const models: Record<string, CcModelUsage> = {};
+  const usage = entry.modelUsage;
+  for (const [model, raw] of Object.entries(
+    usage !== null && typeof usage === "object" ? usage : {},
+  )) {
+    const u = (raw ?? {}) as Record<string, unknown>;
+    const cacheWrite5m = num(u.cacheCreationEphemeral5mInputTokens);
+    const cacheWrite1h = num(u.cacheCreationEphemeral1hInputTokens);
+    models[normalizeModelId(model)] = {
+      input: num(u.inputTokens),
+      output: num(u.outputTokens),
+      cacheRead: num(u.cacheReadInputTokens),
+      cacheWrite5m,
+      cacheWrite1h,
+      cacheWriteOther: Math.max(0, num(u.cacheCreationInputTokens) - cacheWrite5m - cacheWrite1h),
+      webSearches: num(u.webSearchRequests),
+      usd: num(u.costUSD),
+    };
+  }
+  return {
+    sessionId: str(entry.sessionId, "unknown"),
+    startTime: entry.startTime,
+    usd: num(entry.totalCostUSD),
+    models,
+  };
+}
+
 /** A context compaction (`compact_boundary` system line). */
 export interface Compaction {
   readonly sessionId: string;

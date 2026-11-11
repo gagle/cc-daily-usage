@@ -27,12 +27,14 @@ import { schemaVersionOf } from "./migrate.js";
 import { PRICES_VERSION } from "./pricing.js";
 import {
   addTurn,
+  type CcModelUsage,
   contextTokens,
   emptyRollup,
   mcpServersUsed,
   mergeRollup,
   parseActivity,
   parseApiError,
+  parseCostState,
   parseMcpLoad,
   parseTurn,
   priceTurn,
@@ -93,6 +95,14 @@ export interface SessionTotals {
   mcpUsed?: Array<string>; // MCP servers the session called
   attributedUsd?: Record<string, number>; // `skill:<name>` / `mcp:<server>` → $ Claude Code attributed to it
   apiErrors?: Record<string, number>; // `429 usage_limit_reached`, … → failed requests
+  // Claude Code's own cost per process run (`cost-state`), keyed by the run's start (epoch ms as a string).
+  ccRuns?: Record<string, ClaudeCodeRun>;
+}
+
+/** One run's total as Claude Code counted it, and its per-model tokens and $. */
+export interface ClaudeCodeRun {
+  readonly usd: number;
+  readonly models: Readonly<Record<string, CcModelUsage>>;
 }
 
 export interface PassResult {
@@ -236,6 +246,7 @@ interface SessionDelta {
   mcpUsed: Set<string>;
   attributedUsd: Map<string, number>;
   apiErrors: Map<string, number>;
+  ccRuns: Map<string, ClaudeCodeRun>;
 }
 
 function emptySessionDelta(): SessionDelta {
@@ -250,7 +261,21 @@ function emptySessionDelta(): SessionDelta {
     mcpUsed: new Set(),
     attributedUsd: new Map(),
     apiErrors: new Map(),
+    ccRuns: new Map(),
   };
+}
+
+/** A run's `cost-state` total only grows: the larger reading of the same run wins. */
+function mergeRuns(
+  prior: Readonly<Record<string, ClaudeCodeRun>> | undefined,
+  add: ReadonlyMap<string, ClaudeCodeRun>,
+): Record<string, ClaudeCodeRun> {
+  const out: Record<string, ClaudeCodeRun> = { ...prior };
+  for (const [start, run] of add) {
+    const known = out[start];
+    if (!known || run.usd >= known.usd) out[start] = run;
+  }
+  return out;
 }
 
 /** Adds the delta's counts to the prior record's, key by key. */
@@ -300,6 +325,9 @@ function applyDelta(owner: string, delta: OwnerDelta): void {
       ...mcpTotals(prior, add),
       attributedUsd: addCounts(prior?.attributedUsd, add.attributedUsd),
       apiErrors: addCounts(prior?.apiErrors, add.apiErrors),
+      ...(prior?.ccRuns || add.ccRuns.size > 0
+        ? { ccRuns: mergeRuns(prior?.ccRuns, add.ccRuns) }
+        : {}),
     };
     if (add.turns.length === 0) {
       // Only system or attachment lines this pass: they extend a session the index has, never start one.
@@ -537,6 +565,16 @@ export function runIndexPass(
             const session = sessionDelta(loaded.sessionId);
             for (const [server, tokens] of Object.entries(loaded.servers)) {
               session.mcpLoaded.set(server, Math.max(session.mcpLoaded.get(server) ?? 0, tokens));
+            }
+            continue;
+          }
+          const state = parseCostState(line);
+          if (state !== null) {
+            const runs = sessionDelta(state.sessionId).ccRuns;
+            const start = String(state.startTime);
+            const known = runs.get(start);
+            if (!known || state.usd >= known.usd) {
+              runs.set(start, { usd: state.usd, models: state.models });
             }
             continue;
           }

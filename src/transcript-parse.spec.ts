@@ -11,6 +11,7 @@ import {
   parseActivity,
   parseApiError,
   parseCompaction,
+  parseCostState,
   parseMcpLoad,
   parseRowKey,
   parseTurn,
@@ -83,6 +84,69 @@ describe("parseTurn", () => {
       thinkingMs: 1200,
       entrypoint: "cli",
     });
+  });
+
+  it("parseCostState reads Claude Code's own run total and per-model usage; anything else is null", () => {
+    const state = (fields: Record<string, unknown>): string =>
+      JSON.stringify({ type: "cost-state", sessionId: "s1", startTime: 1000, ...fields });
+    expect(
+      parseCostState(
+        state({
+          totalCostUSD: 1.5,
+          modelUsage: {
+            "claude-opus-5-5[1m]": {
+              inputTokens: 1,
+              outputTokens: 2,
+              cacheReadInputTokens: 3,
+              cacheCreationInputTokens: 10,
+              cacheCreationEphemeral5mInputTokens: 4,
+              cacheCreationEphemeral1hInputTokens: 5,
+              webSearchRequests: 6,
+              costUSD: 1.5,
+            },
+            "claude-sonnet-5-5": null,
+          },
+        }),
+      ),
+    ).toEqual({
+      sessionId: "s1",
+      startTime: 1000,
+      usd: 1.5,
+      models: {
+        "claude-opus-5-5": {
+          input: 1,
+          output: 2,
+          cacheRead: 3,
+          cacheWrite5m: 4,
+          cacheWrite1h: 5,
+          cacheWriteOther: 1,
+          webSearches: 6,
+          usd: 1.5,
+        },
+        "claude-sonnet-5-5": {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite5m: 0,
+          cacheWrite1h: 0,
+          cacheWriteOther: 0,
+          webSearches: 0,
+          usd: 0,
+        },
+      },
+    });
+    expect(parseCostState(state({ sessionId: undefined, modelUsage: null }))).toEqual({
+      sessionId: "unknown",
+      startTime: 1000,
+      usd: 0,
+      models: {},
+    });
+    expect(parseCostState(state({ startTime: "x" }))).toBeNull();
+    expect(parseCostState('{"type":"cost-state"')).toBeNull();
+    expect(
+      parseCostState(JSON.stringify({ type: "mode", inner: { type: "cost-state" } })),
+    ).toBeNull();
+    expect(parseCostState(usageLine())).toBeNull();
   });
 
   it("parseActivity reads turn time and hook runs from system lines; anything else is null", () => {

@@ -2,9 +2,8 @@ import path from "node:path";
 
 import { localDateKey } from "./clock.js";
 import { loadSessionsMap } from "./config.js";
-import type { SessionMapEntry } from "./interfaces/config.interface.js";
 import { paint, type Segment, stacked } from "./meter.js";
-import { WEB_SEARCH_USD } from "./pricing.js";
+import { cacheWriteRate, hasPromptTiers, ratesFor, tokensCost, WEB_SEARCH_USD } from "./pricing.js";
 import { mtokBand } from "./session-model.js";
 import {
   loadRollups,
@@ -13,6 +12,7 @@ import {
   UNATTRIBUTED,
 } from "./transcript-index.js";
 import {
+  type CcModelUsage,
   emptyRollup,
   mergeRollup,
   parseRowKey,
@@ -83,6 +83,14 @@ export interface Report {
   readonly unattributedUsd: number; // same range, sessions no account claimed
   readonly gaps: ReadonlyArray<string>; // self-check notes
   readonly activity: ReportActivity;
+  readonly claudeCode: ClaudeCodeTotals | null; // Claude Code's own $ for the sessions it fully counted
+}
+
+/** Sessions in range whose every run left a `cost-state` line: Claude Code's $ next to the transcripts' $. */
+export interface ClaudeCodeTotals {
+  readonly sessions: number;
+  readonly claudeCodeUsd: number;
+  readonly transcriptUsd: number;
 }
 
 /** Time and hook totals of the sessions last active in the range (from Claude Code's system lines). */
@@ -147,31 +155,76 @@ function componentRollup(total: Rollup, field: keyof Rollup): Rollup {
   return { ...emptyRollup(), [field]: total[field] };
 }
 
+function lastInRange(session: SessionTotals, range: DayRange): boolean {
+  const day = localDateKey(new Date(session.lastAt));
+  return day >= range.from && day <= range.to;
+}
+
+/** One model's tokens of one run at this table's prices; null for a model the table cannot re-price. */
+function tablePrice(model: string, usage: CcModelUsage): number | null {
+  const rates = ratesFor(model);
+  if (rates === null || hasPromptTiers(model)) return null;
+  return (
+    tokensCost(usage.input, rates.input) +
+    tokensCost(usage.output, rates.output) +
+    tokensCost(usage.cacheRead, rates.cacheRead) +
+    tokensCost(usage.cacheWrite5m + usage.cacheWriteOther, cacheWriteRate(rates, "5m")) +
+    tokensCost(usage.cacheWrite1h, cacheWriteRate(rates, "1h")) +
+    usage.webSearches * WEB_SEARCH_USD
+  );
+}
+
 /**
- * Self-check: per session in range, index $ vs Claude Code's own `cost.total_cost_usd` last seen by the
- * statusline. A gap over 5% (and over a cent) on a fully priced session names its models: the price table
- * may be stale for them.
+ * Self-check: Claude Code's own $ per model and run (`cost-state`) against the same tokens at this table's
+ * prices. Both price the same tokens, so a gap over 1% (on more than 5 cents) means the table is stale for that
+ * model, or the run used fast mode. Haiku 5.5 is skipped: its price depends on each request's prompt size.
  */
 export function selfCheck(
   totals: Readonly<Record<string, SessionTotals>>,
-  seen: Readonly<Record<string, SessionMapEntry>>,
   range: DayRange,
 ): ReadonlyArray<string> {
-  const stale = new Set<string>();
-  for (const [sessionId, session] of Object.entries(totals)) {
-    const statusline = seen[sessionId];
-    // A sighting older than the session's last indexed turn misses that turn's cost: nothing to compare.
-    if (!statusline || session.unpricedTurns > 0 || statusline.lastSeenAt < session.lastAt)
-      continue;
-    const day = localDateKey(new Date(session.lastAt));
-    if (day < range.from || day > range.to) continue;
-    const gap = Math.abs(session.usd - statusline.costUsd);
-    if (gap > 0.01 && gap > statusline.costUsd * 0.05)
-      for (const model of session.models) stale.add(model);
+  const worst = new Map<string, number>();
+  for (const session of Object.values(totals)) {
+    if (!lastInRange(session, range)) continue;
+    for (const run of Object.values(session.ccRuns ?? {})) {
+      for (const [model, usage] of Object.entries(run.models)) {
+        const table = tablePrice(model, usage);
+        if (table === null || usage.usd <= 0.05) continue;
+        const gap = (table - usage.usd) / usage.usd;
+        if (Math.abs(gap) > 0.01 && Math.abs(gap) > Math.abs(worst.get(model) ?? 0)) {
+          worst.set(model, gap);
+        }
+      }
+    }
   }
-  return [...stale]
-    .sort()
-    .map((model) => `index and Claude Code's own session cost differ by over 5% for ${model}`);
+  return [...worst]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(
+      ([model, gap]) =>
+        `Claude Code prices ${model} ${String(Math.round(Math.abs(gap) * 100))}% ${gap < 0 ? "higher" : "lower"} than this table: a price change, or fast mode.`,
+    );
+}
+
+/**
+ * Claude Code's own total next to the transcripts' for the sessions it counted whole: a `cost-state` run
+ * starts no later than the first turn, and the runs add up to at least the transcripts' $ (a run that ended
+ * without its line would leave less). The difference is requests no transcript line shows.
+ */
+export function claudeCodeTotals(sessions: ReadonlyArray<SessionTotals>): ClaudeCodeTotals | null {
+  let count = 0;
+  let claudeCodeUsd = 0;
+  let transcriptUsd = 0;
+  for (const session of sessions) {
+    const runs = Object.entries(session.ccRuns ?? {});
+    if (runs.length === 0) continue;
+    const firstStart = Math.min(...runs.map(([start]) => Number(start)));
+    const usd = runs.reduce((sum, [, run]) => sum + run.usd, 0);
+    if (firstStart > Date.parse(session.firstAt) || usd < session.usd * 0.99) continue;
+    count += 1;
+    claudeCodeUsd += usd;
+    transcriptUsd += session.usd;
+  }
+  return count === 0 ? null : { sessions: count, claudeCodeUsd, transcriptUsd };
 }
 
 export function buildReport(
@@ -195,10 +248,7 @@ export function buildReport(
   }
   const totals = loadSessionTotals(owner);
   const names = owner === UNATTRIBUTED ? {} : loadSessionsMap(owner);
-  const inRange = Object.entries(totals).filter(([, session]) => {
-    const day = localDateKey(new Date(session.lastAt));
-    return day >= range.from && day <= range.to;
-  });
+  const inRange = Object.entries(totals).filter(([, session]) => lastInRange(session, range));
   let rows: Array<ReportRow>;
   if (by === "component") {
     rows = COMPONENTS.map(([label, field]) => ({ label, rollup: componentRollup(total, field) }));
@@ -229,8 +279,9 @@ export function buildReport(
     total,
     subagentUsd,
     unattributedUsd: unattributed,
-    gaps: owner === UNATTRIBUTED ? [] : selfCheck(totals, names, range),
+    gaps: owner === UNATTRIBUTED ? [] : selfCheck(totals, range),
     activity: activityOf(inRange.map(([, session]) => session)),
+    claudeCode: claudeCodeTotals(inRange.map(([, session]) => session)),
   };
 }
 
@@ -455,9 +506,20 @@ export function formatReport(
       `${money(report.unattributedUsd)} more in sessions no account claimed (report --account unattributed).`,
     );
   }
+  const claudeCode = claudeCodeNote(report.claudeCode);
+  if (claudeCode !== null) notes.push(claudeCode);
   notes.push(...report.gaps);
   if (report.rows.length === 0) return `No usage in ${report.range.label}.\n${notes[0] as string}`;
   return [...lines, "", ...notes].join("\n");
+}
+
+/** `Claude Code counted $41.20 for 12 sessions: $3.10 (8%) more than the transcripts show …`. */
+function claudeCodeNote(totals: ClaudeCodeTotals | null): string | null {
+  if (totals === null) return null;
+  const extra = totals.claudeCodeUsd - totals.transcriptUsd;
+  if (extra < 0.01) return null;
+  const pct = totals.transcriptUsd > 0 ? Math.round((extra / totals.transcriptUsd) * 100) : 100;
+  return `Claude Code counted ${money(totals.claudeCodeUsd)} for ${String(totals.sessions)} of these sessions: ${money(extra)} (${String(pct)}%) more than the transcripts show, in requests they do not record.`;
 }
 
 export interface ReportArgs {

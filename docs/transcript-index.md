@@ -22,7 +22,7 @@ owner = account whose sessions-map.json has the session id, else "unattributed";
 <owner>/index/YYYY-MM.json  rows: day × project × model × scope × speed → Rollup
 <owner>/index/sessions.json session → totals, first/last time, project, branch, models,
                             turnMs, thinkingMs, hookRuns, entrypoint, mcpLoaded, mcpUsed,
-                            attributedUsd, apiErrors
+                            attributedUsd, apiErrors, ccRuns
 ```
 
 - Offsets live in `~/.config/cc-daily-usage/index/offsets.json` with the size,
@@ -39,7 +39,8 @@ owner = account whose sessions-map.json has the session id, else "unattributed";
 - `usage.speed` "fast" and `usage.inference_geo` "us" select the fast and the
   1.1× US-only prices (see `docs/prompt-cache.md`).
 - Re-price: `index/prices.json` holds the `PRICES_VERSION` (`src/pricing.ts`)
-  the index was built at. When a pass finds an older one (or none, with an
+  the index was built at (the price date, plus `.N` for a rebuild with no
+  price change). When a pass finds an older one (or none, with an
   index present), it copies every owner's index to
   `index/backup-prices-<old>/`, empties it, and rebuilds it from all
   transcripts in that pass, unbounded, keeping the lock fresh. Rows and
@@ -121,13 +122,22 @@ owner = account whose sessions-map.json has the session id, else "unattributed";
   where the $ went. Several matches → an error listing them.
 - `dayBreakdown(owner, day)`: one local day's $ with the top 3 sessions (last
   active that day), models and projects; the calendar's `d` key shows it.
-- Self-check (`selfCheck`): per session in range with no unpriced turn, index
-  $ vs the statusline's last `cost.total_cost_usd` (`sessions-map.json`
-  `costUsd`, written whenever it changes), only when that sighting is not older
-  than the session's last indexed turn; a gap over 5% (and over a
-  cent) prints "index and Claude Code's own session cost differ by over 5%
-  for <model>". Prices are checked against the official table, so a gap
-  comes from Claude Code: its total includes requests not in the transcript.
+- Claude Code's own cost (`parseCostState`): the `cost-state` line Claude
+  Code writes when a run ends (not in the public docs) holds the run's
+  `totalCostUSD`, its `startTime` and per-model tokens and $ (`modelUsage`).
+  The session keeps one entry per run in `ccRuns`, keyed by `startTime`; a
+  later reading of the same run replaces a smaller one (the total only
+  grows). A resumed session starts a new run at $0.
+- Self-check (`selfCheck`): per run and model in range, Claude Code's $
+  against the same tokens at the table's prices (cache writes with no TTL
+  split at the 5m rate, as Claude Code bills them). A gap over 1% on more than
+  5 cents prints "Claude Code prices <model> N% higher|lower than this table: a
+  price change, or fast mode." Haiku 5.5 is skipped: its price goes by each
+  request's prompt size.
+- `claudeCodeTotals`: for the sessions in range that Claude Code counted whole
+  (a run starts no later than the first turn, and the runs add up to at
+  least the transcripts' $), its total next to the index's. The report says
+  how much more it counted: requests no transcript line records.
 
 ## Shared modules
 

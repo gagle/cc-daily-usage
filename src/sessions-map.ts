@@ -16,8 +16,8 @@ export interface SessionSighting {
 /**
  * Records one render's view of a session. A new session, a changed transcript path, name, cost or lines, or
  * an entry last touched an hour ago gives a new map (entries past SESSION_MAP_DAYS drop then); otherwise the
- * same object comes back, so the render skips the write. The cost stays current: the report checks the index
- * against it (selfCheck).
+ * same object comes back, so the render skips the write. Cost and lines stay current for `report --by
+ * session` ($ per 100 changed lines).
  */
 export function recordSession(
   sessions: Readonly<Record<string, SessionMapEntry>>,
