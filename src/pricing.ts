@@ -11,8 +11,9 @@ export interface ModelRates {
  * # ponytail: static snapshot; a price change needs a release. Upgrade path: honour Claude Code's
  * `modelPricing` setting, or fetch a pricing file.
  */
-/** Date of the price snapshot below. A change makes the transcript index re-price its rows (see runIndexPass). */
-export const PRICES_VERSION = "2026-11-11";
+/** Date of the price snapshot below, plus `.N` when the index must be rebuilt for another reason (`.1`: read
+ * Claude Code's `cost-state` lines). A change makes the transcript index re-build its rows (see runIndexPass). */
+export const PRICES_VERSION = "2026-11-11.1";
 
 const RATES: Readonly<Record<string, ModelRates>> = {
   "claude-fable-5-2": { input: 8, output: 40, cacheRead: 0.2 },
@@ -62,6 +63,12 @@ const FAST_MODE_REMOVED = new Set(["claude-opus-4-7", "claude-opus-4-6"]);
 
 /** `inference_geo: "us"` multiplies every token price (Claude 4.6 and later; earlier models reject the field). */
 const US_ONLY_MULTIPLIER = 1.1;
+
+/** Whether the model's price depends on each request's prompt size (Haiku 5.5): a sum of tokens over many
+ * requests cannot be re-priced. */
+export function hasPromptTiers(modelId: string): boolean {
+  return normalizeModelId(modelId) in LONG_PROMPT_RATES;
+}
 
 /** Whether a fast-mode request on this model is billed at the fast price today. */
 export function fastModeBilled(modelId: string): boolean {

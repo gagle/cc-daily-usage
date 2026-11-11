@@ -98,7 +98,8 @@ It keeps 35 days of switches plus the newest older one.
   version bump: rollups `growth`, `freshSplit`, `rewriteTokens`, `usdNewWork`,
   `usdCarry`, `usdRewrite` (missing → 0 on load); `offsets.json` per file
   `context`; `sessions.json` per session `mcpLoaded`, `mcpUsed`,
-  `attributedUsd`, `apiErrors` (missing → none). `index/prices.json` holds the
+  `attributedUsd`, `apiErrors`, `ccRuns` (`{ <startTime>: { usd, models } }`,
+  Claude Code's own cost per run) (missing → none). `index/prices.json` holds the
   `PRICES_VERSION` the index was priced at; `index/backup-prices-<version>/`
   is the copy taken before a re-price.
 - `Feed`: the shared contract with the `/cost-tracker` mod, see `docs/history-and-feed.md`.

@@ -156,6 +156,7 @@ describe("efficiency note", () => {
         attributedUsd: {},
         apiErrors: {},
       },
+      claudeCode: null,
     };
     expect(formatReport(base)).toContain(
       "Efficiency: new work 50% · carry 40% · rewrite 10% · $100/MTok of new work (high)",
@@ -165,6 +166,13 @@ describe("efficiency note", () => {
     expect(
       formatReport({ ...base, total: { ...total, usdNewWork: 0, usdCarry: 0, usdRewrite: 0 } }),
     ).not.toContain("Efficiency");
+    const withClaudeCode = (claudeCodeUsd: number, transcriptUsd: number): string =>
+      formatReport({ ...base, claudeCode: { sessions: 3, claudeCodeUsd, transcriptUsd } });
+    expect(withClaudeCode(11, 10)).toContain(
+      "Claude Code counted $11.00 for 3 of these sessions: $1.00 (10%) more than the transcripts show, in requests they do not record.",
+    );
+    expect(withClaudeCode(1, 0)).toContain("$1.00 (100%) more");
+    expect(withClaudeCode(10.005, 10)).not.toContain("Claude Code counted");
   });
 });
 
@@ -465,59 +473,93 @@ describe("buildReport / formatReport", () => {
     });
   });
 
-  it("flags a price gap over 5% and names its models; sessions out of range are ignored", async () => {
-    sessionsMap({ s1: 1 });
-    await indexFixtures();
-    const { buildReport, formatReport, resolveRange, selfCheck } = await fresh();
+  it("self-check: Claude Code's own $ per model and run against the table's price of the same tokens", async () => {
+    const { selfCheck, resolveRange, claudeCodeTotals } = await fresh();
     const week = resolveRange("week", NOW);
     if (!week) throw new Error("range");
-    const report = buildReport("acct", week, "model");
-    expect(report.gaps).toEqual([
-      "index and Claude Code's own session cost differ by over 5% for claude-opus-5-5",
-      "index and Claude Code's own session cost differ by over 5% for claude-sonnet-5-5",
-    ]);
-    expect(formatReport(report)).toContain("differ by over 5%");
-    const session = {
+    // 1M fresh input + 100k output on Opus 5.5 ($4 / $20): $6.00 at the table's prices.
+    const usage = {
+      input: 1_000_000,
+      output: 100_000,
+      cacheRead: 0,
+      cacheWrite5m: 0,
+      cacheWrite1h: 0,
+      cacheWriteOther: 0,
+      webSearches: 0,
+      usd: 6,
+    };
+    const session = (models: Record<string, typeof usage>, lastAt = NOW.toISOString()) => ({
       firstAt: "",
-      lastAt: "2026-01-01T00:00:00.000Z",
+      lastAt,
       project: "",
       branch: "",
-      models: ["m"],
+      models: Object.keys(models),
       turns: 1,
-      usd: 9,
+      usd: 6,
       unpricedTurns: 0,
       subagentUsd: 0,
-    };
-    const seen = {
-      transcriptPath: null,
-      firstSeenAt: "",
-      lastSeenAt: "",
-      costUsd: 1,
-      linesAdded: 0,
-      linesRemoved: 0,
-    };
-    expect(
-      selfCheck({ old: session }, { old: { ...seen, lastSeenAt: NOW.toISOString() } }, week),
-    ).toEqual([]); // out of range
+      ccRuns: { "1": { usd: 6, models } },
+    });
+    expect(selfCheck({ a: session({ "claude-opus-5-5": usage }) }, week)).toEqual([]);
     expect(
       selfCheck(
-        { x: { ...session, lastAt: NOW.toISOString(), unpricedTurns: 1 } },
-        { x: seen },
+        {
+          a: session({ "claude-opus-5-5": { ...usage, usd: 7.5 } }),
+          b: session({ "claude-opus-5-5": { ...usage, usd: 6.5 } }),
+          c: session({ "claude-sonnet-5-5": { ...usage, usd: 2 } }),
+        },
+        week,
+      ),
+    ).toEqual([
+      "Claude Code prices claude-opus-5-5 20% higher than this table: a price change, or fast mode.",
+      "Claude Code prices claude-sonnet-5-5 50% lower than this table: a price change, or fast mode.",
+    ]);
+    // Out of range, tiny, unpriced, prompt-tiered (Haiku 5.5) or no runs: nothing to compare.
+    expect(
+      selfCheck(
+        {
+          old: session({ "claude-opus-5-5": { ...usage, usd: 1 } }, "2026-01-01T00:00:00.000Z"),
+          tiny: session({ "claude-opus-5-5": { ...usage, input: 0, output: 0, usd: 0.05 } }),
+          unknown: session({ "claude-next-1": { ...usage, usd: 1 } }),
+          haiku: session({ "claude-haiku-5-5": { ...usage, usd: 1 } }),
+          none: { ...session({}), ccRuns: undefined },
+        },
         week,
       ),
     ).toEqual([]);
-    const current = { ...seen, lastSeenAt: NOW.toISOString() };
-    expect(
-      selfCheck({ y: { ...session, lastAt: NOW.toISOString(), usd: 1.004 } }, { y: current }, week),
-    ).toEqual([]);
-    expect(
-      selfCheck({ z: { ...session, lastAt: NOW.toISOString(), usd: 2 } }, { z: current }, week),
-    ).toEqual(["index and Claude Code's own session cost differ by over 5% for m"]);
-    // The statusline last saw the session before its last indexed turn: its cost lags, no comparison.
-    const stale = { ...seen, lastSeenAt: new Date(NOW.getTime() - 60_000).toISOString() };
-    expect(
-      selfCheck({ z: { ...session, lastAt: NOW.toISOString(), usd: 2 } }, { z: stale }, week),
-    ).toEqual([]);
+    // Every cache-write kind and web searches count: 5m and untagged at 1.25×, 1h at 2× input.
+    const writes = {
+      ...usage,
+      input: 0,
+      output: 0,
+      cacheRead: 1_000_000,
+      cacheWrite5m: 1_000_000,
+      cacheWrite1h: 1_000_000,
+      cacheWriteOther: 1_000_000,
+      webSearches: 10,
+      usd: 0.2 + 5 + 8 + 5 + 0.1,
+    };
+    expect(selfCheck({ w: session({ "claude-opus-5-5": writes }) }, week)).toEqual([]);
+
+    const start = Date.parse("2026-10-09T08:00:00.000Z");
+    const counted = {
+      ...session({}),
+      firstAt: "2026-10-09T09:00:00.000Z",
+      usd: 10,
+      ccRuns: {
+        [String(start)]: { usd: 8, models: {} },
+        [String(start + 3_600_000 * 5)]: { usd: 3.5, models: {} },
+      },
+    };
+    expect(claudeCodeTotals([counted])).toEqual({
+      sessions: 1,
+      claudeCodeUsd: 11.5,
+      transcriptUsd: 10,
+    });
+    // A run that started after the first turn, or runs that add up to less: not counted whole.
+    expect(claudeCodeTotals([{ ...counted, firstAt: "2026-10-09T07:00:00.000Z" }])).toBeNull();
+    expect(claudeCodeTotals([{ ...counted, usd: 20 }])).toBeNull();
+    expect(claudeCodeTotals([{ ...counted, ccRuns: undefined }])).toBeNull();
   });
 
   it("an account sees the unattributed $ as a note; an empty range says so", async () => {

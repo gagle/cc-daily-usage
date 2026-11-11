@@ -25,12 +25,13 @@ cache-rehydration check.
 ## Formulas (`forecastCache`)
 
 ```
-rates      = ratesFor(model.id, fast_mode, context)   (null → ⚠ no-price warning)
+tail       = current_usage.input_tokens + output_tokens  (no current_usage → 0)
+rates      = ratesFor(model.id, fast_mode, context + tail)   (null → ⚠ no-price warning)
 writeRate  = input × (ttl == 1h ? 2 : 1.25)
 warm       = prompt_cache.warm and (expires_at null or > now)
 cached     = current_usage.cache_read_input_tokens + cache_creation_input_tokens
              (no current_usage → total_input_tokens)
-nextWarm   = cached × cacheRead                       the prefix the next request reads
+nextWarm   = cached × cacheRead + tail × writeRate    read the prefix, write the last reply
 premium    = min(recache_tokens_if_cold, cached) × (writeRate − cacheRead)
              (null after /compact)                    what letting it expire costs
 nextCold   = nextWarm + premium
@@ -41,9 +42,13 @@ hint       = warm and premium ≥ $1 → "break" ; cold and nextCold ≥ $1 → 
 ```
 
 The forecast is the **input-side floor** the history alone costs on the next
-API request. The fresh input of the last request, its output and the new
-prompt are written to the cache warm or cold alike, so they are not in the
-premium; their size is unknown in advance, so they are not in `$/req`. One
+API request. The next request reads the last request's cached prefix and
+writes its fresh input and output (the `tail`); both are known, so both are
+in `$/req`. The tail is written warm or cold alike, so it is not in the
+premium. The new prompt or tool results are also written, but their size is
+unknown in advance. Measured on 2,569 consecutive warm requests (2026-11-11):
+97% read exactly the last cached prefix, and the forecast was a median 94% of
+the real input-side cost (84% before the tail), above it in 3 cases. One
 prompt can make many requests (each tool call is one), each paying `$/req`
 again. Rates are list price (see Pricing table): on a subscription the $ is
 API-equivalent, not billed.

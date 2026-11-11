@@ -8,6 +8,8 @@ export interface CachePayload {
     readonly total_input_tokens?: number;
     readonly used_percentage?: number | null;
     readonly current_usage?: {
+      readonly input_tokens?: number;
+      readonly output_tokens?: number;
       readonly cache_read_input_tokens?: number;
       readonly cache_creation_input_tokens?: number;
     } | null;
@@ -31,7 +33,7 @@ export interface CacheForecast {
   readonly warm: boolean;
   readonly secondsUntilCold: number | null; // null when already cold or unknown
   readonly ttlSeconds: number; // 300 (5m) or 3600 (1h) — the countdown's full length
-  readonly nextWarmUsd: number; // reading the cached prefix on the next prompt
+  readonly nextWarmUsd: number; // the next request while warm: read the cached prefix, write the last reply
   readonly nextColdUsd: number | null; // re-writing it if the cache has gone cold; null = unknown
   readonly missPremiumUsd: number | null; // cold − warm: what letting the cache expire costs
   readonly sessionMissUsd: number; // already re-paid this session for misses (write − read on miss tokens)
@@ -54,10 +56,15 @@ export function forecastCache(payload: CachePayload, nowSec: number): CacheForec
   const modelId = payload.model?.id;
   if (!cache || !modelId) return null;
   const contextTokens = payload.context_window?.total_input_tokens ?? 0;
+  const usage = payload.context_window?.current_usage;
+  // The last request's uncached input and its reply join the next prompt, which writes them to the cache
+  // warm or cold alike (measured: the next warm request reads exactly the last cached prefix and writes at
+  // least this tail, the rest being the new content). Unknown without current_usage (old payloads, /compact).
+  const tail = usage ? (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0) : 0;
   const rates = ratesFor(
     modelId,
     payload.fast_mode === true && fastModeBilled(modelId),
-    contextTokens,
+    contextTokens + tail, // the next prompt's size picks Haiku 5.5's tier
   );
   if (!rates) return null;
 
@@ -67,13 +74,11 @@ export function forecastCache(payload: CachePayload, nowSec: number): CacheForec
   const warm = cache.warm === true && (expiresAt === null || expiresAt > nowSec);
   const recache = cache.recache_tokens_if_cold ?? null;
 
-  // The cached prefix: what the last request read or wrote to the cache. Its fresh input_tokens were never
-  // cached, so the next request writes them warm or cold alike. Older payloads: the whole context.
-  const usage = payload.context_window?.current_usage;
+  // The cached prefix: what the last request read or wrote to the cache. Older payloads: the whole context.
   const cachedTokens = usage
     ? (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
     : contextTokens;
-  const nextWarmUsd = tokensCost(cachedTokens, rates.cacheRead);
+  const nextWarmUsd = tokensCost(cachedTokens, rates.cacheRead) + tokensCost(tail, writeRate);
   // Cold, the prefix the warm request would read is written instead: (write − read) per re-cached token.
   // Re-cached tokens beyond the prefix are new content, written either way.
   const missPremiumUsd =

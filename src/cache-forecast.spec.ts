@@ -130,14 +130,20 @@ describe("forecastCache", () => {
     expect(long?.nextColdUsd).toBeCloseTo(0.105, 6); // warm read + premium
   });
 
-  it("prices the cached prefix from current_usage; fresh input is written warm or cold alike", () => {
-    // Opus 5.5, 1h TTL: read $0.20, write $8. 100k context = 90k read + 9k written + 1k fresh input.
+  it("reads or re-writes the cached prefix; writes the last fresh input and reply either way", () => {
+    // Opus 5.5, 1h TTL: read $0.20, write $8. 100k context = 90k read + 9k written + 1k fresh input; the
+    // reply was 2k. The next request writes that 3k tail warm or cold: $0.024.
     const forecast = forecastCache(
       payload({
         context_window: {
           total_input_tokens: 100_000,
           used_percentage: 10,
-          current_usage: { cache_read_input_tokens: 90_000, cache_creation_input_tokens: 9_000 },
+          current_usage: {
+            input_tokens: 1000,
+            output_tokens: 2000,
+            cache_read_input_tokens: 90_000,
+            cache_creation_input_tokens: 9_000,
+          },
         },
         prompt_cache: {
           warm: true,
@@ -148,9 +154,9 @@ describe("forecastCache", () => {
       }),
       NOW,
     );
-    expect(forecast?.nextWarmUsd).toBeCloseTo(0.0198, 9); // 99k × $0.20
+    expect(forecast?.nextWarmUsd).toBeCloseTo(0.0438, 9); // 99k × $0.20 + 3k × $8
     expect(forecast?.missPremiumUsd).toBeCloseTo(0.7722, 9); // min(100k, 99k) × ($8 − $0.20)
-    expect(forecast?.nextColdUsd).toBeCloseTo(0.792, 9); // 99k × $8
+    expect(forecast?.nextColdUsd).toBeCloseTo(0.816, 9); // 99k × $8 + 3k × $8
     const partial = forecastCache(
       payload({
         context_window: { total_input_tokens: 100_000, used_percentage: 10, current_usage: {} },

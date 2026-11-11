@@ -317,6 +317,33 @@ describe("runIndexPass", () => {
     expect(loadSessionTotals("acct").s1).toMatchObject({ turnMs: 40_000, turns: 1 });
   });
 
+  it("keeps Claude Code's own cost per run: the larger reading of a run wins, across passes", async () => {
+    sessionsMap("acct", ["s1"]);
+    const file = path.join(projectDir(), "s1.jsonl");
+    const state = (startTime: number, totalCostUSD: number): string =>
+      `${JSON.stringify({
+        type: "cost-state",
+        sessionId: "s1",
+        startTime,
+        totalCostUSD,
+        modelUsage: { "claude-opus-5-5": { inputTokens: 10, costUSD: totalCostUSD } },
+      })}\n`;
+    writeFileSync(file, line("a") + state(100, 2) + state(100, 1.5) + state(200, 0.5));
+    const { runIndexPass, loadSessionTotals } = await fresh();
+    runIndexPass({ now: NOW });
+    const runs = loadSessionTotals("acct").s1?.ccRuns;
+    expect(runs?.["100"]?.usd).toBe(2);
+    expect(runs?.["200"]?.models["claude-opus-5-5"]).toMatchObject({ input: 10, usd: 0.5 });
+    writeFileSync(file, state(100, 1) + state(200, 3), { flag: "a" });
+    runIndexPass({ now: NOW });
+    const after = loadSessionTotals("acct").s1?.ccRuns;
+    expect([after?.["100"]?.usd, after?.["200"]?.usd]).toEqual([2, 3]);
+    // A pass with no cost-state line keeps the runs.
+    writeFileSync(file, line("b"), { flag: "a" });
+    runIndexPass({ now: NOW });
+    expect(loadSessionTotals("acct").s1?.ccRuns?.["200"]?.usd).toBe(3);
+  });
+
   it("efficiency split: known context per thread, kept across passes; a legacy offset skips one turn", async () => {
     sessionsMap("acct", ["s1"]);
     const main = path.join(projectDir(), "s1.jsonl");

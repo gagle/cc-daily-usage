@@ -69,8 +69,10 @@ export interface SessionModel {
     readonly ms: number;
     readonly model: string;
     readonly fast: boolean;
+    readonly usOnly: boolean;
     readonly context: number;
     readonly cached: number; // cache read + cache write: the prefix the next request reads or re-writes
+    readonly tail: number; // the last request's uncached input + output: the next request writes it
   } | null;
   ttlSeconds: number; // TTL of the last cache write on the main thread
   readonly seen: Set<string>; // turn keys: Claude Code repeats a line per content block
@@ -146,12 +148,15 @@ export function addSessionTurn(
     if (turn.cacheWrite1h > 0) session.ttlSeconds = ONE_HOUR_TTL;
     else if (turn.cacheWrite5m > 0) session.ttlSeconds = FIVE_MIN_TTL;
     if (session.lastMain === null || ms >= session.lastMain.ms) {
+      const lastRequest = turn.requests?.at(-1) ?? turn;
       session.lastMain = {
         ms,
         model: turn.model,
         fast: turn.fast,
+        usOnly: turn.usOnly,
         context,
-        cached: context - (turn.requests?.at(-1) ?? turn).input, // the last request's cache read + write
+        cached: context - lastRequest.input, // the last request's cache read + write
+        tail: lastRequest.input + lastRequest.output,
       };
     }
   }
@@ -248,28 +253,31 @@ export interface CacheState {
   readonly secondsLeft: number; // 0 when cold
   readonly ttlSeconds: number;
   readonly context: number;
-  readonly nextWarmUsd: number; // reading the cached prefix
-  readonly nextColdUsd: number; // writing it again
+  readonly nextWarmUsd: number; // reading the cached prefix, writing the last reply
+  readonly nextColdUsd: number; // writing both
 }
 
 /**
  * Estimate from the transcript alone: the cache stays warm for one TTL after the last main turn; the next
- * prompt re-reads (warm) or re-writes (cold) that turn's cached prefix (its fresh input was never cached). Null before a priced main turn.
+ * prompt re-reads (warm) or re-writes (cold) that turn's cached prefix, and writes the last request's
+ * uncached input and reply either way. Null before a priced main turn.
  */
 export function cacheState(session: SessionModel, nowMs: number): CacheState | null {
   const last = session.lastMain;
   if (last === null) return null;
-  const rates = ratesFor(last.model, last.fast, last.context);
+  const rates = ratesFor(last.model, last.fast, last.context + last.tail, last.usOnly);
   if (rates === null) return null;
   const ttl = session.ttlSeconds;
+  const writeRate = cacheWriteRate(rates, ttl === ONE_HOUR_TTL ? "1h" : "5m");
+  const tailUsd = tokensCost(last.tail, writeRate);
   const secondsLeft = Math.max(0, Math.round((last.ms + ttl * 1000 - nowMs) / 1000));
   return {
     warm: secondsLeft > 0,
     secondsLeft,
     ttlSeconds: ttl,
     context: last.context,
-    nextWarmUsd: tokensCost(last.cached, rates.cacheRead),
-    nextColdUsd: tokensCost(last.cached, cacheWriteRate(rates, ttl === ONE_HOUR_TTL ? "1h" : "5m")),
+    nextWarmUsd: tokensCost(last.cached, rates.cacheRead) + tailUsd,
+    nextColdUsd: tokensCost(last.cached, writeRate) + tailUsd,
   };
 }
 

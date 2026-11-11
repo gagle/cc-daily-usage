@@ -11,6 +11,7 @@ import {
   parseActivity,
   parseApiError,
   parseCompaction,
+  parseCostState,
   parseMcpLoad,
   parseRowKey,
   parseTurn,
@@ -83,6 +84,69 @@ describe("parseTurn", () => {
       thinkingMs: 1200,
       entrypoint: "cli",
     });
+  });
+
+  it("parseCostState reads Claude Code's own run total and per-model usage; anything else is null", () => {
+    const state = (fields: Record<string, unknown>): string =>
+      JSON.stringify({ type: "cost-state", sessionId: "s1", startTime: 1000, ...fields });
+    expect(
+      parseCostState(
+        state({
+          totalCostUSD: 1.5,
+          modelUsage: {
+            "claude-opus-5-5[1m]": {
+              inputTokens: 1,
+              outputTokens: 2,
+              cacheReadInputTokens: 3,
+              cacheCreationInputTokens: 10,
+              cacheCreationEphemeral5mInputTokens: 4,
+              cacheCreationEphemeral1hInputTokens: 5,
+              webSearchRequests: 6,
+              costUSD: 1.5,
+            },
+            "claude-sonnet-5-5": null,
+          },
+        }),
+      ),
+    ).toEqual({
+      sessionId: "s1",
+      startTime: 1000,
+      usd: 1.5,
+      models: {
+        "claude-opus-5-5": {
+          input: 1,
+          output: 2,
+          cacheRead: 3,
+          cacheWrite5m: 4,
+          cacheWrite1h: 5,
+          cacheWriteOther: 1,
+          webSearches: 6,
+          usd: 1.5,
+        },
+        "claude-sonnet-5-5": {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite5m: 0,
+          cacheWrite1h: 0,
+          cacheWriteOther: 0,
+          webSearches: 0,
+          usd: 0,
+        },
+      },
+    });
+    expect(parseCostState(state({ sessionId: undefined, modelUsage: null }))).toEqual({
+      sessionId: "unknown",
+      startTime: 1000,
+      usd: 0,
+      models: {},
+    });
+    expect(parseCostState(state({ startTime: "x" }))).toBeNull();
+    expect(parseCostState('{"type":"cost-state"')).toBeNull();
+    expect(
+      parseCostState(JSON.stringify({ type: "mode", inner: { type: "cost-state" } })),
+    ).toBeNull();
+    expect(parseCostState(usageLine())).toBeNull();
   });
 
   it("parseActivity reads turn time and hook runs from system lines; anything else is null", () => {
@@ -336,6 +400,49 @@ describe("parseCompaction", () => {
   });
 });
 
+describe("token totals", () => {
+  it("writes the TTL split does not cover count at 5m; several requests sum, not the top-level split", () => {
+    const single = parseTurn(
+      usageLine(
+        {},
+        {
+          cache_creation_input_tokens: 1000,
+          cache_creation: { ephemeral_5m_input_tokens: 600, ephemeral_1h_input_tokens: 300 },
+        },
+      ),
+    );
+    expect([single?.cacheWrite5m, single?.cacheWrite1h]).toEqual([700, 300]);
+    // The top-level split shows only the first request; its total covers both.
+    const request = (write5m: number, write1h: number) => ({
+      input_tokens: 2,
+      output_tokens: 10,
+      cache_read_input_tokens: 100,
+      cache_creation_input_tokens: write5m + write1h,
+      cache_creation: { ephemeral_5m_input_tokens: write5m, ephemeral_1h_input_tokens: write1h },
+    });
+    const multi = parseTurn(
+      usageLine(
+        {},
+        {
+          input_tokens: 4,
+          output_tokens: 20,
+          cache_read_input_tokens: 200,
+          cache_creation_input_tokens: 3500,
+          cache_creation: { ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 500 },
+          iterations: [request(1000, 500), request(2000, 0)],
+        },
+      ),
+    );
+    expect(multi).toMatchObject({
+      input: 4,
+      output: 20,
+      cacheRead: 200,
+      cacheWrite5m: 3000,
+      cacheWrite1h: 500,
+    });
+  });
+});
+
 describe("splitTurn", () => {
   const turn = parseTurn(
     usageLine(
@@ -344,6 +451,7 @@ describe("splitTurn", () => {
         input_tokens: 1000,
         output_tokens: 100,
         cache_read_input_tokens: 10_000,
+        cache_creation_input_tokens: 3000,
         cache_creation: { ephemeral_5m_input_tokens: 3000, ephemeral_1h_input_tokens: 0 },
       },
     ),
@@ -368,7 +476,14 @@ describe("splitTurn", () => {
   it("a first turn (no previous context) is all new work; no fresh input → no rewrite", () => {
     expect(turn && splitTurn(turn, cost, 0).rewriteUsd).toBe(0);
     const readOnly = parseTurn(
-      usageLine({}, { input_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 0 } }),
+      usageLine(
+        {},
+        {
+          input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_creation: { ephemeral_5m_input_tokens: 0 },
+        },
+      ),
     );
     expect(readOnly && splitTurn(readOnly, cost, 5_000_000)).toMatchObject({
       growth: 0,

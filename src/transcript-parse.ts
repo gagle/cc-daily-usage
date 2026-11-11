@@ -81,11 +81,11 @@ export function parseTurn(line: string): Turn | null {
   const usage = message?.usage as Record<string, unknown> | undefined;
   if (entry.type !== "assistant" || !usage || typeof message?.model !== "string") return null;
   if (message.model === "<synthetic>") return null;
-  const tokens = requestTokens(usage);
   const iterations = Array.isArray(usage.iterations) ? (usage.iterations as Array<unknown>) : [];
   const requests = iterations
     .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
     .map(requestTokens);
+  const tokens = requests.length > 1 ? sumRequests(requests) : requestTokens(usage);
   const details = usage.output_tokens_details as Record<string, unknown> | undefined;
   const server = usage.server_tool_use as Record<string, unknown> | undefined;
   return {
@@ -141,16 +141,32 @@ export function parseApiError(line: string): ApiErrorLine | null {
 /** The token counts of a `usage` object or of one of its `iterations`. */
 function requestTokens(usage: Record<string, unknown>): RequestTokens {
   const creation = usage.cache_creation as Record<string, unknown> | undefined;
+  const total = num(usage.cache_creation_input_tokens);
+  const oneHour = creation ? num(creation.ephemeral_1h_input_tokens) : 0;
   return {
     input: num(usage.input_tokens),
     output: num(usage.output_tokens),
     cacheRead: num(usage.cache_read_input_tokens),
-    // Older lines have only the total; it was the 5-minute TTL then.
-    cacheWrite5m: creation
-      ? num(creation.ephemeral_5m_input_tokens)
-      : num(usage.cache_creation_input_tokens),
-    cacheWrite1h: creation ? num(creation.ephemeral_1h_input_tokens) : 0,
+    // Writes the TTL split does not cover (and older lines, which have only the total) are billed at the
+    // 5-minute rate, as Claude Code's own cost shows.
+    cacheWrite5m: Math.max(creation ? num(creation.ephemeral_5m_input_tokens) : 0, total - oneHour),
+    cacheWrite1h: oneHour,
   };
+}
+
+/** A response's totals: the sum of its requests when it took several (the top-level TTL split covers only
+ * the first), else its own counts. */
+function sumRequests(requests: ReadonlyArray<RequestTokens>): RequestTokens {
+  return requests.reduce(
+    (sum, request) => ({
+      input: sum.input + request.input,
+      output: sum.output + request.output,
+      cacheRead: sum.cacheRead + request.cacheRead,
+      cacheWrite5m: sum.cacheWrite5m + request.cacheWrite5m,
+      cacheWrite1h: sum.cacheWrite1h + request.cacheWrite1h,
+    }),
+    { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 },
+  );
 }
 
 /** Prompt tokens of one request: fresh input + cache read + cache write. */
@@ -177,6 +193,63 @@ export function parseActivity(line: string): Activity | null {
     return { sessionId, turnMs: 0, hookRuns: num(entry.hookCount) };
   }
   return null;
+}
+
+/** Tokens and $ Claude Code kept for one model over one run (`cost-state` `modelUsage`). */
+export interface CcModelUsage {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite5m: number;
+  readonly cacheWrite1h: number;
+  readonly cacheWriteOther: number; // cache writes with no TTL split; Claude Code bills them at the 5m rate
+  readonly webSearches: number;
+  readonly usd: number;
+}
+
+/** Claude Code's own cost of one process run of a session, from the `cost-state` line it writes when the run
+ * ends (not in the public docs). It counts every request of the run, also those no transcript line shows. */
+export interface CostState {
+  readonly sessionId: string;
+  readonly startTime: number; // epoch ms the run started; a resumed session starts a new run at $0
+  readonly usd: number;
+  readonly models: Readonly<Record<string, CcModelUsage>>; // normalized model id → usage
+}
+
+export function parseCostState(line: string): CostState | null {
+  if (!line.includes('"type":"cost-state"')) return null;
+  let entry: Record<string, unknown>;
+  try {
+    entry = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  if (entry.type !== "cost-state" || typeof entry.startTime !== "number") return null;
+  const models: Record<string, CcModelUsage> = {};
+  const usage = entry.modelUsage;
+  for (const [model, raw] of Object.entries(
+    usage !== null && typeof usage === "object" ? usage : {},
+  )) {
+    const u = (raw ?? {}) as Record<string, unknown>;
+    const cacheWrite5m = num(u.cacheCreationEphemeral5mInputTokens);
+    const cacheWrite1h = num(u.cacheCreationEphemeral1hInputTokens);
+    models[normalizeModelId(model)] = {
+      input: num(u.inputTokens),
+      output: num(u.outputTokens),
+      cacheRead: num(u.cacheReadInputTokens),
+      cacheWrite5m,
+      cacheWrite1h,
+      cacheWriteOther: Math.max(0, num(u.cacheCreationInputTokens) - cacheWrite5m - cacheWrite1h),
+      webSearches: num(u.webSearchRequests),
+      usd: num(u.costUSD),
+    };
+  }
+  return {
+    sessionId: str(entry.sessionId, "unknown"),
+    startTime: entry.startTime,
+    usd: num(entry.totalCostUSD),
+    models,
+  };
 }
 
 /** A context compaction (`compact_boundary` system line). */

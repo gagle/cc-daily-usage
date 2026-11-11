@@ -180,7 +180,7 @@ describe("renderLive: sessions and this session", () => {
     expect(out).toMatch(/^ {2}re-sending {4}[█░]{24}/m);
     expect(out).toMatch(/^CACHE & CONTEXT {3}estimate from the transcript$/m);
     expect(out).toMatch(
-      /^ {2}cache {9}[█░]{24} {2}warm 4:00 {2}next ~\$0\.01 {2}if cold ~\$0\.26$/m,
+      /^ {2}cache {9}[█░]{24} {2}warm 4:00 {2}next ~\$0\.02 {2}if cold ~\$0\.27$/m,
     );
     expect(out).toMatch(/^ {2}context {7}[█░]{24} {2}52k \/ 200k {2}aim < 150k {2}✔$/m);
     // blocks are spaced when the frame fits
@@ -297,7 +297,7 @@ describe("renderLive: advisor view", () => {
     expect(out).toMatch(
       /^ {2}1\. At this pace your limits run out before they reset: 5h in 2\.0 h\.$/m,
     );
-    expect(out).toMatch(/^ {2}2\. Context is 302k: .*\n {5}.*~\$6\.02 at stake$/m); // 301k cached × $0.20 × 100: the 1k fresh input is not re-read
+    expect(out).toMatch(/^ {2}2\. Context is 302k: .*\n {5}.*~\$7\.02 at stake$/m); // 301k cached × $0.20 × 100: the 1k fresh input is not re-read
     for (const line of out.split("\n")) expect(line.length).toBeLessThanOrEqual(100);
     expect(out).toMatch(/^ {5}→ /m);
     expect(out).toMatch(/^ {5}why: /m);
