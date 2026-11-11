@@ -12,7 +12,7 @@
   "homepage": "https://github.com/gagle/cc-daily-usage#readme",
   "type": "module",
   "bin": {
-    "cc-daily-usage": "./bin/cc-daily-usage.js"
+    "cc-daily-usage": "bin/cc-daily-usage.js"
   },
   "exports": {
     ".": {
