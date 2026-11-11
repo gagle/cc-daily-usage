@@ -103,6 +103,31 @@ describe("anthropic-usage.ts", () => {
       }
     });
 
+    it("on macOS reads the Keychain first, and falls back to the file when it fails", async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, "platform", { value: "darwin" });
+      const { execFileSync } = await import("node:child_process");
+      const keychain = vi.mocked(execFileSync);
+      try {
+        writeFileSync(
+          path.join(fakeHome, ".claude", ".credentials.json"),
+          JSON.stringify({ claudeAiOauth: { accessToken: "file-token" } }),
+        );
+        keychain.mockReturnValueOnce(
+          JSON.stringify({ claudeAiOauth: { accessToken: "keychain-token" } }),
+        );
+        const { resolveOAuthAccessToken } = await freshModule();
+        expect(resolveOAuthAccessToken()?.token).toBe("keychain-token");
+        expect(keychain.mock.lastCall?.slice(0, 2)).toEqual([
+          "security",
+          ["find-generic-password", "-a", "gabi", "-w", "-s", "Claude Code-credentials"],
+        ]);
+        expect(resolveOAuthAccessToken()?.token).toBe("file-token");
+      } finally {
+        Object.defineProperty(process, "platform", { value: originalPlatform });
+      }
+    });
+
     it("treats an expired token as unavailable", async () => {
       writeFileSync(
         path.join(fakeHome, ".claude", ".credentials.json"),
