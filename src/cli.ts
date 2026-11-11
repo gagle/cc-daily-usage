@@ -24,7 +24,17 @@ Operations:
 
 Flags:
   -h, --help        Print this help and exit
+  -v, --version     Print the version and exit
 `;
+
+const EPHEMERAL_INSTALL =
+  "This copy runs from a temporary npx/dlx cache, which is cleared later and would break the statusline.\nInstall it first: npm install -g cc-daily-usage";
+
+/** Installs point Claude Code at this copy's files: refuse a copy that will be deleted. */
+async function assertPersistentInstall(): Promise<void> {
+  const { isEphemeralInstall } = await import("./statusline-install.js");
+  if (isEphemeralInstall()) throw new Error(EPHEMERAL_INSTALL);
+}
 
 function printUsage(): void {
   console.log(USAGE);
@@ -41,6 +51,7 @@ async function askYesNo(question: string): Promise<boolean> {
  * open the calendar to adjust days and the cap. Pro/Max stop after the statusline.
  */
 async function runInitOperation(): Promise<number> {
+  await assertPersistentInstall();
   const [
     { accountKey, resolveActiveAccount },
     { loadConfig, saveConfig },
@@ -135,6 +146,7 @@ export function formatStatuslineInstallMessage(result: StatuslineInstallResult):
 }
 
 async function runStatuslineOperation(): Promise<number> {
+  await assertPersistentInstall();
   const { installStatusline } = await import("./statusline-install.js");
   console.log(formatStatuslineInstallMessage(await installStatusline()));
   return 0;
@@ -320,6 +332,14 @@ async function dispatch(argv: ReadonlyArray<string>): Promise<number> {
     return runRefresh(argv[1]);
   }
 
+  if (argv[0] === "-v" || argv[0] === "--version") {
+    const { readFileSync } = await import("node:fs");
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+      version: string;
+    };
+    console.log(pkg.version);
+    return 0;
+  }
   if (argv.includes("-h") || argv.includes("--help") || argv.length === 0) {
     printUsage();
     return 0;

@@ -196,4 +196,13 @@ describe("uninstallStatusline", () => {
     expect(uninstallStatusline()).toEqual({ removed: true, restoredFrom: null });
     expect(readSettings().statusLine).toBeUndefined();
   });
+  it("isEphemeralInstall spots npx and pnpm dlx caches", async () => {
+    const { isEphemeralInstall } = await import("./statusline-install.js");
+    expect(isEphemeralInstall("/home/u/.npm/_npx/1a2b/node_modules/cc-daily-usage/bin/x.js")).toBe(
+      true,
+    );
+    expect(isEphemeralInstall("C:\\Users\\u\\AppData\\pnpm\\dlx\\abc\\x.js")).toBe(true);
+    expect(isEphemeralInstall("/usr/local/lib/node_modules/cc-daily-usage/bin/x.js")).toBe(false);
+    expect(isEphemeralInstall()).toBe(false);
+  });
 });

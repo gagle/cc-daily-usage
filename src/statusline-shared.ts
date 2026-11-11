@@ -57,17 +57,10 @@ export async function defaultConfirm(question: string): Promise<boolean> {
   }
 }
 
-// Layout-tolerant: in the local dev/test tree, this compiled file sits at <root>/dist/<file>.js and
-// assets/ lives one level up at <root>/assets/. Once published via prepare-dist, dist/ is flattened
-// into the package root, so the same file sits at <published-root>/<file>.js with assets/ copied as a
-// same-level sibling instead. Try the flattened layout first, fall back to the un-flattened one.
+/** `<package>/assets`: this compiled file sits in `<package>/dist/`, in the repo and in the published
+ * package alike (it publishes from the root: `files` is dist + bin + assets). */
 export function assetsDir(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const sameLevel = path.join(here, "assets");
-  // Require the template file, not just the directory — an empty sibling (e.g. a parallel test's
-  // brief mkdir) must not steal resolution away from ../assets.
-  if (existsSync(path.join(sameLevel, "statusline.mjs"))) return sameLevel;
-  return path.join(here, "..", "assets");
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "assets");
 }
 
 export function readIfExists(filePath: string): string | null {

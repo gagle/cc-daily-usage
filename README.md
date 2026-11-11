@@ -24,7 +24,8 @@ npm install -g cc-daily-usage
 cc-daily-usage init
 ```
 
-`init` installs the statusline and, on Team/Enterprise, offers Monday–Friday
+Install it globally: `init` points Claude Code at this copy's files, so a
+copy run through `npx` is refused. `init` installs the statusline and, on Team/Enterprise, offers Monday–Friday
 as work days and opens the calendar to set holidays and the cap. Requires
 Node 24+.
 

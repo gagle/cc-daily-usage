@@ -37,6 +37,12 @@ export function binPath(): string {
   return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "cc-daily-usage.js");
 }
 
+/** A copy run through `npx` / `pnpm dlx` lives in a cache that is cleared later: a shim and hooks pointing
+ * there break when it goes. */
+export function isEphemeralInstall(file: string = binPath()): boolean {
+  return /[\\/](_npx|dlx)[\\/]/.test(file);
+}
+
 /** What the user had before the first managed install — read back by uninstallStatusline. */
 const PREVIOUS_FILE = path.join(CONFIG_ROOT_DIR, "previous-statusline.json");
 

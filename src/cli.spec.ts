@@ -79,7 +79,9 @@ vi.mock("./session-report.js", () => ({
 
 const installStatuslineMock = vi.fn();
 const uninstallStatuslineMock = vi.fn();
+const isEphemeralInstallMock = vi.fn(() => false);
 vi.mock("./statusline-install.js", () => ({
+  isEphemeralInstall: () => isEphemeralInstallMock(),
   installStatusline: (...args: Array<unknown>) => installStatuslineMock(...args) as unknown,
   uninstallStatusline: () => uninstallStatuslineMock() as unknown,
 }));
@@ -236,6 +238,27 @@ describe("statusline / uninstall", () => {
     const { runCli } = await fresh();
     expect(await runCli(["statusline"])).toBe(0);
     expect(logs).toContain("Installed (vabcd1234).");
+  });
+
+  it("init and statusline refuse a copy in the npx/dlx cache", async () => {
+    const { runCli } = await fresh();
+    isEphemeralInstallMock.mockReturnValue(true);
+    try {
+      await expect(runCli(["statusline"])).rejects.toThrow(/npm install -g cc-daily-usage/);
+      await expect(runCli(["init"])).rejects.toThrow(/temporary npx\/dlx cache/);
+    } finally {
+      isEphemeralInstallMock.mockReturnValue(false);
+    }
+  });
+
+  it("--version prints the package version", async () => {
+    const { runCli } = await fresh();
+    const { version } = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    expect(await runCli(["--version"])).toBe(0);
+    expect(await runCli(["-v"])).toBe(0);
+    expect(logs).toEqual([version, version]);
   });
 
   it("uninstall reports restore, plain removal, or nothing to do", async () => {
