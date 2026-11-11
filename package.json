@@ -1,6 +1,6 @@
 {
   "name": "cc-daily-usage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Keep Claude Code spend predictable: a fast live statusline with daily/monthly budgets, fresh 5h/7d limits, and the cost of your next prompt.",
   "repository": {
     "type": "git",
