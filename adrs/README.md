@@ -28,3 +28,4 @@ one's status to `Superseded by …`). That is why `scripts/doc-drift.mjs` exempt
 | [2026-10-18-index-reprice-and-turn-metadata.md](./2026-10-18-index-reprice-and-turn-metadata.md)                 | index re-price on a price change; prompt $, API time, miss counts, attribution, API errors               |
 | [2026-10-23-account-switch-attribution.md](./2026-10-23-account-switch-attribution.md)                           | a `/login` moves running sessions: spend booked per login, `⇄` marker, index split by turn time          |
 | [2026-11-11-claude-code-cost-state.md](./2026-11-11-claude-code-cost-state.md)                                   | Claude Code's `cost-state`: exact per-model price check, $ the transcripts do not record                 |
+| [2026-11-11-next-request-tail.md](./2026-11-11-next-request-tail.md)                                             | next request writes the last reply too; multi-request token totals summed                                |

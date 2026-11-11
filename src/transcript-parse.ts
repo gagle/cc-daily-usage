@@ -81,11 +81,11 @@ export function parseTurn(line: string): Turn | null {
   const usage = message?.usage as Record<string, unknown> | undefined;
   if (entry.type !== "assistant" || !usage || typeof message?.model !== "string") return null;
   if (message.model === "<synthetic>") return null;
-  const tokens = requestTokens(usage);
   const iterations = Array.isArray(usage.iterations) ? (usage.iterations as Array<unknown>) : [];
   const requests = iterations
     .filter((item): item is Record<string, unknown> => item !== null && typeof item === "object")
     .map(requestTokens);
+  const tokens = requests.length > 1 ? sumRequests(requests) : requestTokens(usage);
   const details = usage.output_tokens_details as Record<string, unknown> | undefined;
   const server = usage.server_tool_use as Record<string, unknown> | undefined;
   return {
@@ -141,16 +141,32 @@ export function parseApiError(line: string): ApiErrorLine | null {
 /** The token counts of a `usage` object or of one of its `iterations`. */
 function requestTokens(usage: Record<string, unknown>): RequestTokens {
   const creation = usage.cache_creation as Record<string, unknown> | undefined;
+  const total = num(usage.cache_creation_input_tokens);
+  const oneHour = creation ? num(creation.ephemeral_1h_input_tokens) : 0;
   return {
     input: num(usage.input_tokens),
     output: num(usage.output_tokens),
     cacheRead: num(usage.cache_read_input_tokens),
-    // Older lines have only the total; it was the 5-minute TTL then.
-    cacheWrite5m: creation
-      ? num(creation.ephemeral_5m_input_tokens)
-      : num(usage.cache_creation_input_tokens),
-    cacheWrite1h: creation ? num(creation.ephemeral_1h_input_tokens) : 0,
+    // Writes the TTL split does not cover (and older lines, which have only the total) are billed at the
+    // 5-minute rate, as Claude Code's own cost shows.
+    cacheWrite5m: Math.max(creation ? num(creation.ephemeral_5m_input_tokens) : 0, total - oneHour),
+    cacheWrite1h: oneHour,
   };
+}
+
+/** A response's totals: the sum of its requests when it took several (the top-level TTL split covers only
+ * the first), else its own counts. */
+function sumRequests(requests: ReadonlyArray<RequestTokens>): RequestTokens {
+  return requests.reduce(
+    (sum, request) => ({
+      input: sum.input + request.input,
+      output: sum.output + request.output,
+      cacheRead: sum.cacheRead + request.cacheRead,
+      cacheWrite5m: sum.cacheWrite5m + request.cacheWrite5m,
+      cacheWrite1h: sum.cacheWrite1h + request.cacheWrite1h,
+    }),
+    { input: 0, output: 0, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0 },
+  );
 }
 
 /** Prompt tokens of one request: fresh input + cache read + cache write. */

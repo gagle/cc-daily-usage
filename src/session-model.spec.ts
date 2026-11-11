@@ -118,13 +118,15 @@ describe("cacheState", () => {
       context: 100_000,
     });
     const warm = cacheState(s, T0);
-    expect(warm?.nextWarmUsd).toBeCloseTo(0.02); // 100k × $0.20
-    expect(warm?.nextColdUsd).toBeCloseTo(0.5); // 100k × $4 × 1.25
+    // Read 100k at $0.20, or write it at $4 × 1.25; either way write the 1k reply at $5: +$0.005.
+    expect(warm?.nextWarmUsd).toBeCloseTo(0.025);
+    expect(warm?.nextColdUsd).toBeCloseTo(0.505);
     expect(cacheState(s, T0 + 600_000)).toMatchObject({ warm: false, secondsLeft: 0 });
 
     addSessionTurn(s, turn({ timestamp: at(1), cacheWrite1h: 10 }), "main", "f");
     expect(cacheState(s, T0 + 60_000)?.ttlSeconds).toBe(3600);
-    expect(cacheState(s, T0 + 60_000)?.nextColdUsd).toBeCloseTo((10 * 8) / 1e6, 9); // cached prefix only, not fresh input
+    // Write the 10-token cached prefix, then the 1k fresh input + 1k reply, all at the 1h rate ($8).
+    expect(cacheState(s, T0 + 60_000)?.nextColdUsd).toBeCloseTo((10 * 8 + 2000 * 8) / 1e6, 9);
     addSessionTurn(s, turn({ timestamp: at(2), cacheWrite5m: 10 }), "main", "f");
     expect(cacheState(s, T0)?.ttlSeconds).toBe(300);
   });
