@@ -1,5 +1,10 @@
-- [Architecture](../../docs/architecture.md) — module map, data flow, multi-account model, hasSpendCap branching
-- [Calculations](../../docs/calculations.md) — every formula in calc.ts (rollover, avgPerDay, captureSessionCost, applyLedgerReading)
-- [Data model](../../docs/data-model.md) — Config/UsageState/interfaces, on-disk layout, managed-file markers
-- [Use cases](../../docs/use-cases.md) — CLI operations, dashboard keybindings, statusline segment rendering
-- [Testing & verification](../../docs/testing-and-verification.md) — coverage policy, verification commands, CI
+- [Docs index](../../docs/README.md) — start here; one line per doc with keywords
+- [Architecture](../../docs/architecture.md) — module map, render/refresher/init/calendar flows, multi-account, hasSpendCap
+- [Time model](../../docs/time-model.md) — local days vs UTC budget period, month-edge rules per zone
+- [Calculations](../../docs/calculations.md) — every formula in calc.ts
+- [Prompt cache](../../docs/prompt-cache.md) — cache billing and the next-prompt forecast
+- [Data model](../../docs/data-model.md) — files on disk, persisted fields, managed markers
+- [Use cases](../../docs/use-cases.md) — operations, calendar keys, statusline segments
+- [Performance](../../docs/performance.md) — measured timings, hot-path rules
+- [Testing & verification](../../docs/testing-and-verification.md) — coverage, commands, docs gate, CI
+- [ADRs](../../adrs/README.md) — decisions and the manual test plan

@@ -1,107 +1,146 @@
 # Data model
 
-Field-by-field reference for every persisted type, plus the on-disk layout and
-the statusline installer's managed-file markers.
-
-## `Config` (`src/interfaces/config.interface.ts`)
-
-```ts
-interface Config {
-  monthlyCap: number;
-  laboralDays: Record<year, Record<month, number[]>>; // year "2026", month 1-12 as string, value = day-of-month array
-  planType?: string | null; // verbatim ~/.claude.json oauthAccount.organizationType; null = no OAuth account
-  hasSpendCap?: boolean; // see docs/architecture.md "hasSpendCap branching"
-}
-```
-
-`DEFAULT_CONFIG = { monthlyCap: 200, laboralDays: {} }`.
-
-## `UsageState`
-
-```ts
-interface UsageState {
-  monthlySpent: number;
-  lastUpdated: string; // UTC ISO-8601
-  days: Record<isoDate, number>; // frozen $ amount per completed day
-  sessions: Record<sessionId, SessionCost>;
-  extraUsageCache?: ExtraUsageCacheEntry; // short-TTL cache around the live /api/oauth/usage fetch
-  rateLimitsCache?: RateLimitsCache; // last-seen Claude Code hook rate_limits
-  ledgerBaseline?: number; // Anthropic ledger reading at this month's start; monthlySpent = used_credits - baseline
-}
-```
-
-`DEFAULT_USAGE`: `monthlySpent: 0`, `lastUpdated: epoch 0`, everything else empty/null.
-
-The daily max is not stored: `computeAvgPerDay` derives it each render (see
-`docs/calculations.md`). Old `frozen*`, `monthDay0*` and `extraUsageSnapshot` keys in an
-existing `usage.json` are ignored (left in place, harmless).
-
-## `SessionCost`
-
-```ts
-interface SessionCost {
-  lastSeenCost: number; // Claude Code's own cost.total_cost_usd, last time this session was seen
-  lastSeenAt: string; // UTC ISO-8601 — drives the 2-day pruning in pruneStaleSessions
-}
-```
-
-## `ExtraUsageCacheEntry`
-
-```ts
-interface ExtraUsageCacheEntry {
-  fetchedAt: number; // epoch ms
-  data: {
-    usedCredits: number; // major units, scaled by decimal_places
-    monthlyLimit: number;
-    utilizationPct: number;
-    currency: string;
-    spendLimitReached: boolean;
-    disabledReason: string | null;
-    stale?: boolean; // last good reading served after a failed fetch
-  } | null;
-}
-```
-
-60-second TTL cache around the live `/api/oauth/usage` fetch (`getCachedExtraUsage`
-in `anthropic-usage.ts`) — avoids hitting Anthropic's API on every statusline render. A failed fetch keeps the
-last good `data` (marked `stale`) instead of caching `null`. For a dollar-cap account
-`monthlyCap` is overwritten from `monthlyLimit` on every render.
-
-## `RateLimitsCache`
-
-```ts
-interface RateLimitsCache {
-  fiveHourPct: number | null;
-  sevenDayPct: number | null;
-  fiveHourResetsAt: number | null; // Unix epoch seconds
-  sevenDayResetsAt: number | null; // Unix epoch seconds
-}
-```
-
-Last-seen Claude Code hook `rate_limits`, used as a fallback for the render(s) at
-session start before Claude Code has attached a fresh one.
+Types live in `src/interfaces/config.interface.ts` and
+`src/interfaces/statusline.interface.ts`.
 
 ## On-disk layout
 
 ```
-~/.config/cc-daily-usage/accounts/<accountKey>/config.json  (mode 0o600)
-~/.config/cc-daily-usage/accounts/<accountKey>/usage.json   (mode 0o600)
+~/.config/cc-daily-usage/
+  accounts/<accountKey>/config.json      Config — written by init, calendar, hook (plan/cap sync)
+  accounts/<accountKey>/usage.json       UsageState — written by every render that changes it
+  accounts/<accountKey>/api-cache.json   ApiCache — written ONLY by the --refresh process
+  accounts/<accountKey>/limits.json      { schemaVersion 1, samples: LimitSample[] } — render, on a % change
+  accounts/<accountKey>/sessions-map.json { schemaVersion 1, sessions } — render, new session or hourly
+  accounts/<accountKey>/feed.json        Feed for the /cost-tracker mod — written ONLY by the refresher
+  accounts/<accountKey>/refresh.lock     present while a refresher runs (stale after 30 s)
+  accounts/<accountKey>/*.corrupt-<ms>   copy of a corrupt file, kept before re-seeding
+  profiles.json                          token-hash → Account, for CLAUDE_CODE_OAUTH_TOKEN users
+  account-log.json                       { schemaVersion 1, switches: { t, key }[] } — render, on a login change
+  previous-statusline.json               what install replaced; read by uninstall
+  statusline.json                        { rows: PartId[][] } — written by `settings`, read by every render
+~/.claude/statusline.mjs                 the managed shim (from assets/statusline.mjs)
+~/.claude/settings.json                  statusLine { type, command, refreshInterval 30 }, hooks.UserPromptSubmit gate, hooks.PreModelSwitch cost, subagentStatusLine, promptCacheTtl
 ```
 
-`<accountKey>` = sanitized OAuth email, or `"default"` with no OAuth account, or
-`"legacy"` for the one-time migration of pre-multi-account state. See
-`docs/architecture.md` "Multi-account model".
+All writes are atomic (temp + rename, mode `0o600`). Missing files are seeded,
+corrupt ones quarantined then re-seeded — nothing on this path throws.
 
-## Statusline managed-file markers
+## File versions (`src/migrate.ts`)
 
-`~/.claude/statusline.mjs` (the installed copy of `assets/statusline.mjs`) carries
-one of two markers, checked by the installer to decide whether to no-op, upgrade,
-or fall back:
+Each file has its own `schemaVersion`, never tied to the npm or plugin version.
+A missing version is 0 (the format before versioning).
 
-| Marker                                    | Meaning                                                                                                    | Written by                      |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------- |
-| `// cc-daily-usage:managed v<8-hex-hash>` | Full install; hash is a content-hash version of the shipped template                                       | `statusline-install.ts`         |
-| `// cc-daily-usage:capture v1`            | Capture-only fallback (session-cost capture injected into an existing script, no full statusline takeover) | `statusline-capture-install.ts` |
+| File                                            | Version                    | Migration                                                                                        |
+| ----------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------ |
+| `config.json`                                   | 1 (`CONFIG_MIGRATIONS`)    | on load: backup, then rewrite with the version; unknown fields kept                              |
+| `usage.json`                                    | 2 (`USAGE_SCHEMA_VERSION`) | `upgradeUsage` on load; backup when below 2                                                      |
+| `api-cache.json`                                | 1 (`API_CACHE_MIGRATIONS`) | none: a cache; the next refresh writes the version                                               |
+| `statusline.json`                               | 2 (`LAYOUT_MIGRATIONS`)    | in memory on render (2 adds `resets` to the first row's end); the next `settings` save writes it |
+| `limits.json`, `sessions-map.json`, `feed.json` | 1                          | new files, versioned from the start                                                              |
+| `account-log.json`                              | 1                          | new file, versioned from the start                                                               |
 
-Never hand-edit `~/.claude/statusline.mjs` — it is silently overwritten on the
-next managed install. Edit `assets/statusline.mjs` (the template) instead.
+- Backup: `<file>.bak-<ISO with - for :>-<pid>` next to the file; the newest 3
+  are kept (`backupFile`).
+- Downgrade guard: a file with a higher version than the code knows is read
+  for what is safe (or not at all: `api-cache.json`, history files) and never
+  written back (`writeVersionedFile`). The render prefixes the line with
+  `⚠ update cc-daily-usage`; a command prints `NEWER_FILE_HINT` to stderr.
+
+## `Config`
+
+| Field              | Meaning                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `monthlyCap`       | $ cap for the period. Overwritten from Anthropic's `monthly_limit` when the ledger reports one (> 0). Default 200. |
+| `laboralDays`      | `{ "2026": { "10": [1, 2, 5, …] } }` — year → month (1-12) → local days of month                                   |
+| `planType`         | verbatim `organizationType`, `null` without OAuth                                                                  |
+| `hasSpendCap`      | whether the dollar budget runs (see `docs/architecture.md`)                                                        |
+| `snoozed`          | coach rule id → ISO time its finding hides until (`insights --snooze`)                                             |
+| `promptGateMinUsd` | block a cold-cache prompt costing at least this; `0` = off; default 1                                              |
+
+## `UsageState` (schema v2)
+
+| Field             | Meaning                                                                                                                                                  |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schemaVersion`   | `2`                                                                                                                                                      |
+| `monthlySpent`    | spend in the current UTC period                                                                                                                          |
+| `periodFrozen`    | part of `monthlySpent` frozen into past local days                                                                                                       |
+| `lastUpdated`     | ISO instant; moves only when a boundary is crossed                                                                                                       |
+| `days`            | local `YYYY-MM-DD` → frozen $                                                                                                                            |
+| `sessions`        | session id → `{ lastSeenCost, lastSeenAt, cacheMissUsd?, cacheGate?, gateArmedAt?, missCounts?, promptId?, promptStartCost?, switchedAt?, switchCost? }` |
+| `ledgerBaseline`  | ledger reading at this period's start                                                                                                                    |
+| `sinceLedger`     | `{ readAt, usd }`: known sessions' growth since the ledger reading taken at `readAt`                                                                     |
+| `rateLimitsCache` | last hook `rate_limits` snapshot + `seenAt`                                                                                                              |
+| `extraUsageCache` | v1 only; read once as a fallback until `api-cache.json` exists                                                                                           |
+| `apiEqDays`       | local `YYYY-MM-DD` → API-equivalent $ of every session seen, any plan; 62 days kept                                                                      |
+| `apiEqTotal`      | monotone sum of the same deltas; limit samples difference it                                                                                             |
+| `missCauses`      | local `YYYY-MM-DD` → cache-miss cause → `{ count, usd }`; 62 days kept                                                                                   |
+
+Fields added without a schema bump get their defaults in `upgradeUsage`.
+
+`switchedAt` (epoch ms) and `switchCost` mark a session this account took over
+after a `/login` (see "Account switch" in `docs/architecture.md`).
+`switchCost` is removed when the session's cost moves.
+
+`account-log.json` is global, not per account: the login is one per machine.
+It keeps 35 days of switches plus the newest older one.
+
+## `limits.json`, `sessions-map.json`, `feed.json`
+
+- `LimitSample`: `{ t epoch ms, fiveHourPct, sevenDayPct, fiveHourResetsAt, sevenDayResetsAt, apiEqTotal, claudeCodeShare? }`,
+  appended only when a % changes; 29 days or 2,000 samples. Sorted by `t` on
+  load (two racing renders can save them out of order).
+- `SessionMapEntry`: `{ transcriptPath, firstSeenAt, lastSeenAt, costUsd, linesAdded, linesRemoved, name?, claudeVersion? }`;
+  35 days by `lastSeenAt`. `name` is Claude Code's `session_name`; a changed
+  name is written at once.
+- A history file that is missing, garbled or of a newer version reads as empty.
+- Transcript index files (`docs/transcript-index.md`) add fields without a
+  version bump: rollups `growth`, `freshSplit`, `rewriteTokens`, `usdNewWork`,
+  `usdCarry`, `usdRewrite` (missing → 0 on load); `offsets.json` per file
+  `context`; `sessions.json` per session `mcpLoaded`, `mcpUsed`,
+  `attributedUsd`, `apiErrors` (missing → none). `index/prices.json` holds the
+  `PRICES_VERSION` the index was priced at; `index/backup-prices-<version>/`
+  is the copy taken before a re-price.
+- `Feed`: the shared contract with the `/cost-tracker` mod, see `docs/history-and-feed.md`.
+
+## `ApiCache`
+
+`{ fetchedAt, extraUsage, fiveHour, sevenDay, stale?, readAt?, failures?, lastError?, retryAt?, extraWindows?, claudeCodeShare?, plan?, resets? }`.
+`extraUsage` holds the usage-credits ledger in dollars (`decimal_places`
+applied); windows are `{ pct 0-100, resetsAt epoch s, usedDollars?, limitDollars?, severity? }`
+(`severity` from the response's `limits[]`: `session` → 5h, `weekly_all` →
+7d). `extraWindows` are the other `seven_day_<key>` windows with a reading
+(`{ key, ...window }`). `claudeCodeShare` (0-1) is Claude Code's row of
+`seven_day_breakdown`. `resets` are the limit-reset grants with a reset
+left and not paused (`{ left, endsAt epoch ms | null }`), read from the
+undocumented `cedar_ember` block that the fetch asks for with
+`?cedar_ember=1`; empty when the account is not eligible. `plan` is `{ fetchedAt, rateLimitTier, subscriptionStatus, billingType, trialEndsAt }`
+from `/api/oauth/profile`, re-read daily. A failed fetch keeps the previous
+reading with `stale: true`, its time in `readAt` (so the runway survives the
+failure), counts `failures`, and keeps why in `lastError` (`HTTP 429`,
+`network`, `bad response`, `no token`; `doctor` shows it); a good one clears
+them. TTL 60 s (`API_CACHE_TTL_MS` in `src/anthropic-usage.ts`), doubled per
+failure up to 16 min; a `Retry-After` (seconds or date) sets `retryAt`, capped
+at 1 h, and no fetch starts before it. `/api/oauth/usage` is undocumented: every field is read as
+optional (shape observed 2026-10-15).
+
+## `StatuslineState`
+
+What `cc-daily-usage --statusline` prints and `renderStatusline` consumes:
+budget fields (absent on Pro/Max; `ledgerAgeMs` is the last good ledger
+reading's age while the refresher fails, else null), `capSource`, `extraUsage` (Pro/Max only),
+resolved `rateLimits` with their `source` and `readingAt`, `runway` per window,
+`coach` (top finding except R8: `{ id, title, action, usd, window }`), `rateLimitsCache` (old shims),
+`spendLimitPct`, `spendLimitUsd` (`{ used, limit, period }` or null),
+`apiDetail` (fresh API windows with dollars, severity and extra windows; null
+when stale), `cache` (a `CacheForecast`), `hasSpendCap`, `planType`.
+
+## Managed-file markers
+
+| Marker                               | Meaning                                                                                                       |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `// cc-daily-usage:managed v<8-hex>` | full managed shim; the hash covers the template **and** the stamped entry URL, so a moved package re-installs |
+| `// cc-daily-usage:capture v1`       | capture-only line injected into a foreign script                                                              |
+
+Never hand-edit `~/.claude/statusline.mjs`; edit `assets/statusline.mjs` and
+re-run `cc-daily-usage statusline`.

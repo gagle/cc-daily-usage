@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -84,6 +84,31 @@ describe("account.ts", () => {
         organizationType: "claude_enterprise",
       });
       expect(fetchOauthProfileMock).toHaveBeenCalledWith("session-token");
+    });
+
+    it("caches the override's profile by token hash — one network call per token", async () => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = "session-token";
+      fetchOauthProfileMock.mockResolvedValue({ account: { email_address: "o@example.com" } });
+      const { resolveActiveAccount } = await freshAccountModule();
+      await resolveActiveAccount();
+      const again = await resolveActiveAccount();
+      expect(again?.email).toBe("o@example.com");
+      expect(fetchOauthProfileMock).toHaveBeenCalledTimes(1);
+      const cacheFile = path.join(fakeHome, ".config", "cc-daily-usage", "profiles.json");
+      expect(readFileSync(cacheFile, "utf8")).not.toContain("session-token");
+    });
+
+    it("an unreadable or non-object profile cache is ignored; a failed cache write is harmless", async () => {
+      process.env.CLAUDE_CODE_OAUTH_TOKEN = "session-token";
+      const dir = path.join(fakeHome, ".config", "cc-daily-usage");
+      mkdirSync(path.join(dir, "profiles.json"), { recursive: true }); // a directory: read and write both fail
+      fetchOauthProfileMock.mockResolvedValue({ account: { email_address: "o@example.com" } });
+      const { resolveActiveAccount } = await freshAccountModule();
+      expect((await resolveActiveAccount())?.email).toBe("o@example.com");
+      rmSync(path.join(dir, "profiles.json"), { recursive: true });
+      writeFileSync(path.join(dir, "profiles.json"), "null");
+      expect((await resolveActiveAccount())?.email).toBe("o@example.com");
+      expect(fetchOauthProfileMock).toHaveBeenCalledTimes(2);
     });
 
     it("falls back to the global file when the env override's profile fetch fails", async () => {
@@ -200,6 +225,54 @@ describe("account.ts", () => {
           organizationType: null,
         }),
       ).toBe("gabriel_llamas_cc_example_com");
+    });
+  });
+
+  describe("account switch log", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = new Date("2026-10-23T08:00:00.000Z");
+
+    it("appends only a change of login", async () => {
+      const { recordAccountSwitch } = await freshAccountModule();
+      expect(recordAccountSwitch([], "a", now)).toEqual([{ t: now.getTime(), key: "a" }]);
+      expect(recordAccountSwitch([{ t: 1, key: "a" }], "a", now)).toBeNull();
+    });
+
+    it("keeps 35 days plus the newest older entry", async () => {
+      const { recordAccountSwitch } = await freshAccountModule();
+      const t = now.getTime();
+      const log = [
+        { t: t - 50 * DAY, key: "a" },
+        { t: t - 40 * DAY, key: "b" },
+        { t: t - 10 * DAY, key: "a" },
+      ];
+      expect(recordAccountSwitch(log, "b", now)?.map((entry) => entry.key)).toEqual([
+        "b",
+        "a",
+        "b",
+      ]);
+      // Nothing inside the window: only the login active when it opened stays.
+      expect(recordAccountSwitch(log.slice(0, 2), "a", now)).toEqual([
+        { t: t - 40 * DAY, key: "b" },
+        { t, key: "a" },
+      ]);
+      // Every entry inside the window: all kept.
+      expect(recordAccountSwitch([{ t: t - DAY, key: "a" }], "b", now)).toHaveLength(2);
+    });
+
+    it("accountAt and lastSwitchTo read the log by time", async () => {
+      const { accountAt, lastSwitchTo } = await freshAccountModule();
+      const log = [
+        { t: 10, key: "a" },
+        { t: 20, key: "b" },
+        { t: 30, key: "a" },
+      ];
+      expect(accountAt(log, 5)).toBeNull();
+      expect(accountAt(log, 20)).toBe("b");
+      expect(accountAt(log, 99)).toBe("a");
+      expect(lastSwitchTo(log, "a")).toBe(30);
+      expect(lastSwitchTo(log, "b")).toBe(20);
+      expect(lastSwitchTo(log, "c")).toBeNull();
     });
   });
 });

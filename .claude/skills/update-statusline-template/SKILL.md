@@ -1,34 +1,26 @@
 ---
 name: update-statusline-template
-description: Use when editing assets/statusline.mjs (the statusline rendering template) — covers the content-hash marker bump, why the installed copy must never be hand-edited, and keeping ccColor() in sync with calc.ts.
+description: Use when changing how the statusline looks or the installed shim (assets/statusline.mjs) — rendering lives in src/statusline-render.ts; covers the shim's content hash, the stamped entry URL, and refreshing the machine install.
 ---
 
-# Update the statusline template
+# Change the statusline
 
-`assets/statusline.mjs` is the _template_. The installed copy at
-`~/.claude/statusline.mjs` is a stamped, content-hashed version of it —
-see `docs/data-model.md`'s "Statusline managed-file markers" table.
+Rendering is TypeScript: `src/statusline-render.ts` (pure, 100% covered).
+`assets/statusline.mjs` is only the shim that imports the package in-process
+(ADR `adrs/2026-10-10-statusline-render-in-cli.md`).
 
 ## Steps
 
-1. Never hand-edit `~/.claude/statusline.mjs` directly — it's silently
-   overwritten on the next managed install. Edit `assets/statusline.mjs`.
-2. `statusline-install.ts` computes the `// cc-daily-usage:managed v<hash>`
-   marker from the template's content — you don't hand-bump a version
-   number, the hash updates automatically when the template content
-   changes. Just confirm `statusline-install.spec.ts` still passes with the
-   new content.
-3. If you touched segment rendering order or a guard condition, update
-   `docs/use-cases.md`'s "segment rendering" numbered list to match.
-4. If you touched `ccColor()`, cross-check it against `calc.ts`'s
-   `colorForPct` — the two must stay identical (`docs/calculations.md`
-   flags this explicitly).
-5. Run `pnpm vitest run src/statusline-install.spec.ts src/statusline-capture-install.spec.ts`,
-   then the full verification sequence before calling it done.
-6. After every build that follows a template (or hook-path) change, refresh
-   the machine copy:
-   ```
-   pnpm build && cc-daily-usage statusline
-   ```
-   Never leave `~/.claude/statusline.mjs` on an old hash when `assets/` or
-   `dist/` changed in this session.
+1. Segment change → edit `src/statusline-render.ts` and
+   `src/statusline-render.spec.ts`; update `docs/use-cases.md`'s segment list.
+2. New data for a segment → add it to `StatuslineState`
+   (`src/interfaces/statusline.interface.ts`) and fill it in
+   `buildStatuslineState` (`src/statusline.ts`). Keep the render path free of
+   network calls and process spawns (`docs/performance.md`).
+3. Colors: `ccColor()` must keep `colorForPct`'s buckets (`src/calc.ts`).
+4. Shim change (`assets/statusline.mjs`) → the `managed v<hash>` marker is
+   computed from the template plus the stamped entry URL; never hand-bump it.
+   Keep the fallback line working when the import fails.
+5. Never hand-edit `~/.claude/statusline.mjs`.
+6. After the build, refresh the machine install:
+   `pnpm build && cc-daily-usage statusline`.

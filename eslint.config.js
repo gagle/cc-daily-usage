@@ -13,6 +13,7 @@ export default [
       "e2e/fixtures/**",
       "bin/**",
       "assets/**",
+      "scripts/**",
     ],
   },
   js.configs.recommended,

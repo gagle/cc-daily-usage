@@ -1,8 +1,16 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -81,6 +89,7 @@ describe("statusline-shared", () => {
     expect(settings.statusLine).toEqual({
       type: "command",
       command: `node ${JSON.stringify(STATUSLINE_FILE)}`,
+      refreshInterval: 30,
     });
   });
 
@@ -93,31 +102,9 @@ describe("statusline-shared", () => {
     expect(settings.statusLine).toBeDefined();
   });
 
-  it("assetsDir falls back to the un-flattened ../assets layout (local dev/test tree)", async () => {
+  it("assetsDir is the package's assets/ next to dist/", async () => {
     const { assetsDir } = await freshModule();
-    expect(assetsDir()).toMatch(/assets$/);
-  });
-
-  it("assetsDir prefers a same-level assets/ sibling when present (flattened prepare-dist layout)", async () => {
-    // Simulate the flattened publish layout by giving import.meta.url's own directory a real sibling
-    // assets/ — dirname(this test file) is src/, so a same-level src/assets/ must exist for the check.
-    // Copy the real statusline template in too: other specs can race this window under vitest file
-    // parallelism and would otherwise ENOENT when assetsDir() flips to the empty sibling.
-    const sameLevelAssets = path.join(path.dirname(fileURLToPath(import.meta.url)), "assets");
-    const realTemplate = path.join(
-      path.dirname(fileURLToPath(import.meta.url)),
-      "..",
-      "assets",
-      "statusline.mjs",
-    );
-    mkdirSync(sameLevelAssets, { recursive: true });
-    writeFileSync(path.join(sameLevelAssets, "statusline.mjs"), readFileSync(realTemplate));
-    try {
-      const { assetsDir } = await freshModule();
-      expect(assetsDir()).toBe(sameLevelAssets);
-    } finally {
-      rmSync(sameLevelAssets, { recursive: true, force: true });
-    }
+    expect(existsSync(path.join(assetsDir(), "statusline.mjs"))).toBe(true);
   });
 
   it("readJsonFile returns an empty object when the file doesn't exist", async () => {
@@ -147,5 +134,98 @@ describe("defaultConfirm", () => {
     const { defaultConfirm } = await import("./statusline-shared.js");
     await expect(defaultConfirm("Proceed?")).resolves.toBe(expected);
     expect(close).toHaveBeenCalled();
+  });
+
+  describe("refresh interval, prompt gate hook, cache TTL", () => {
+    const readSettings = (file: string): Record<string, unknown> =>
+      JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+
+    it("ensureSettingsStatusLine puts the legacy live 1s interval back to 30, keeps a user value, keeps the mode", async () => {
+      const { ensureSettingsStatusLine, STATUSLINE_FILE, SETTINGS_FILE } = await freshModule();
+      const interval = (): unknown =>
+        (readSettings(SETTINGS_FILE).statusLine as { refreshInterval: unknown }).refreshInterval;
+      const command = `node ${JSON.stringify(STATUSLINE_FILE)}`;
+      mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ statusLine: { command, refreshInterval: 1 } }));
+      chmodSync(SETTINGS_FILE, 0o640);
+      ensureSettingsStatusLine();
+      expect(interval()).toBe(30);
+      expect(statSync(SETTINGS_FILE).mode & 0o777).toBe(0o640);
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ statusLine: { command, refreshInterval: 7 } }));
+      ensureSettingsStatusLine();
+      expect(interval()).toBe(7);
+    });
+
+    it("ensureManagedHooks adds, re-points and removes only our hooks", async () => {
+      const { ensureManagedHooks, hookCommand, SETTINGS_FILE } = await freshModule();
+      const theirs = { hooks: [{ type: "command", command: "their-hook" }] };
+      const bare = { matcher: "" }; // a group with no hooks array is kept as is
+      writeFileSync(
+        SETTINGS_FILE,
+        JSON.stringify({ hooks: { UserPromptSubmit: [theirs, bare], Stop: [] } }),
+      );
+      ensureManagedHooks("/a/bin.js");
+      ensureManagedHooks("/b/bin.js");
+      let hooks = readSettings(SETTINGS_FILE).hooks as Record<string, Array<unknown>>;
+      expect(hooks.UserPromptSubmit).toEqual([
+        theirs,
+        bare,
+        {
+          hooks: [
+            { type: "command", command: hookCommand("/b/bin.js", "--prompt-gate"), timeout: 10 },
+          ],
+        },
+      ]);
+      expect(hooks.PreModelSwitch).toEqual([
+        {
+          hooks: [
+            { type: "command", command: hookCommand("/b/bin.js", "--model-switch"), timeout: 10 },
+          ],
+        },
+      ]);
+      ensureManagedHooks("/b/bin.js"); // unchanged → no write
+      ensureManagedHooks(null);
+      hooks = readSettings(SETTINGS_FILE).hooks as Record<string, Array<unknown>>;
+      expect(hooks.UserPromptSubmit).toEqual([theirs, bare]);
+      expect(hooks.PreModelSwitch).toBeUndefined();
+    });
+
+    it("ensureManagedHooks installs our subagentStatusLine, keeps a user's own, removes only ours", async () => {
+      const { ensureManagedHooks, hookCommand, SETTINGS_FILE } = await freshModule();
+      mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+      writeFileSync(SETTINGS_FILE, "{}");
+      ensureManagedHooks("/a/bin.js");
+      expect(readSettings(SETTINGS_FILE).subagentStatusLine).toEqual({
+        type: "command",
+        command: hookCommand("/a/bin.js", "--subagent-statusline"),
+      });
+      ensureManagedHooks(null);
+      expect(readSettings(SETTINGS_FILE).subagentStatusLine).toBeUndefined();
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ subagentStatusLine: { command: "mine" } }));
+      ensureManagedHooks("/a/bin.js");
+      ensureManagedHooks(null);
+      expect(readSettings(SETTINGS_FILE).subagentStatusLine).toEqual({ command: "mine" });
+    });
+
+    it("removing our only hooks drops empty hook keys", async () => {
+      const { ensureManagedHooks, SETTINGS_FILE } = await freshModule();
+      writeFileSync(SETTINGS_FILE, "{}");
+      ensureManagedHooks("/a/bin.js");
+      ensureManagedHooks(null);
+      expect(readSettings(SETTINGS_FILE).hooks).toBeUndefined();
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ hooks: { Stop: [{ hooks: [] }] } }));
+      ensureManagedHooks(null);
+      expect(readSettings(SETTINGS_FILE).hooks).toEqual({ Stop: [{ hooks: [] }] });
+    });
+
+    it("promptCacheTtl reads and writes settings.json", async () => {
+      const { promptCacheTtl, setPromptCacheTtl, SETTINGS_FILE } = await freshModule();
+      expect(promptCacheTtl()).toBeUndefined();
+      writeFileSync(SETTINGS_FILE, JSON.stringify({ keep: true, promptCacheTtl: 5 }));
+      expect(promptCacheTtl()).toBeUndefined();
+      setPromptCacheTtl("1h");
+      expect(promptCacheTtl()).toBe("1h");
+      expect(readSettings(SETTINGS_FILE).keep).toBe(true);
+    });
   });
 });

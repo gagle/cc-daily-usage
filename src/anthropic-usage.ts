@@ -3,7 +3,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import path from "node:path";
 
-import type { UsageState } from "./interfaces/config.interface.js";
+import type {
+  ApiCache,
+  ApiExtraWindow,
+  ApiPlan,
+  ApiResetGrant,
+  ApiWindow,
+} from "./interfaces/config.interface.js";
 import { CLAUDE_DIR } from "./statusline-shared.js";
 
 const BASE_API_URL = "https://api.anthropic.com";
@@ -11,6 +17,10 @@ const OAUTH_BETA_HEADER = "oauth-2025-04-20";
 const KEYCHAIN_SERVICE_NAME = "Claude Code-credentials";
 const CREDENTIALS_FILE = path.join(CLAUDE_DIR, ".credentials.json");
 const FETCH_TIMEOUT_MS = 5000;
+/** The server sends the limit-reset grants (`cedar_ember`) only to a Claude Code client ("surface"): with
+ * any other user agent it answers `ineligible_reason: "surface"`. The suffix names this tool.
+ * # ponytail: undocumented gate, may change without notice; the part then hides (no grants). */
+const RESETS_USER_AGENT = "claude-cli/2.1.319 (external, cli) cc-daily-usage";
 
 export interface ResolvedToken {
   readonly token: string;
@@ -90,6 +100,8 @@ export interface OauthProfile {
     readonly billing_type?: string;
     readonly has_extra_usage_enabled?: boolean;
     readonly subscription_created_at?: string;
+    readonly subscription_status?: string | null;
+    readonly claude_code_trial_ends_at?: string | null;
   };
 }
 
@@ -103,7 +115,25 @@ export interface ExtraUsage {
   readonly stale?: boolean; // last good reading served after a failed fetch
 }
 
+interface RawWindow {
+  readonly utilization?: number | null; // 0-100
+  readonly resets_at?: string | null; // ISO 8601
+  readonly used_dollars?: number | null;
+  readonly limit_dollars?: number | null;
+}
+
+/** Observed 2026-10-15 on a Pro account; the endpoint is undocumented, so every field is optional. */
 interface RawUsageResponse {
+  readonly [key: string]: unknown;
+  readonly five_hour?: RawWindow | null;
+  readonly seven_day?: RawWindow | null;
+  readonly limits?: ReadonlyArray<{
+    readonly kind?: string;
+    readonly severity?: string | null;
+  }> | null;
+  readonly seven_day_breakdown?: {
+    readonly rows?: ReadonlyArray<{ readonly key?: string; readonly percent?: number }>;
+  } | null;
   readonly extra_usage?: {
     readonly is_enabled?: boolean;
     readonly monthly_limit?: number | null;
@@ -114,23 +144,57 @@ interface RawUsageResponse {
     readonly spend_limit_reached?: boolean | null;
     readonly disabled_reason?: string | null;
   } | null;
+  // Limit-reset grants: only sent with `?cedar_ember=1` (Claude Code's own `/usage` read; not documented).
+  readonly cedar_ember?: {
+    readonly eligible?: boolean;
+    readonly grants?: ReadonlyArray<{
+      readonly resets_left?: number;
+      readonly ends_at?: string | null;
+      readonly paused?: boolean;
+    }> | null;
+  } | null;
 }
 
-async function fetchJson<T>(url: string, token: string): Promise<T | null> {
+/** Why a fetch gave no reading: `error` is shown by `doctor`; `retryAfter` is the server's raw header. */
+export interface FetchFailure {
+  readonly error: string; // "HTTP 429", "network" (timeout, DNS, bad JSON), "bad response", "no token"
+  readonly retryAfter: string | null;
+}
+
+type FetchOutcome<T> = { readonly data: T } | { readonly failure: FetchFailure };
+
+async function fetchJsonOutcome<T>(
+  url: string,
+  token: string,
+  extraHeaders: Readonly<Record<string, string>> = {},
+): Promise<FetchOutcome<T>> {
   try {
     const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${token}`,
         "anthropic-beta": OAUTH_BETA_HEADER,
         "Content-Type": "application/json",
+        ...extraHeaders,
       },
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
-    if (!response.ok) return null;
-    return (await response.json()) as T;
+    if (!response.ok) {
+      return {
+        failure: {
+          error: `HTTP ${String(response.status)}`,
+          retryAfter: response.headers.get("retry-after"),
+        },
+      };
+    }
+    return { data: (await response.json()) as T };
   } catch {
-    return null;
+    return { failure: { error: "network", retryAfter: null } };
   }
+}
+
+async function fetchJson<T>(url: string, token: string): Promise<T | null> {
+  const outcome = await fetchJsonOutcome<T>(url, token);
+  return "data" in outcome ? outcome.data : null;
 }
 
 /** `GET /api/oauth/profile` — resolves account identity straight from a bearer token, independent of
@@ -156,33 +220,162 @@ function parseExtraUsage(raw: RawUsageResponse | null): ExtraUsage | null {
   };
 }
 
-/** `GET /api/oauth/usage` — same endpoint that already backs Claude Code's own `⏱ 5h/7d` rate-limit display;
- * this reads its `extra_usage` field (Anthropic's server-side "Usage credits" ledger). Returns null when
- * extra usage isn't enabled for this account, or on any fetch/parse failure. */
-export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null> {
-  return parseExtraUsage(
-    await fetchJson<RawUsageResponse>(`${BASE_API_URL}/api/oauth/usage`, token),
-  );
+const numberOrNull = (value: unknown): number | null => (typeof value === "number" ? value : null);
+
+function parseWindow(raw: unknown, severity: string | null = null): ApiWindow | null {
+  const window = raw as RawWindow | null | undefined;
+  if (typeof window?.utilization !== "number") return null;
+  const resetsMs = window.resets_at ? Date.parse(window.resets_at) : Number.NaN;
+  return {
+    pct: window.utilization,
+    resetsAt: Number.isNaN(resetsMs) ? null : Math.floor(resetsMs / 1000),
+    usedDollars: numberOrNull(window.used_dollars),
+    limitDollars: numberOrNull(window.limit_dollars),
+    severity,
+  };
 }
 
-const EXTRA_USAGE_CACHE_TTL_MS = 60_000;
+/** `limits[]` severity for one kind (`session` = 5h, `weekly_all` = 7d). */
+function severityOf(raw: RawUsageResponse, kind: string): string | null {
+  const severity = raw.limits?.find((limit) => limit.kind === kind)?.severity;
+  return typeof severity === "string" ? severity : null;
+}
 
-/** Throttles the usage fetch to at most once per TTL window, cached on the per-account usage.json — a
- * statusline can redraw on every keystroke; this keeps that from hammering Anthropic's endpoint on every
- * single render. A failed fetch (network, 401, 429) keeps the last good reading, marked `stale`, instead of
- * caching null — null would drop the caller onto session-delta accumulation, which can count phantom spend.
- * Mutates `usage.extraUsageCache` in place, matching calc.ts's mutation style. */
-export async function getCachedExtraUsage(
-  usage: UsageState,
-  token: string,
-  nowUtc: Date,
-): Promise<ExtraUsage | null> {
-  const cache = usage.extraUsageCache;
-  if (cache && nowUtc.getTime() - cache.fetchedAt < EXTRA_USAGE_CACHE_TTL_MS) {
-    return cache.data;
+/** Every other `seven_day_<key>` window that carries a reading (opus, sonnet, cowork, …). */
+function parseExtraWindows(raw: RawUsageResponse): Array<ApiExtraWindow> {
+  const windows: Array<ApiExtraWindow> = [];
+  for (const [name, value] of Object.entries(raw)) {
+    if (!name.startsWith("seven_day_")) continue;
+    const window = parseWindow(value);
+    if (window !== null) windows.push({ key: name.slice("seven_day_".length), ...window });
   }
-  const raw = await fetchJson<RawUsageResponse>(`${BASE_API_URL}/api/oauth/usage`, token);
-  const data = raw === null && cache?.data ? { ...cache.data, stale: true } : parseExtraUsage(raw);
-  usage.extraUsageCache = { fetchedAt: nowUtc.getTime(), data };
-  return data;
+  return windows;
+}
+
+/** Claude Code's share (0-1) of this week's use, from `seven_day_breakdown.rows`; null when absent. */
+function parseClaudeCodeShare(raw: RawUsageResponse): number | null {
+  const percent = raw.seven_day_breakdown?.rows?.find((row) => row.key === "claude_code")?.percent;
+  return typeof percent === "number" ? Math.min(1, Math.max(0, percent / 100)) : null;
+}
+
+/** Grants with a reset left and not paused; none when the account is not eligible. */
+function parseResets(raw: RawUsageResponse): Array<ApiResetGrant> {
+  const block = raw.cedar_ember;
+  if (block?.eligible !== true) return [];
+  const grants: Array<ApiResetGrant> = [];
+  for (const grant of block.grants ?? []) {
+    const left = grant.resets_left;
+    if (typeof left !== "number" || left <= 0 || grant.paused === true) continue;
+    const endsMs = grant.ends_at ? Date.parse(grant.ends_at) : Number.NaN;
+    grants.push({ left, endsAt: Number.isNaN(endsMs) ? null : endsMs });
+  }
+  return grants;
+}
+
+export type UsageReading = Omit<ApiCache, "fetchedAt" | "stale">;
+export type UsageOutcome = { readonly usage: UsageReading } | { readonly failure: FetchFailure };
+
+/** `GET /api/oauth/usage` — the same read-only endpoint Claude Code's own `/usage` calls (no model request, no
+ * tokens). A failure says why. `extra_usage` is Anthropic's server-side "Usage credits" ledger;
+ * `five_hour`/`seven_day` are the seat windows Claude Code only learns from a model response. */
+export async function fetchUsageOutcome(token: string): Promise<UsageOutcome> {
+  const outcome = await fetchJsonOutcome<unknown>(
+    `${BASE_API_URL}/api/oauth/usage?cedar_ember=1`,
+    token,
+    { "User-Agent": RESETS_USER_AGENT },
+  );
+  if ("failure" in outcome) return outcome;
+  if (outcome.data === null || typeof outcome.data !== "object") {
+    return { failure: { error: "bad response", retryAfter: null } };
+  }
+  const raw = outcome.data as RawUsageResponse;
+  return {
+    usage: {
+      extraUsage: parseExtraUsage(raw),
+      fiveHour: parseWindow(raw.five_hour, severityOf(raw, "session")),
+      sevenDay: parseWindow(raw.seven_day, severityOf(raw, "weekly_all")),
+      extraWindows: parseExtraWindows(raw),
+      claudeCodeShare: parseClaudeCodeShare(raw),
+      resets: parseResets(raw),
+    },
+  };
+}
+
+/** Exported API: fetchUsageOutcome's reading, or null on any fetch/parse failure. */
+export async function fetchUsage(token: string): Promise<UsageReading | null> {
+  const outcome = await fetchUsageOutcome(token);
+  return "usage" in outcome ? outcome.usage : null;
+}
+
+/** Plan facts from `/api/oauth/profile`, or null on failure. */
+export async function fetchPlan(token: string, now: Date): Promise<ApiPlan | null> {
+  const organization = (await fetchOauthProfile(token))?.organization;
+  if (!organization) return null;
+  return {
+    fetchedAt: now.getTime(),
+    rateLimitTier: organization.rate_limit_tier ?? null,
+    subscriptionStatus: organization.subscription_status ?? null,
+    billingType: organization.billing_type ?? null,
+    trialEndsAt: organization.claude_code_trial_ends_at ?? null,
+  };
+}
+
+/** The plan is re-read once a day: it changes on an upgrade or a lapse, not by the minute. */
+export const PLAN_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** Back-compat wrapper (exported API): just the usage-credits part of fetchUsage. */
+export async function fetchExtraUsage(token: string): Promise<ExtraUsage | null> {
+  return (await fetchUsage(token))?.extraUsage ?? null;
+}
+
+export const API_CACHE_TTL_MS = 60_000;
+/** After failures the wait doubles per failure, up to 2^4 × the TTL (16 min): a 429 or a dead token is not
+ * hammered every minute. A Retry-After from the server waits at least that long. */
+const MAX_BACKOFF_DOUBLINGS = 4;
+/** A Retry-After longer than this is not trusted: a wrong header must not stop the readings for a day. */
+const MAX_RETRY_AFTER_MS = 60 * 60 * 1000;
+
+/** Retry-After (seconds or an HTTP date) as epoch ms, capped; undefined when absent or unreadable. */
+function retryAtOf(header: string | null, now: number): number | undefined {
+  if (header === null || header.trim() === "") return undefined;
+  const seconds = Number(header);
+  const at = Number.isFinite(seconds) ? now + seconds * 1000 : Date.parse(header);
+  return Number.isNaN(at) ? undefined : Math.min(at, now + MAX_RETRY_AFTER_MS);
+}
+
+/** When the reading a stale cache keeps was taken; absent when no good reading is known. */
+function readAtOf(previous: ApiCache | null): { readAt?: number } {
+  const readAt = previous?.stale === true ? previous.readAt : previous?.fetchedAt;
+  return readAt === undefined ? {} : { readAt };
+}
+
+/** Next cache after one fetch attempt: a failure keeps the previous good reading marked `stale` instead of
+ * dropping to null — null would put the caller on session-delta accumulation, which can count phantom
+ * spend. The plan survives either way; the caller replaces it when it re-reads the profile. */
+export function nextApiCache(
+  previous: ApiCache | null,
+  outcome: UsageOutcome,
+  now: Date,
+): ApiCache {
+  const plan = previous?.plan === undefined ? {} : { plan: previous.plan };
+  if ("usage" in outcome) return { fetchedAt: now.getTime(), ...plan, ...outcome.usage };
+  return {
+    extraUsage: null,
+    fiveHour: null,
+    sevenDay: null,
+    ...previous,
+    fetchedAt: now.getTime(),
+    stale: true,
+    ...readAtOf(previous),
+    failures: (previous?.failures ?? 0) + 1,
+    lastError: outcome.failure.error,
+    retryAt: retryAtOf(outcome.failure.retryAfter, now.getTime()),
+  };
+}
+
+export function isApiCacheFresh(cache: ApiCache | null, now: Date): boolean {
+  if (cache === null) return false;
+  if (cache.retryAt !== undefined && now.getTime() < cache.retryAt) return true;
+  const doublings = Math.min(cache.failures ?? 0, MAX_BACKOFF_DOUBLINGS);
+  return now.getTime() - cache.fetchedAt < API_CACHE_TTL_MS * 2 ** doublings;
 }

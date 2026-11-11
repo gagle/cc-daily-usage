@@ -1,1149 +1,555 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type * as NodeOs from "node:os";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Readable } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type * as AccountModule from "./account.js";
 import type * as CliModule from "./cli.js";
+import type * as InsightsModule from "./insights.js";
+import type * as LiveModule from "./live-tui.js";
+import type * as ReportModule from "./report.js";
+import type * as SharedModule from "./statusline-shared.js";
 
-let tmpDir: string;
+let fakeHome: string;
 
-const loadConfigMock = vi.fn();
-const loadUsageMock = vi.fn();
-const saveConfigMock = vi.fn();
-const saveUsageMock = vi.fn();
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeOs>();
+  return { ...actual, homedir: () => fakeHome };
+});
 
-vi.mock("./config.js", () => ({
-  loadConfig: (k: unknown) => loadConfigMock(k) as unknown,
-  loadUsage: (k: unknown) => loadUsageMock(k) as unknown,
-  saveConfig: (k: unknown, c: unknown) => saveConfigMock(k, c),
-  saveUsage: (k: unknown, u: unknown) => saveUsageMock(k, u),
+const accountMock = vi.fn();
+vi.mock("./account.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof AccountModule>();
+  return { ...actual, resolveActiveAccount: () => Promise.resolve(accountMock() as unknown) };
+});
+
+const runStatuslineLineMock = vi.fn().mockResolvedValue(0);
+const runStatuslineJsonMock = vi.fn().mockResolvedValue(0);
+vi.mock("./statusline.js", () => ({
+  runStatuslineLine: () => runStatuslineLineMock() as unknown,
+  runStatuslineJson: () => runStatuslineJsonMock() as unknown,
 }));
 
-const resolveActiveAccountMock = vi.fn().mockResolvedValue(null);
-vi.mock("./account.js", () => ({
-  resolveActiveAccount: () => resolveActiveAccountMock() as unknown,
-  accountKey: () => "default",
+const runPromptGateMock = vi.fn().mockResolvedValue(0);
+vi.mock("./prompt-gate.js", () => ({ runPromptGate: () => runPromptGateMock() as unknown }));
+
+const runModelSwitchMock = vi.fn().mockResolvedValue(0);
+vi.mock("./model-switch.js", () => ({ runModelSwitch: () => runModelSwitchMock() as unknown }));
+const runSubagentMock = vi.fn().mockResolvedValue(0);
+vi.mock("./subagent-line.js", () => ({
+  runSubagentStatusline: () => runSubagentMock() as unknown,
 }));
 
-const resolveOAuthAccessTokenMock = vi.fn(
-  (): { token: string; expiresAt: number | null } | null => null,
-);
-const getCachedExtraUsageMock = vi.fn().mockResolvedValue(null);
-vi.mock("./anthropic-usage.js", () => ({
-  resolveOAuthAccessToken: () => resolveOAuthAccessTokenMock() as unknown,
-  getCachedExtraUsage: (...args: Array<unknown>) => getCachedExtraUsageMock(...args) as unknown,
+const runRefreshMock = vi.fn().mockResolvedValue(0);
+const writeFeedMock = vi.fn().mockResolvedValue(undefined);
+vi.mock("./refresh.js", () => ({
+  runRefresh: (key: string) => runRefreshMock(key) as unknown,
+  writeFeed: (key: string) => writeFeedMock(key) as unknown,
 }));
 
-const runInitMock = vi.fn();
-vi.mock("./init-server.js", () => ({ runInit: (...args: Array<unknown>) => runInitMock(...args) }));
+const catchUpMock = vi.fn().mockReturnValue(true);
+vi.mock("./transcript-index.js", () => ({ catchUp: () => catchUpMock() as unknown }));
+
+const insightsAdviceMock = vi.fn().mockReturnValue([]);
+vi.mock("./insights.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof InsightsModule>()),
+  adviceFor: () => insightsAdviceMock() as unknown,
+  snoozeRule: (_key: string, _id: string, days: number) =>
+    days > 0 ? "2026-10-14T00:00:00.000Z" : null,
+}));
+
+const buildReportMock = vi.fn().mockReturnValue({ rows: [] });
+vi.mock("./report.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof ReportModule>()),
+  buildReport: (...args: Array<unknown>) => buildReportMock(...args) as unknown,
+  formatReport: () => "TABLE",
+}));
+
+const sessionFilesMock = vi.fn();
+vi.mock("./session-report.js", () => ({
+  sessionFiles: (prefix: string) => sessionFilesMock(prefix) as unknown,
+  loadSessionModel: (id: string) => ({ id }),
+  renderSessionReport: (_s: unknown, color: boolean, width: number) => [
+    `BURNUP ${String(color)} ${String(width)}`,
+  ],
+  sessionJson: (s: unknown) => s,
+}));
 
 const installStatuslineMock = vi.fn();
+const uninstallStatuslineMock = vi.fn();
+const isEphemeralInstallMock = vi.fn(() => false);
 vi.mock("./statusline-install.js", () => ({
-  installStatusline: (...args: Array<unknown>) => installStatuslineMock(...args),
+  isEphemeralInstall: () => isEphemeralInstallMock(),
+  installStatusline: (...args: Array<unknown>) => installStatuslineMock(...args) as unknown,
+  uninstallStatusline: () => uninstallStatuslineMock() as unknown,
 }));
 
-const installCaptureOnlyMock = vi.fn();
+const installCaptureOnlyMock = vi.fn().mockResolvedValue({ installed: true, backupPath: null });
 vi.mock("./statusline-capture-install.js", () => ({
-  installCaptureOnly: (...args: Array<unknown>) => installCaptureOnlyMock(...args),
+  installCaptureOnly: () => installCaptureOnlyMock() as unknown,
+}));
+
+const confirmAnswers: Array<boolean> = [];
+const ttl: { value: string | undefined } = { value: undefined };
+vi.mock("./statusline-shared.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof SharedModule>()),
+  defaultConfirm: () => Promise.resolve(confirmAnswers.shift() ?? false),
+  promptCacheTtl: () => ttl.value,
+  setPromptCacheTtl: (value: string) => {
+    ttl.value = value;
+  },
 }));
 
 const runCalendarTuiMock = vi.fn().mockResolvedValue(0);
-vi.mock("./calendar-tui.js", () => ({ runCalendarTui: () => runCalendarTuiMock() }));
+vi.mock("./calendar-tui.js", () => ({
+  runCalendarTui: (account: unknown) => runCalendarTuiMock(account) as unknown,
+}));
 
-function mockReadline(answer: string): void {
-  vi.doMock("node:readline/promises", () => ({
-    createInterface: () => ({ question: vi.fn().mockResolvedValue(answer), close: vi.fn() }),
-  }));
-}
+const runLiveMock = vi.fn().mockResolvedValue(0);
+vi.mock("./live-tui.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof LiveModule>()),
+  runLive: (args: unknown) => runLiveMock(args) as unknown,
+}));
 
-function stubStdin(content: string): void {
-  const stream = Readable.from([Buffer.from(content)]);
-  vi.stubGlobal("process", { ...process, stdin: stream });
-}
+const runSettingsTuiMock = vi.fn().mockResolvedValue(0);
+vi.mock("./settings-tui.js", () => ({ runSettingsTui: () => runSettingsTuiMock() as unknown }));
 
-async function freshCli(): Promise<typeof CliModule> {
+const doctorReportMock = vi.fn();
+vi.mock("./doctor.js", () => ({ doctorReport: () => doctorReportMock() as unknown }));
+
+async function fresh(): Promise<typeof CliModule> {
   vi.resetModules();
   return import("./cli.js");
 }
 
-describe("runCli", () => {
-  beforeEach(() => {
-    tmpDir = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-cli-test-"));
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [1, 2, 3] } },
-    });
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 80.94,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-    });
-    resolveActiveAccountMock.mockResolvedValue(null);
-    resolveOAuthAccessTokenMock.mockReturnValue(null);
-    getCachedExtraUsageMock.mockResolvedValue(null);
-  });
+const ENTERPRISE = {
+  email: "dev@example.com",
+  accountUuid: "u",
+  organizationType: "claude_enterprise",
+};
+const KEY = "dev_example_com";
+const INSTALLED = { installed: true, backupPath: null, fromVersion: null, toVersion: "abcd1234" };
 
-  afterEach(() => {
-    vi.useRealTimers();
-    rmSync(tmpDir, { recursive: true, force: true });
-    vi.unstubAllGlobals();
-    vi.doUnmock("node:readline/promises");
-    vi.clearAllMocks();
-  });
+function configFile(): string {
+  return path.join(fakeHome, ".config", "cc-daily-usage", "accounts", KEY, "config.json");
+}
 
-  it("prints usage and exits 0 with --help", async () => {
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--help"]);
-    expect(code).toBe(0);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("cc-daily-usage"));
-  });
+let logs: Array<string>;
 
-  it("prints usage and exits 0 with -h", async () => {
-    const { runCli } = await freshCli();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    expect(await runCli(["-h"])).toBe(0);
-  });
+function setTty(value: boolean): void {
+  Object.defineProperty(process.stdin, "isTTY", { value, configurable: true });
+  Object.defineProperty(process.stdout, "isTTY", { value, configurable: true });
+}
 
-  it("prints usage and exits 0 with no arguments", async () => {
-    const { runCli } = await freshCli();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    expect(await runCli([])).toBe(0);
+beforeEach(() => {
+  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-cli-"));
+  logs = [];
+  vi.spyOn(console, "log").mockImplementation((...args: Array<unknown>) => {
+    logs.push(args.map(String).join(" "));
   });
+  accountMock.mockReturnValue(ENTERPRISE);
+  installStatuslineMock.mockResolvedValue(INSTALLED);
+  confirmAnswers.length = 0;
+  ttl.value = undefined;
+  runCalendarTuiMock.mockResolvedValue(0);
+  installCaptureOnlyMock.mockResolvedValue({ installed: true, backupPath: null });
+  runStatuslineLineMock.mockResolvedValue(0);
+  runStatuslineJsonMock.mockResolvedValue(0);
+  runRefreshMock.mockResolvedValue(0);
+  runPromptGateMock.mockResolvedValue(0);
+  setTty(false);
+  vi.useFakeTimers({ now: new Date("2026-10-07T10:00:00.000Z"), toFake: ["Date"] });
+});
 
-  it("throws on an unknown operation", async () => {
-    const { runCli } = await freshCli();
-    await expect(runCli(["bogus-op"])).rejects.toThrow(/Unknown argument: bogus-op/);
-  });
+afterEach(() => {
+  vi.useRealTimers();
+  rmSync(fakeHome, { recursive: true, force: true });
+});
 
-  it("throws on an empty-string operation argument", async () => {
-    const { runCli } = await freshCli();
-    await expect(runCli([""])).rejects.toThrow(/Unknown argument: /);
-  });
-
-  it("throws on an unknown flag", async () => {
-    const { runCli } = await freshCli();
-    await expect(runCli(["init", "--nope"])).rejects.toThrow(/Unknown argument: --nope/);
-  });
-
-  it("runs init, saves the returned config, then installs the full statusline on yes", async () => {
-    runInitMock.mockResolvedValue({
-      config: { monthlyCap: 650, laboralDays: {} },
-      outcome: "done",
-    });
-    installStatuslineMock.mockResolvedValue({
-      installed: true,
-      backupPath: null,
-      fromVersion: null,
-      toVersion: "abc12345",
-    });
-    mockReadline("y");
-    stubStdin("");
-    const { runCli } = await freshCli();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["init"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).toHaveBeenCalledWith("default", { monthlyCap: 650, laboralDays: {} });
-    expect(installStatuslineMock).toHaveBeenCalled();
-    expect(installCaptureOnlyMock).not.toHaveBeenCalled();
-  });
-
-  it("runs init and falls back to capture-only install on no", async () => {
-    runInitMock.mockResolvedValue({
-      config: { monthlyCap: 650, laboralDays: {} },
-      outcome: "heartbeat-gap",
-    });
-    mockReadline("n");
-    stubStdin("");
-    const { runCli } = await freshCli();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["init"]);
-    expect(code).toBe(0);
-    expect(installCaptureOnlyMock).toHaveBeenCalled();
-    expect(installStatuslineMock).not.toHaveBeenCalled();
-  });
-
-  it("runs the statusline operation and reports a fresh install with a backup", async () => {
-    installStatuslineMock.mockResolvedValue({
-      installed: true,
-      backupPath: "/tmp/settings.json.bak_123",
-      fromVersion: null,
-      toVersion: "abc12345",
-    });
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["statusline"]);
-    expect(code).toBe(0);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Backed up"));
-  });
-
-  it("runs the statusline operation and reports an already-up-to-date no-op", async () => {
-    installStatuslineMock.mockResolvedValue({
-      installed: true,
-      backupPath: null,
-      fromVersion: "abc12345",
-      toVersion: "abc12345",
-    });
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    await runCli(["statusline"]);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("already up to date"));
-  });
-
-  it("runs the statusline operation and reports a version upgrade", async () => {
-    installStatuslineMock.mockResolvedValue({
-      installed: true,
-      backupPath: null,
-      fromVersion: "aaaaaaaa",
-      toVersion: "bbbbbbbb",
-    });
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    await runCli(["statusline"]);
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Updated statusline: vaaaaaaaa → vbbbbbbbb"),
-    );
-  });
-
-  it("runs the statusline operation and reports a decline", async () => {
-    installStatuslineMock.mockResolvedValue({
-      installed: false,
-      backupPath: null,
-      fromVersion: null,
-      toVersion: null,
-    });
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    await runCli(["statusline"]);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("declined"));
-  });
-
-  it("hidden --statusline mode: parses stdin, captures cost, and prints computed JSON", async () => {
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveUsageMock).toHaveBeenCalled();
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).toHaveProperty("monthlySpent");
-  });
-
-  it("runs the calendar operation", async () => {
-    runCalendarTuiMock.mockResolvedValue(0);
-    const { runCli } = await freshCli();
-    const code = await runCli(["calendar"]);
-    expect(code).toBe(0);
-    expect(runCalendarTuiMock).toHaveBeenCalled();
-  });
-
-  it("hidden --statusline mode: tolerates empty stdin and a missing session/cost", async () => {
-    stubStdin("");
-    const { runCli } = await freshCli();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-  });
-
-  it("hidden --statusline mode: includes extraUsage in the printed JSON when the live fetch has data", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 0,
-      laboralDays: {},
-      planType: "claude_pro",
-      hasSpendCap: false,
-    });
-    resolveOAuthAccessTokenMock.mockReturnValue({ token: "t", expiresAt: null });
-    getCachedExtraUsageMock.mockResolvedValue({
-      usedCredits: 162.99,
-      monthlyLimit: 650,
-      utilizationPct: 25,
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.extraUsage).toEqual({
-      usedCredits: 162.99,
-      monthlyLimit: 650,
-      utilizationPct: 25,
-    });
-  });
-
-  it("hidden --statusline mode: extraUsage is null when there's no resolvable token", async () => {
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+describe("hidden modes", () => {
+  it("--statusline-line, --statusline and --refresh dispatch without the CLI help path", async () => {
+    const { runCli } = await fresh();
+    await runCli(["--statusline-line"]);
     await runCli(["--statusline"]);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.extraUsage).toBeNull();
-    expect(getCachedExtraUsageMock).not.toHaveBeenCalled();
+    await runCli(["--refresh", "k"]);
+    await runCli(["--prompt-gate"]);
+    await runCli(["--model-switch"]);
+    await runCli(["--subagent-statusline"]);
+    expect(runSubagentMock).toHaveBeenCalled();
+    expect(runPromptGateMock).toHaveBeenCalled();
+    expect(runModelSwitchMock).toHaveBeenCalled();
+    expect(runStatuslineLineMock).toHaveBeenCalled();
+    expect(runStatuslineJsonMock).toHaveBeenCalled();
+    expect(runRefreshMock).toHaveBeenCalledWith("k");
+    await expect(runCli(["--refresh"])).rejects.toThrow("needs an account key");
   });
+});
 
-  it("hidden --statusline mode: resolves and caches planType/hasSpendCap on first sight, hiding monthlyCap fields once rate_limits are present", async () => {
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_pro",
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { five_hour: { used_percentage: 10 } },
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ planType: "claude_pro", hasSpendCap: false }),
-    );
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).not.toHaveProperty("monthlySpent");
-    expect(printed).not.toHaveProperty("monthlyCap");
-    expect(printed).not.toHaveProperty("monthUsedPct");
-  });
-
-  it("hidden --statusline mode: does not re-resolve planType once already cached on config", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [1, 2, 3] } },
-      planType: "enterprise",
-      hasSpendCap: true,
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
+describe("arguments", () => {
+  it("a command that met a newer file prints the update hint; hook modes stay quiet", async () => {
+    const { runCli } = await fresh();
+    const { markNewerFile } = await import("./config.js");
+    markNewerFile("/x/config.json");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).not.toHaveBeenCalled();
+    await runCli(["--statusline-line"]);
+    expect(errors).not.toHaveBeenCalled();
+    await runCli(["--help"]);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("npm i -g cc-daily-usage"));
   });
 
-  it("hidden --statusline mode: syncs planType when hasSpendCap already matches organizationType", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [1, 2, 3] } },
-      planType: "old_label",
-      hasSpendCap: true,
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ planType: "claude_enterprise", hasSpendCap: true }),
+  it("help for no args, -h or --help anywhere", async () => {
+    const { runCli } = await fresh();
+    for (const argv of [[], ["-h"], ["calendar", "--help"]]) {
+      expect(await runCli(argv)).toBe(0);
+    }
+    expect(logs.filter((line) => line.includes("Operations:"))).toHaveLength(3);
+  });
+
+  it("unknown operation or extra argument throws a helpful error", async () => {
+    const { runCli } = await fresh();
+    await expect(runCli(["nope"])).rejects.toThrow("Unknown argument: nope");
+    await expect(runCli(["calendar", "extra"])).rejects.toThrow("Unknown argument: extra");
+    await expect(runCli(["calendar", ""])).rejects.toThrow("Unknown argument: ");
+  });
+});
+
+describe("statusline / uninstall", () => {
+  it("formats every install outcome", async () => {
+    const { formatStatuslineInstallMessage: format } = await fresh();
+    expect(format({ installed: false, backupPath: null, fromVersion: null, toVersion: null })).toBe(
+      "Not installed — declined.",
     );
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.planType).toBe("claude_enterprise");
-  });
-
-  it("hidden --statusline mode: self-heals a previously-cached hasSpendCap:true once rate_limits is later observed", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: {},
-      planType: "claude_pro",
-      hasSpendCap: true, // wrong guess made on an earlier call whose payload lacked rate_limits
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_pro",
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { five_hour: { used_percentage: 10 } },
-      }),
+    expect(format(INSTALLED)).toBe("Installed (vabcd1234).");
+    expect(format({ ...INSTALLED, backupPath: "/b" })).toBe(
+      "Installed (vabcd1234). Backed up previous settings.json to /b.",
     );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ hasSpendCap: false }),
+    expect(format({ ...INSTALLED, fromVersion: "abcd1234" })).toBe(
+      "Statusline already up to date (vabcd1234).",
     );
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).not.toHaveProperty("monthlySpent");
-  });
-
-  it("hidden --statusline mode: self-heals to false on rate_limits alone when organizationType is unrecognized (no mismatch to piggyback on)", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: {},
-      planType: null,
-      hasSpendCap: true, // wrong guess made on an earlier call whose payload lacked rate_limits
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: null, // classifyHasSpendCap(null) -> undefined, so `mismatch` is false here
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { five_hour: { used_percentage: 10 } },
-      }),
+    expect(format({ ...INSTALLED, fromVersion: "00000000" })).toBe(
+      "Updated statusline: v00000000 → vabcd1234.",
     );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ hasSpendCap: false }),
+  });
+
+  it("statusline installs and reports", async () => {
+    const { runCli } = await fresh();
+    expect(await runCli(["statusline"])).toBe(0);
+    expect(logs).toContain("Installed (vabcd1234).");
+  });
+
+  it("init and statusline refuse a copy in the npx/dlx cache", async () => {
+    const { runCli } = await fresh();
+    isEphemeralInstallMock.mockReturnValue(true);
+    try {
+      await expect(runCli(["statusline"])).rejects.toThrow(/npm install -g cc-daily-usage/);
+      await expect(runCli(["init"])).rejects.toThrow(/temporary npx\/dlx cache/);
+    } finally {
+      isEphemeralInstallMock.mockReturnValue(false);
+    }
+  });
+
+  it("--version prints the package version", async () => {
+    const { runCli } = await fresh();
+    const { version } = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    expect(await runCli(["--version"])).toBe(0);
+    expect(await runCli(["-v"])).toBe(0);
+    expect(logs).toEqual([version, version]);
+  });
+
+  it("uninstall reports restore, plain removal, or nothing to do", async () => {
+    const { runCli } = await fresh();
+    uninstallStatuslineMock.mockReturnValueOnce({ removed: true, restoredFrom: "/x.bak" });
+    await runCli(["uninstall"]);
+    uninstallStatuslineMock.mockReturnValueOnce({ removed: true, restoredFrom: null });
+    await runCli(["uninstall"]);
+    uninstallStatuslineMock.mockReturnValueOnce({ removed: false, restoredFrom: null });
+    await runCli(["uninstall"]);
+    expect(logs).toEqual([
+      "Removed the managed statusline. Restored statusLine from /x.bak.",
+      "Removed the managed statusline. Removed statusLine from settings.json.",
+      "Nothing to remove — the managed statusline is not installed.",
+    ]);
+  });
+});
+
+describe("settings", () => {
+  it("opens the layout editor", async () => {
+    runSettingsTuiMock.mockResolvedValue(0);
+    const { runCli } = await fresh();
+    expect(await runCli(["settings"])).toBe(0);
+    expect(runSettingsTuiMock).toHaveBeenCalled();
+  });
+});
+
+describe("doctor", () => {
+  it("prints the report and returns its exit code", async () => {
+    doctorReportMock.mockResolvedValue({ text: "✖ node: 22", code: 1 });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { runCli } = await fresh();
+    expect(await runCli(["doctor"])).toBe(1);
+    expect(log).toHaveBeenCalledWith("✖ node: 22");
+  });
+});
+
+describe("report", () => {
+  it("catches up, refreshes the feed and prints the table or JSON", async () => {
+    buildReportMock.mockReturnValue({ rows: [] });
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    accountMock.mockReturnValue({ email: "dev@example.com", organizationType: "claude_max" });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { runCli } = await fresh();
+    expect(await runCli(["report"])).toBe(0);
+    expect(log).toHaveBeenCalledWith("TABLE");
+    expect(writeFeedMock).toHaveBeenCalledWith("dev_example_com");
+    expect(buildReportMock).toHaveBeenCalledWith(
+      "dev_example_com",
+      expect.objectContaining({ label: "last 7 days" }),
+      "model",
+      null, // no limit samples yet → no $ per 1%
     );
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).not.toHaveProperty("monthlySpent");
+    catchUpMock.mockReturnValueOnce(false);
+    writeFeedMock.mockClear();
+    expect(await runCli(["report", "today", "--json", "--account", "unattributed"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(JSON.stringify({ rows: [] }, null, 2));
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("Another index pass"));
+    expect(writeFeedMock).not.toHaveBeenCalled();
   });
 
-  it("hidden --statusline mode: self-heals a previously-cached hasSpendCap:false back to true when organizationType is claude_enterprise", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: {},
-      planType: "claude_enterprise",
-      hasSpendCap: false, // wrong guess baked in before classifyHasSpendCap existed
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ hasSpendCap: true }),
+  it("--session prints one session's burn-up or JSON; a bad id throws", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    sessionFilesMock.mockReturnValue({ id: "abc", files: [] });
+    const { runCli } = await fresh();
+    expect(await runCli(["report", "--session", "abc"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith("BURNUP false 80");
+    expect(await runCli(["report", "--session", "abc", "--json"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(JSON.stringify({ id: "abc" }, null, 2));
+    sessionFilesMock.mockReturnValue("No transcript for session zz");
+    await expect(runCli(["report", "--session", "zz"])).rejects.toThrow(
+      "No transcript for session zz",
     );
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).toHaveProperty("monthlySpent");
   });
 
-  it("hidden --statusline mode: enterprise keeps hasSpendCap:true and $ fields when rate_limits are also present", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [1, 2, 3, 13] } },
-      planType: "claude_enterprise",
-      hasSpendCap: true,
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { five_hour: { used_percentage: 90 }, seven_day: { used_percentage: 35 } },
-      }),
-    );
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-13T12:00:00.000Z")); // day 13 is laboral in this fixture
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    vi.useRealTimers();
-    expect(code).toBe(0);
-    expect(saveConfigMock).not.toHaveBeenCalled();
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.hasSpendCap).toBe(true);
-    expect(printed.planType).toBe("claude_enterprise");
-    expect(printed).toHaveProperty("monthlySpent");
-    expect(printed).toHaveProperty("avgPerDay");
-    expect(printed.extraUsage).toBeNull();
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 90,
-      sevenDayPct: 35,
-      fiveHourResetsAt: null,
-      sevenDayResetsAt: null,
-    });
+  it("--chart reaches the formatter; colors and width follow the terminal", async () => {
+    buildReportMock.mockReturnValue({ rows: [] });
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    accountMock.mockReturnValue(null);
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    const columns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+    Object.defineProperty(process.stdout, "columns", { value: 120, configurable: true });
+    sessionFilesMock.mockReturnValue({ id: "abc", files: [] });
+    try {
+      const { runCli } = await fresh();
+      expect(await runCli(["report", "--chart"])).toBe(0);
+      expect(log).toHaveBeenLastCalledWith("TABLE");
+      expect(await runCli(["report", "--session", "abc"])).toBe(0);
+      expect(log).toHaveBeenLastCalledWith("BURNUP true 120");
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else delete (process.stdout as { isTTY?: boolean }).isTTY;
+      if (columns) Object.defineProperty(process.stdout, "columns", columns);
+      else delete (process.stdout as { columns?: number }).columns;
+    }
   });
 
-  it("hidden --statusline mode: enterprise emits todayUsage-only on a non-laboral day (no avg pace)", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [1, 2, 3, 14, 15] } }, // 13 Sep Sunday omitted
-      planType: "claude_enterprise",
-      hasSpendCap: true,
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-13T12:00:00.000Z"));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    vi.useRealTimers();
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).toHaveProperty("monthlySpent");
-    expect(printed).toHaveProperty("monthlyCap");
-    expect(printed).toHaveProperty("todayUsage");
-    expect(printed).not.toHaveProperty("avgPerDay");
-    expect(printed).not.toHaveProperty("todayUsedPct");
-    expect(printed.extraUsage).toBeNull();
-  });
-
-  it("hidden --statusline mode: never flips a confirmed hasSpendCap:false back to true", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: {},
-      planType: "claude_pro",
-      hasSpendCap: false,
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).not.toHaveBeenCalled();
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).not.toHaveProperty("monthlySpent");
-    expect(printed).not.toHaveProperty("todayUsage");
-    expect(printed).not.toHaveProperty("avgPerDay");
-    expect(printed).not.toHaveProperty("todayUsedPct");
-  });
-
-  it("hidden --statusline mode: skips rolloverIfNeeded entirely on a confirmed no-spend-cap account", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: {},
-      planType: "claude_pro",
-      hasSpendCap: false,
-    });
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 80.94,
-      lastUpdated: "2026-09-01T00:00:00.000Z", // a prior UTC day — would normally trigger rollover
-      days: {},
-      sessions: {},
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
+  it("shows progress on a TTY; bad arguments throw", async () => {
+    buildReportMock.mockReturnValue({ rows: [] });
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    accountMock.mockReturnValue(null);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).not.toHaveBeenCalled();
-    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as { days: Record<string, number> };
-    expect(savedUsage.days).toEqual({});
+    const write = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const tty = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+    Object.defineProperty(process.stderr, "isTTY", { value: true, configurable: true });
+    const { runCli } = await fresh();
+    try {
+      await runCli(["report", "month"]);
+      expect(write).toHaveBeenCalledWith(expect.stringContaining("Reading new transcript lines"));
+    } finally {
+      if (tty) Object.defineProperty(process.stderr, "isTTY", tty);
+      else Reflect.deleteProperty(process.stderr, "isTTY");
+    }
+    await expect(runCli(["report", "--by", "x"])).rejects.toThrow("--by needs one of");
+    await expect(runCli(["report", "2026-13"])).rejects.toThrow("Unknown period: 2026-13");
   });
+});
 
-  it("hidden --statusline mode: a spend-cap account still prints todayUsage/avgPerDay/todayUsedPct alongside monthlySpent", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [1, 2, 3] } },
-      planType: "claude_enterprise",
-      hasSpendCap: true,
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-02T12:00:00.000Z"));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).toHaveProperty("todayUsage");
-    expect(printed).toHaveProperty("avgPerDay");
-    expect(printed).toHaveProperty("todayUsedPct");
-    expect(printed).toHaveProperty("monthlySpent");
-  });
-
-  it("hidden --statusline mode: classifies hasSpendCap from organizationType on the very first render, no rate_limits needed", async () => {
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ planType: "claude_enterprise", hasSpendCap: true }),
+describe("insights", () => {
+  it("snoozes, catches up, refreshes the feed and prints findings or JSON", async () => {
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    insightsAdviceMock.mockReturnValue([]);
+    accountMock.mockReturnValue({ email: "dev@example.com", organizationType: "claude_max" });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { runCli } = await fresh();
+    expect(await runCli(["insights"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith("Nothing to change this week.");
+    expect(writeFeedMock).toHaveBeenCalledWith("dev_example_com");
+    expect(await runCli(["insights", "--snooze", "R1", "7d", "--json"])).toBe(0);
+    expect(log).toHaveBeenCalledWith("R1 snoozed until 2026-10-14T00:00:00.000Z");
+    expect(log).toHaveBeenLastCalledWith("[]");
+    catchUpMock.mockReturnValueOnce(false);
+    expect(await runCli(["insights", "--snooze", "R1", "0d"])).toBe(0);
+    expect(log).toHaveBeenCalledWith("R1 unsnoozed");
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("Another index pass"));
+    await expect(runCli(["insights", "--x"])).rejects.toThrow("Unknown insights argument");
+    expect(await runCli(["insights", "--rules"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(
+      expect.stringContaining("What cc-daily-usage insights checks"),
     );
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed).toHaveProperty("monthlySpent");
+    expect(await runCli(["insights", "--rules", "--json"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining('"found": false'));
+  });
+});
+
+describe("live", () => {
+  it("passes --once to the live view; rejects unknown flags", async () => {
+    runLiveMock.mockResolvedValue(0);
+    const { runCli } = await fresh();
+    expect(await runCli(["live", "--once"])).toBe(0);
+    expect(runLiveMock).toHaveBeenCalledWith({ once: true });
+    await expect(runCli(["live", "--x"])).rejects.toThrow("Unknown live argument: --x");
+  });
+});
+
+describe("calendar", () => {
+  it("enterprise/team opens the UI with the resolved account", async () => {
+    const { runCli } = await fresh();
+    await runCli(["calendar"]);
+    expect(runCalendarTuiMock).toHaveBeenCalledWith(ENTERPRISE);
   });
 
-  it("hidden --statusline mode: when usage-credits exist, monthlySpent syncs to usedCredits and session $ does not accumulate", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [1, 2, 3, 14] } },
-      planType: "claude_enterprise",
-      hasSpendCap: true,
+  it("Pro/Max get a notice and the UI never loads", async () => {
+    accountMock.mockReturnValue({ ...ENTERPRISE, organizationType: "claude_max" });
+    const { runCli } = await fresh();
+    expect(await runCli(["calendar"])).toBe(0);
+    expect(runCalendarTuiMock).not.toHaveBeenCalled();
+    expect(logs.join("\n")).toContain("Claude Max");
+  });
+
+  it("unknown plan: notice to start a session first — unless the hook already judged it a budget plan", async () => {
+    accountMock.mockReturnValue(null);
+    const { runCli } = await fresh();
+    await runCli(["calendar"]);
+    expect(logs.join("\n")).toContain("Plan not detected yet");
+    mkdirSync(path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "default"), {
+      recursive: true,
     });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    resolveOAuthAccessTokenMock.mockReturnValue({ token: "t", expiresAt: null });
-    getCachedExtraUsageMock.mockResolvedValue({
-      usedCredits: 196.22,
-      monthlyLimit: 650,
-      utilizationPct: 30,
-      currency: "USD",
-      spendLimitReached: false,
-      disabledReason: null,
-    });
-    // Inflated self-tracked total + a new session reporting $2.54 — must not stick.
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 198.75,
-      lastUpdated: "2026-09-14T00:00:00.000Z",
-      days: {
-        "2026-09-01": 21.98,
-        "2026-09-13": 0.15,
-      },
-      sessions: {},
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "new-session",
-        cost: { total_cost_usd: 2.54 },
-      }),
+    writeFileSync(
+      path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "default", "config.json"),
+      JSON.stringify({ monthlyCap: 1, laboralDays: {}, hasSpendCap: true, planType: "mystery" }),
     );
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as {
-      monthlySpent: number;
-      sessions: Record<string, { lastSeenCost: number }>;
+    await runCli(["calendar"]);
+    expect(runCalendarTuiMock).toHaveBeenCalledWith(null);
+  });
+});
+
+describe("init", () => {
+  it("enterprise on a TTY: statusline, Mon–Fri for this and next month, then the calendar", async () => {
+    setTty(true);
+    confirmAnswers.push(true, true, true);
+    const { runCli } = await fresh();
+    expect(await runCli(["init"])).toBe(0);
+    expect(ttl.value).toBe("1h");
+    expect(installStatuslineMock).toHaveBeenCalled();
+    const config = JSON.parse(readFileSync(configFile(), "utf8")) as {
+      laboralDays: Record<string, Record<string, Array<number>>>;
     };
-    expect(savedUsage.monthlySpent).toBe(196.22);
-    expect(savedUsage.sessions["new-session"]?.lastSeenCost).toBe(2.54);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    // todayUsage = 196.22 - sum(days before 14). Fixture only has 22.13 before → not the live Storyteq set;
-    // assert monthlySpent sync is what the print path sees.
-    expect(printed.monthlySpent).toBe(196.22);
+    expect(config.laboralDays["2026"]?.["10"]).toContain(7);
+    expect(config.laboralDays["2026"]?.["10"]).not.toContain(10); // Saturday
+    expect(config.laboralDays["2026"]?.["11"]?.[0]).toBe(2);
+    expect(runCalendarTuiMock).toHaveBeenCalledWith(ENTERPRISE);
+    expect(logs[0]).toBe("Account: dev@example.com");
   });
 
-  it("hidden --statusline mode: monthlyCap follows Anthropic's monthly_limit and is saved when it changes", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 700,
-      laboralDays: { "2026": { "9": [14] } },
-      planType: "claude_enterprise",
-      hasSpendCap: true,
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    resolveOAuthAccessTokenMock.mockReturnValue({ token: "t", expiresAt: null });
-    getCachedExtraUsageMock.mockResolvedValue({
-      usedCredits: 100,
-      monthlyLimit: 800,
-      utilizationPct: 12,
-      currency: "USD",
-      spendLimitReached: false,
-      disabledReason: null,
-    });
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 90,
-      lastUpdated: "2026-09-14T00:00:00.000Z",
-      days: {},
-      sessions: {},
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 0 } }));
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    await runCli(["--statusline"]);
-    expect(saveConfigMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({ monthlyCap: 800 }),
-    );
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.monthlyCap).toBe(800);
-    expect(printed.avgPerDay).toBe(800); // 800 left over the single laboral day
-  });
-
-  it("hidden --statusline mode: flags budgetExhausted when the daily max is 0", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [14] } },
-      planType: "claude_enterprise",
-      hasSpendCap: true,
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 700,
-      lastUpdated: "2026-09-14T00:00:00.000Z",
-      days: { "2026-09-13": 700 },
-      sessions: {},
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 0 } }));
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    await runCli(["--statusline"]);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.avgPerDay).toBe(0);
-    expect(printed.budgetExhausted).toBe(true);
-  });
-
-  it("hidden --statusline mode: without usage-credits, enterprise still accumulates session cost deltas", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 650,
-      laboralDays: { "2026": { "9": [14] } },
-      planType: "claude_enterprise",
-      hasSpendCap: true,
-    });
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_enterprise",
-    });
-    resolveOAuthAccessTokenMock.mockReturnValue(null);
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 100,
-      lastUpdated: "2026-09-14T00:00:00.000Z",
-      days: {},
-      sessions: {},
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 3 } }));
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-14T12:00:00.000Z"));
-    const { runCli } = await freshCli();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    await runCli(["--statusline"]);
-    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as { monthlySpent: number };
-    expect(savedUsage.monthlySpent).toBe(103);
-  });
-
-  it("hidden --statusline mode: a claude_pro account never accumulates monthlySpent, even on the first render", async () => {
-    resolveActiveAccountMock.mockResolvedValue({
-      email: "a@b.com",
-      accountUuid: "u1",
-      organizationType: "claude_pro",
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const savedUsage = saveUsageMock.mock.calls[0]?.[1] as { monthlySpent: number };
-    expect(savedUsage.monthlySpent).toBe(80.94); // unchanged from loadUsageMock's default
-  });
-
-  it("hidden --statusline mode: caches rate_limits percentages and echoes them in the printed JSON", async () => {
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { five_hour: { used_percentage: 46 }, seven_day: { used_percentage: 31 } },
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    expect(saveUsageMock).toHaveBeenCalledWith(
-      "default",
-      expect.objectContaining({
-        rateLimitsCache: {
-          fiveHourPct: 46,
-          sevenDayPct: 31,
-          fiveHourResetsAt: null,
-          sevenDayResetsAt: null,
-        },
-      }),
-    );
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 46,
-      sevenDayPct: 31,
-      fiveHourResetsAt: null,
-      sevenDayResetsAt: null,
-    });
-  });
-
-  it("hidden --statusline mode: caches rate_limits resets_at alongside the percentage, per-field fallback", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 80.94,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-      rateLimitsCache: {
-        fiveHourPct: 46,
-        sevenDayPct: 31,
-        fiveHourResetsAt: 1000,
-        sevenDayResetsAt: 2000,
-      },
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { five_hour: { used_percentage: 60, resets_at: 1500 } }, // seven_day absent this call
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 60,
-      sevenDayPct: 31,
-      fiveHourResetsAt: 1500,
-      sevenDayResetsAt: 2000,
-    });
-  });
-
-  it("hidden --statusline mode: rateLimitsCache falls back per-field when only one side refreshes", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 80.94,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-      rateLimitsCache: {
-        fiveHourPct: 46,
-        sevenDayPct: 31,
-        fiveHourResetsAt: null,
-        sevenDayResetsAt: null,
-      },
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { five_hour: { used_percentage: 60 } }, // seven_day absent this call
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 60,
-      sevenDayPct: 31,
-      fiveHourResetsAt: null,
-      sevenDayResetsAt: null,
-    });
-  });
-
-  it("hidden --statusline mode: rateLimitsCache falls back per-field when the other side refreshes", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 80.94,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-      rateLimitsCache: {
-        fiveHourPct: 46,
-        sevenDayPct: 31,
-        fiveHourResetsAt: null,
-        sevenDayResetsAt: null,
-      },
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { seven_day: { used_percentage: 70 } }, // five_hour absent this call
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 46,
-      sevenDayPct: 70,
-      fiveHourResetsAt: null,
-      sevenDayResetsAt: null,
-    });
-  });
-
-  it("hidden --statusline mode: rateLimitsCache field is null with no percentage and no prior cache", async () => {
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 5 },
-        rate_limits: { five_hour: {}, seven_day: {} }, // present but no used_percentage yet
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: null,
-      sevenDayPct: null,
-      fiveHourResetsAt: null,
-      sevenDayResetsAt: null,
-    });
-  });
-
-  it("hidden --statusline mode: a live turn below 100% clears a prior seeded resets_at", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 0,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-      rateLimitsCache: {
-        fiveHourPct: 100,
-        sevenDayPct: 100,
-        fiveHourResetsAt: 9999,
-        sevenDayResetsAt: 8888,
-      },
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 1 },
-        rate_limits: {
-          five_hour: { used_percentage: 40 },
-          seven_day: { used_percentage: 20 },
-        },
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 40,
-      sevenDayPct: 20,
-      fiveHourResetsAt: null,
-      sevenDayResetsAt: null,
-    });
-  });
-
-  it("hidden --statusline mode: keeps prior resets_at while still at 100% if Claude omitted it", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 0,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-      rateLimitsCache: {
-        fiveHourPct: 100,
-        sevenDayPct: 31,
-        fiveHourResetsAt: 9999,
-        sevenDayResetsAt: null,
-      },
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 1 },
-        rate_limits: { five_hour: { used_percentage: 100 } },
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 100,
-      sevenDayPct: 31,
-      fiveHourResetsAt: 9999,
-      sevenDayResetsAt: null,
-    });
-  });
-
-  it("hidden --statusline mode: at 100% with no prior resets_at stays null when Claude omitted it", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 0,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-      rateLimitsCache: {
-        fiveHourPct: 90,
-        sevenDayPct: null,
-        fiveHourResetsAt: null,
-        sevenDayResetsAt: null,
-      },
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 1 },
-        rate_limits: { five_hour: { used_percentage: 100 } },
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 100,
-      sevenDayPct: null,
-      fiveHourResetsAt: null,
-      sevenDayResetsAt: null,
-    });
-  });
-
-  it("hidden --statusline mode: a live resets_at always overwrites the prior cached one", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 0,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-      rateLimitsCache: {
-        fiveHourPct: 100,
-        sevenDayPct: 100,
-        fiveHourResetsAt: 1111,
-        sevenDayResetsAt: 2222,
-      },
-    });
-    stubStdin(
-      JSON.stringify({
-        session_id: "s1",
-        cost: { total_cost_usd: 1 },
-        rate_limits: {
-          five_hour: { used_percentage: 100, resets_at: 5555 },
-          seven_day: { used_percentage: 100, resets_at: 6666 },
-        },
-      }),
-    );
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 100,
-      sevenDayPct: 100,
-      fiveHourResetsAt: 5555,
-      sevenDayResetsAt: 6666,
-    });
-  });
-
-  it("hidden --statusline mode: echoes a prior rateLimitsCache when this call's payload has no rate_limits", async () => {
-    loadUsageMock.mockReturnValue({
-      monthlySpent: 80.94,
-      lastUpdated: "2026-09-03T00:00:00.000Z",
-      days: {},
-      sessions: {},
-      rateLimitsCache: {
-        fiveHourPct: 46,
-        sevenDayPct: 31,
-        fiveHourResetsAt: null,
-        sevenDayResetsAt: null,
-      },
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toEqual({
-      fiveHourPct: 46,
-      sevenDayPct: 31,
-      fiveHourResetsAt: null,
-      sevenDayResetsAt: null,
-    });
-  });
-
-  it("hidden --statusline mode: rateLimitsCache is null when never seen", async () => {
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 5 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.rateLimitsCache).toBeNull();
-    // No organizationType and no rate_limits → classifier leaves it unresolved, first-pass guess is true.
-    expect(printed.hasSpendCap).toBe(true);
-  });
-
-  it("hidden --statusline mode: echoes hasSpendCap:false so the statusline can show the Pro ⏱ placeholder", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 0,
-      laboralDays: {},
-      planType: "claude_pro",
-      hasSpendCap: false,
-    });
-    stubStdin(JSON.stringify({ session_id: "s1", cost: { total_cost_usd: 0 } }));
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["--statusline"]);
-    expect(code).toBe(0);
-    const printed = JSON.parse((logSpy.mock.calls[0] as [string])[0]) as Record<string, unknown>;
-    expect(printed.hasSpendCap).toBe(false);
-    expect(printed.rateLimitsCache).toBeNull();
-    expect(printed.monthlyCap).toBeUndefined();
-  });
-
-  it("runs init and skips the calendar picker when the account has no spend cap", async () => {
-    loadConfigMock.mockReturnValue({
-      monthlyCap: 0,
-      laboralDays: {},
-      planType: "claude_max",
-      hasSpendCap: false,
-    });
-    mockReadline("y");
-    stubStdin("");
-    installStatuslineMock.mockResolvedValue({
-      installed: true,
-      backupPath: null,
-      fromVersion: null,
-      toVersion: "abc12345",
-    });
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
-    const code = await runCli(["init"]);
-    expect(code).toBe(0);
-    expect(runInitMock).not.toHaveBeenCalled();
-    expect(saveConfigMock).not.toHaveBeenCalled();
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining("No spend cap on this plan (claude_max) — nothing to configure."),
-    );
-    expect(installStatuslineMock).toHaveBeenCalled();
-  });
-
-  it("runs init with no spend cap and no resolved planType, falling back to a generic label", async () => {
-    loadConfigMock.mockReturnValue({ monthlyCap: 0, laboralDays: {}, hasSpendCap: false });
-    mockReadline("n");
-    stubStdin("");
-    const { runCli } = await freshCli();
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+  it("the installer's own confirm is pre-answered (init already asked)", async () => {
+    confirmAnswers.push(true, false);
+    const { runCli } = await fresh();
     await runCli(["init"]);
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining("No spend cap on this plan (subscription) — nothing to configure."),
+    const confirm = installStatuslineMock.mock.calls[0]?.[0] as () => Promise<boolean>;
+    expect(await confirm()).toBe(true);
+  });
+
+  it("declining the statusline installs capture-only; declining days saves nothing; no TTY → no UI", async () => {
+    confirmAnswers.push(false, false);
+    const { runCli } = await fresh();
+    await runCli(["init"]);
+    expect(installCaptureOnlyMock).toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(configFile(), "utf8"))).toMatchObject({ laboralDays: {} });
+    expect(runCalendarTuiMock).not.toHaveBeenCalled();
+  });
+
+  it("months already configured → no weekday prompt", async () => {
+    mkdirSync(path.dirname(configFile()), { recursive: true });
+    writeFileSync(
+      configFile(),
+      JSON.stringify({ monthlyCap: 9, laboralDays: { "2026": { "10": [1], "11": [2] } } }),
     );
+    confirmAnswers.push(true, false, true);
+    const { runCli } = await fresh();
+    await runCli(["init"]);
+    expect(confirmAnswers).toEqual([true]); // second answer never consumed
+  });
+
+  it("December rolls the second month into January", async () => {
+    vi.setSystemTime(new Date("2026-12-15T10:00:00.000Z"));
+    confirmAnswers.push(true, false, true);
+    const { runCli } = await fresh();
+    await runCli(["init"]);
+    const config = JSON.parse(readFileSync(configFile(), "utf8")) as {
+      laboralDays: Record<string, Record<string, Array<number>>>;
+    };
+    expect(config.laboralDays["2027"]?.["1"]).toBeDefined();
+  });
+
+  it("a TTL already set is not asked again", async () => {
+    ttl.value = "5m";
+    accountMock.mockReturnValue({ ...ENTERPRISE, organizationType: "claude_pro" });
+    confirmAnswers.push(true, true);
+    const { runCli } = await fresh();
+    await runCli(["init"]);
+    expect(confirmAnswers).toEqual([true]);
+  });
+
+  it("Pro stops after the statusline", async () => {
+    accountMock.mockReturnValue({ ...ENTERPRISE, organizationType: "claude_pro" });
+    confirmAnswers.push(true);
+    const { runCli } = await fresh();
+    await runCli(["init"]);
+    expect(logs.at(-1)).toContain("No spend cap on this plan (claude_pro)");
+  });
+
+  it("no login: unknown plan message, default account, no UI", async () => {
+    accountMock.mockReturnValue(null);
+    setTty(true);
+    confirmAnswers.push(true, false);
+    const { runCli } = await fresh();
+    await runCli(["init"]);
+    expect(logs[0]).toBe("Account: default (no OAuth account)");
+    expect(logs.join("\n")).toContain("Plan not detected yet");
+    expect(runCalendarTuiMock).not.toHaveBeenCalled();
+  });
+
+  it("a plan judged subscription by the hook (unknown org) also stops", async () => {
+    accountMock.mockReturnValue({ ...ENTERPRISE, organizationType: null });
+    mkdirSync(path.dirname(configFile()), { recursive: true });
+    writeFileSync(
+      configFile(),
+      JSON.stringify({ monthlyCap: 1, laboralDays: {}, hasSpendCap: false }),
+    );
+    confirmAnswers.push(true);
+    const { runCli } = await fresh();
+    await runCli(["init"]);
+    expect(logs.at(-1)).toContain("No spend cap on this plan (subscription)");
   });
 });

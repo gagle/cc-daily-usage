@@ -1,45 +1,24 @@
 # docs
 
-Check this folder before reading source — it is kept current and cheaper to
-read than re-deriving behavior from `src/`. `cc-daily-usage` is a CLI +
-statusline + Ink calendar that tracks Claude Code spend/usage.
+Read this folder before the source — it is kept current by the drift gate
+(`scripts/doc-drift.mjs`) and is cheaper than re-deriving behavior from `src/`.
+`cc-daily-usage` is a zero-dependency CLI + statusline + terminal calendar that
+keeps Claude Code spend predictable.
 
-## [architecture.md](./architecture.md)
+| Doc                                                          | Read it for                                                                    | Keywords                               |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------ | -------------------------------------- |
+| [architecture.md](./architecture.md)                         | module map, render/refresher/init/calendar flows, multi-account, `hasSpendCap` | data flow, shim, refresher, accountKey |
+| [time-model.md](./time-model.md)                             | local days vs the UTC budget period, month-edge behaviour per zone, v1 upgrade | timezone, rollover, periodFrozen       |
+| [calculations.md](./calculations.md)                         | every formula in `src/calc.ts`                                                 | max per day, pace, ledger, capture     |
+| [prompt-cache.md](./prompt-cache.md)                         | how prompt caching is billed and how the next-prompt cost is predicted         | cache miss, TTL, cold cache            |
+| [data-model.md](./data-model.md)                             | files on disk, every persisted field, managed markers                          | schema, api-cache, uninstall           |
+| [history-and-feed.md](./history-and-feed.md)                 | limit history, burn rate, $ per 1%, session map, `feed.json` for the mod       | runway, feed, cost-tracker             |
+| [transcript-index.md](./transcript-index.md)                 | transcript reader, rollups, `report`, Node-free shared modules                 | transcripts, subagent, report          |
+| [coach.md](./coach.md)                                       | coaching rules, `insights`, snooze, the coach part                             | advice, findings, savings              |
+| [live.md](./live.md)                                         | `live` meters, the advisor (scorecard, do now), `report --session` burn-up     | real time, advisor, sparkline          |
+| [use-cases.md](./use-cases.md)                               | each operation end-to-end, calendar keys, statusline segments                  | init, calendar, segments               |
+| [performance.md](./performance.md)                           | measured timings and what keeps the hot paths fast                             | latency, startup                       |
+| [testing-and-verification.md](./testing-and-verification.md) | coverage policy, commands, test layout, docs gate, CI                          | vitest, e2e, CI                        |
 
-Module map (`account.ts` → `anthropic-usage.ts` → `calc.ts` → `config.ts` →
-`cli.ts` → `calendar-tui.ts`, plus the statusline installer and `init-server.ts`),
-the statusline-hook and `init`/`statusline` data-flow diagrams, the multi-account
-model (`accountKey()`, per-account directories, legacy migration), the
-`hasSpendCap` branch that gates all dollar-cap math, and the loopback-server
-security model. Keywords: module map, data flow, multi-account, organizationType,
-hasSpendCap, loopback server.
-
-## [calculations.md](./calculations.md)
-
-Every formula in `calc.ts`, verbatim, one heading per function:
-`rolloverIfNeeded`, `computeAvgPerDay`, `computeToday`, `captureSessionCost`,
-`applyLedgerReading`, `colorForPct`, `pruneStaleSessions`. Includes
-the derived (not stored) daily max. Keywords: math, formula,
-monthlyCap, monthlySpent, rollover, avgPerDay, session cost delta, ledger.
-
-## [data-model.md](./data-model.md)
-
-Field-by-field reference for `Config`, `UsageState`, `SessionCost`,
-`ExtraUsageCacheEntry`, `RateLimitsCache`; the on-disk
-`~/.config/cc-daily-usage/accounts/<key>/{config,usage}.json` layout; and the
-statusline installer's managed-file markers. Keywords: interface, schema,
-UsageState, Config, on-disk layout, managed marker, statusline.mjs.
-
-## [use-cases.md](./use-cases.md)
-
-What each CLI operation does end-to-end (`init`, `statusline`, `calendar`, the
-hidden `--statusline` hook mode), calendar keybindings and the day-edit "pool
-must balance" validation, and `assets/statusline.mjs`'s segment-by-segment
-rendering with every guard that hides a segment. Keywords: CLI, init, calendar,
-keybindings, statusline segments, hook mode.
-
-## [testing-and-verification.md](./testing-and-verification.md)
-
-100% coverage policy, the `/* v8 ignore */` convention, the exact verification
-command sequence, the exemplar test file, and how CI mirrors it. Keywords:
-coverage, vitest, verification, CI, lint, typecheck, build.
+Decisions and the manual test plan: `adrs/README.md`. Vendored Claude Code
+docs (reference only, not maintained here): `docs/claude-code-upstream/`.

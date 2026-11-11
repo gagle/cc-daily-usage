@@ -1,144 +1,113 @@
 # Calculations
 
-Every formula in `src/calc.ts`, verbatim. `calc.ts` mutates its `UsageState`
-argument in place — functions here never return a new state object, they modify
-the one passed in. Read this instead of re-deriving formulas from source.
+Every formula in `src/calc.ts`. Functions mutate the `UsageState` they get.
+Day vs period clocks: `docs/time-model.md`.
 
-## `rolloverIfNeeded`
-
-Walks UTC days from `usage.lastUpdated` to now, one day at a time:
-
-- Freezes each completed day into `usage.days[iso] = max(0, monthlySpent - sumOfDaysBeforeInMonth)`.
-- Resets `monthlySpent = 0` when a month boundary is crossed, and sets
-  `ledgerBaseline` to the last ledger reading still in `extraUsageCache` (0 when none).
-
-It does not store any daily max. That number is derived (next section).
-
-## `computeAvgPerDay`
+## `rolloverIfNeeded(usage, now, lastLedgerReading)`
 
 ```
-daysBefore = sum of usage.days in today's month with date < today
-remaining  = laboral days in this month with day >= today
-remaining === 0 -> null
-otherwise       -> max(0, ceil(((monthlyCap - daysBefore) / remaining) * 100) / 100)
+pending = max(0, monthlySpent - periodFrozen)
+midnight = first local midnight after lastUpdated
+edge     = first UTC month start after lastUpdated
+if midnight <= now and midnight <= edge:
+    days[localDate(lastUpdated)] += pending ; periodFrozen += pending
+if edge <= now:
+    if pending > 0: days[localDate(edge - 1ms)] += pending
+    monthlySpent = 0 ; periodFrozen = 0 ; ledgerBaseline = lastLedgerReading ?? 0
+if either boundary crossed: lastUpdated = now
 ```
 
-Rounds up to the nearest cent. Derived on every render, never frozen: both inputs
-are fixed for the whole UTC day (today's own spend is not in `daysBefore`), so the
-value is stable through the day. It follows a `monthlyCap` change at once, and a
-weekend's spend (frozen into `days`) lowers the next laboral day's max.
-`0` means the budget is spent (`budgetExhausted` in the statusline JSON).
+## `computeAvgPerDay` (today's max)
+
+```
+period    = UTC month of now
+remaining = laboral days of period with day >= local today
+            (local month before period → all; after → none)
+max       = remaining == 0 ? null : max(0, ceil_cent((monthlyCap - periodFrozen) / remaining))
+```
+
+`0` = budget exhausted (`(over)` in red). `null` = no laboral day left in the
+period. Today's own spend is excluded, so the max is stable through the day.
+Removing a laboral day re-splits the same remainder evenly over the days left;
+a cap change applies at once.
 
 ## `computeToday`
 
 ```
-todayUsage     = max(0, monthlySpent - sumOfDaysBeforeInMonth(today))
-safeMonthTotal = avgPerDay === null ? null : daysBefore + avgPerDay
-todayUsedPct   = avgPerDay in {null, 0} ? null : todayUsage / avgPerDay
-monthUsedPct   = monthlyCap === 0 ? 0 : monthlySpent / monthlyCap
+todayUsage   = days[localToday] ?? 0  +  pending      (edge-day booking + live)
+todayUsedPct = max in {null, 0} ? null : todayUsage / max
+safeMonthTotal = max == null ? null : periodFrozen + max
+monthUsedPct = monthlyCap == 0 ? 0 : monthlySpent / monthlyCap
+leftThisMonth = max(0, monthlyCap - monthlySpent)
+monthDay0AvgPerDay = ceil_cent(monthlyCap / laboral days of period)   ("Day-1 max")
+realAvgPerDay = round_cent(monthlySpent / laboral days reached)      (null when 0)
 ```
-
-Also returns `paceLabel` (see below) and `monthDay0AvgPerDay`.
-Laboral days show `$today/$avg (pct)`; `avgPerDay === 0` shows `$today/$0.00 (over)` in red;
-non-laboral days show `$today` only (see `isLaboralDay` / cli.ts); `monthlySpent`
-still includes off-day spend.
 
 ## `paceLabel`
 
 ```
-null            -> null
-pct <= 0.25     -> "Coast"
-pct <= 0.50     -> "Ahead"
-pct <= 0.75     -> "Steady"
-pct <= 1.00     -> "On pace"
-pct <= 1.50     -> "Hot"
-pct <= 2.00     -> "Over"
-pct >  2.00     -> "Burn"
+null → null · ≤0.25 Coast · ≤0.50 Ahead · ≤0.75 Steady · ≤1.00 On pace
+≤1.50 Hot · ≤2.00 Over · >2.00 Burn
 ```
-
-Compares `todayUsage` to **today’s** `avgPerDay` (not the month day-1 max).
-
-## Month day-1 max
-
-Equal-split plan for the month, derived live (a cap change re-bases it at once):
-
-```
-monthDay0AvgPerDay = monthlyCap / laboralDays.length   (ceil to cent; null with no laboral days)
-```
-
-The field name keeps the old `Day0` spelling; the TUI labels it "Day-1 max".
-
-## `computeRealAvgPerDay`
-
-```
-elapsedLaboral = count of laboral days with day <= today (UTC)
-elapsed === 0 -> null
-otherwise     -> round_cent(monthlySpent / elapsedLaboral)
-```
-
-Actual burn per work day so far. Off-day spend is in `monthlySpent` but does **not**
-grow the divisor, so weekend burn raises real avg. Distinct from `computeAvgPerDay`
-(remaining budget ÷ remaining laboral days).
 
 ## `captureSessionCost`
 
-Per-session delta capture, keyed by Claude Code's own session id:
+- delta = `currentCost - lastSeenCost`; a lower cost is a reset (`/clear`) and counts in full.
+- `accumulate` (dollar-cap plan and no ledger) gates whether the delta joins `monthlySpent`; the baseline always advances.
+- `lastSeenAt` refreshes when the cost changed or at most hourly (fewer writes); `cacheMissUsd` is kept.
+- every positive delta also goes to `addApiEquivalent`, whatever the plan.
 
-- `currentCost < lastSeenCost` is treated as a **fresh baseline**, not a negative
-  delta — this happens when Claude Code itself resets a session's reported cost
-  (e.g. a new session reusing an id, or a mid-session model/account switch).
-- The `accumulate` flag gates whether the delta actually folds into
-  `monthlySpent`. Enterprise with a live Anthropic **usage-credits** ledger sets
-  `accumulate: false` and instead calls `applyLedgerReading` (see
-  `cli.ts`) — a new session id reporting a full `cost.total_cost_usd` must not
-  invent phantom today-spend on top of the ledger. When credits are unavailable,
-  session deltas still accumulate for dollar-cap accounts.
+## `addApiEquivalent`, `addMissCauses`
+
+- `apiEqDays[localToday] += delta`, `apiEqTotal += delta`. API-equivalent, not a bill: on Pro/Max it is
+  what the same tokens cost on the API. Only sessions that render this statusline count.
+- `addMissCauses(prior, current, missUsdDelta)`: new count per cause = current − prior (all of current
+  when any count went down, a reset). `missUsdDelta` splits over the new counts; $ with no new count
+  goes to `unknown`. The caller stores the returned counts as the session's `missCounts`.
+- Both keep `DAY_HISTORY_DAYS` (62) local days; older keys drop when a new day key starts.
 
 ## `applyLedgerReading`
 
-Folds Anthropic's cumulative `extra_usage.used_credits` (fetched via
-`/api/oauth/usage`, see `anthropic-usage.ts`) into `monthlySpent`:
-
 ```
-baseline     = usedCredits < ledgerBaseline ? 0 : ledgerBaseline
+baseline = usedCredits < ledgerBaseline ? 0 : ledgerBaseline   (reset detected)
 monthlySpent = usedCredits - baseline
+if periodFrozen > monthlySpent:                                 (phantom session spend)
+    scale this period's past local days by monthlySpent / periodFrozen
+    periodFrozen = monthlySpent
 ```
 
-A reading below the baseline means the ledger reset, so the baseline drops to 0.
-Assumes the ledger resets on the UTC calendar month. If its cycle differs the budget
-month is wrong (`# ponytail` note in `calc.ts`).
+The render passes `usedCredits + addSinceLedger(...)`, so the total moves
+between readings and while the refresher fails.
 
-Reconciliation: the ledger is the truth. If this month's frozen `days` before today sum
-to more than the new `monthlySpent`, they were over-counted (phantom session spend) and
-would pin `todayUsage` at 0. They are scaled by `monthlySpent / frozenSum`. Other months
-are untouched. The proportional split is a guess at which days were inflated
-(`# ponytail` note in `calc.ts`).
+## `addSinceLedger(usage, readAt, sessionId, currentCost)`
 
-## `colorForPct`
+```
+sinceLedger.readAt != readAt  →  sinceLedger = { readAt, usd: 0 }   (new reading took it over)
+prior session known and currentCost > lastSeenCost  →  usd += currentCost - lastSeenCost
+return usd
+```
 
-5-bucket color thresholds used for both the today and month usage bars:
+A new or reset session adds nothing (phantom spend). Runs before
+`captureSessionCost` moves `lastSeenCost`.
 
-| `pct`         | Bucket       |
-| ------------- | ------------ |
-| `< 0.25`      | green (safe) |
-| `0.25 – 0.49` | yellow-green |
-| `0.5 – 0.74`  | yellow       |
-| `0.75 – 0.99` | orange       |
-| `>= 1`        | red (over)   |
+`# ponytail` notes in `src/calc.ts`: the ledger is assumed to reset on the UTC
+month; the proportional rescale is a guess at which days were inflated.
 
-This exact table is duplicated as `ccColor()` in `assets/statusline.mjs` (the
-installed script can't import from `calc.ts` — it runs standalone). If you change
-one, change the other.
+## `upgradeUsage`
 
-## `pruneStaleSessions`
+v1 → v2: keeps day keys, derives `periodFrozen` = v1 "days before
+lastUpdated's UTC day in its UTC month", repairs missing fields, clamps
+`lastUpdated` to now. `apiEqDays`, `apiEqTotal`, `missCauses` default to
+empty/0 without a schema bump. `freshUsage(now)` seeds new files.
 
-Drops any entry from `usage.sessions` whose `lastSeenAt` is more than 2 days old
-— keeps the per-session delta-capture map from growing unbounded across long-lived
-account histories.
+## `classifyHasSpendCap`, `pruneStaleSessions`, `colorForPct`
 
-## See also
+- enterprise/team → `true`, pro/max → `false`, else `undefined`.
+- sessions untouched for 2 days are dropped (object kept when nothing changes).
+- color buckets: `<0.25` green · `<0.5` yellow-green · `<0.75` yellow · `<1` orange · `≥1` red. `ccColor()` in `src/statusline-render.ts` holds the same buckets as ANSI triplets.
 
-- `docs/data-model.md` for the exact shape of `UsageState`/`Config` these functions
-  read and mutate.
-- `docs/architecture.md` for the `hasSpendCap` gate that decides whether any of
-  this runs at all for a given account.
+## `workDayOf(config)`
+
+The 7-day runway's work-day test (`docs/history-and-feed.md`): null (every
+day, clock time) when `laboralDays` is empty; else a local day counts when its
+month lists it, and every day of a month with no list counts.

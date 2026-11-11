@@ -8,11 +8,24 @@
 
 # cc-daily-usage
 
-Claude Code spend/usage tracker: CLI + statusline + Ink calendar.
+Claude Code spend/usage tracker: CLI + statusline + terminal calendar. Zero runtime dependencies.
 
 ## Load on demand
 
 See `.claude/references/index.md` for pointers into `docs/` — load only the file relevant to the current task.
+
+## Docs and ADRs
+
+- `docs/` describes the code as it is now, for an LLM to read instead of `src/`. `adrs/` records decisions and is append-only (a changed decision is a new ADR); the manual test plan is `adrs/2026-10-10-manual-test-plan.md`.
+- The doc ↔ source map lives in `scripts/doc-drift.mjs` (`DOC_MAP`) and nowhere else. `pnpm docs:check` is a CI gate: backticked repo paths must resolve, no `:line` citations, every doc mapped or exempt, every source area documented.
+- `pnpm docs:drift` lists docs whose sources changed in the diff; the Stop hook runs it once per session. Correct what is now false in the same change; if behaviour did not change, say so and stop.
+- Never cite a line number; never state a number the code owns (test counts, file counts).
+- A user-facing change adds or updates its row in the manual test plan.
+
+## Performance rules
+
+- The statusline render path never touches the network and spawns nothing but the detached refresher. Branch comes from `.git/HEAD`.
+- No UI framework in the calendar; operations lazy-import their modules. Measure with `scripts/bench.sh` against `docs/performance.md`.
 
 <!-- code-review-graph MCP tools -->
 

@@ -1,56 +1,127 @@
+import {
+  compareYearMonth,
+  localDateKey,
+  localYearMonth,
+  nextLocalMidnight,
+  nextUtcMonthStart,
+  utcPeriod,
+  type YearMonth,
+  yearMonthKey,
+} from "./clock.js";
 import type { ComputedUsage } from "./interfaces/calc.interface.js";
 import type { Config, UsageState } from "./interfaces/config.interface.js";
+
+export const USAGE_SCHEMA_VERSION = 2;
+
+const ONE_HOUR_MS = 60 * 60 * 1000;
+const TWO_DAYS_MS = 48 * ONE_HOUR_MS;
+/** Local days of API-equivalent and miss-cause history kept: two months covers "month to date" and 30 d. */
+export const DAY_HISTORY_DAYS = 62;
 
 export function getLaboralDays(config: Config, year: number, month: number): ReadonlyArray<number> {
   return config.laboralDays[String(year)]?.[String(month)] ?? [];
 }
 
-/** True when `date`'s UTC day-of-month is listed in that month's laboralDays. */
+/** True when `date`'s LOCAL day-of-month is listed in that local month's laboralDays. */
 export function isLaboralDay(config: Config, date: Date): boolean {
-  const days = getLaboralDays(config, date.getUTCFullYear(), date.getUTCMonth() + 1);
-  return days.includes(date.getUTCDate());
+  const { year, month } = localYearMonth(date);
+  return getLaboralDays(config, year, month).includes(date.getDate());
+}
+
+/** The 7-day runway's work-day test: the local month's laboralDays, or null (every day) for a month with
+ * none set (Pro/Max users never set them). */
+export function workDayOf(config: Config): ((date: Date) => boolean) | null {
+  if (Object.keys(config.laboralDays).length === 0) return null;
+  return (date) => {
+    const { year, month } = localYearMonth(date);
+    const days = getLaboralDays(config, year, month);
+    return days.length === 0 || days.includes(date.getDate());
+  };
 }
 
 export function utcDateString(date: Date): string {
   return date.toISOString().slice(0, 10); // "YYYY-MM-DD"
 }
 
-function addUtcDays(date: Date, days: number): Date {
-  const next = new Date(date.getTime());
-  next.setUTCDate(next.getUTCDate() + days);
-  return next;
-}
-
-// Scoped to isoDate's own calendar month: monthlySpent resets to 0 at each month boundary (see
-// rolloverIfNeeded below), so summing across a month boundary would double-count/underflow.
-function sumDaysBeforeInMonth(usage: UsageState, isoDate: string): number {
-  const monthPrefix = isoDate.slice(0, 7); // "YYYY-MM"
-  return Object.entries(usage.days)
-    .filter(([day]) => day.startsWith(monthPrefix) && day < isoDate)
-    .reduce((total, [, amount]) => total + amount, 0);
-}
-
-/** Days in `days` that are `>= fromDay` (inclusive) — Excel's COUNTIF(">="&DAY(TODAY())) port. */
-function remainingLaboralDaysCount(days: ReadonlyArray<number>, fromDay: number): number {
-  return days.filter((day) => day >= fromDay).length;
-}
-
-/** Laboral days in `days` with `day <= throughDay` (inclusive) — elapsed work days so far this month. */
-function elapsedLaboralDaysCount(days: ReadonlyArray<number>, throughDay: number): number {
-  return days.filter((day) => day <= throughDay).length;
+/** A brand-new usage file. `lastUpdated = now` so the first rollover has nothing to walk. */
+export function freshUsage(now: Date): UsageState {
+  return {
+    schemaVersion: USAGE_SCHEMA_VERSION,
+    monthlySpent: 0,
+    periodFrozen: 0,
+    lastUpdated: now.toISOString(),
+    days: {},
+    sessions: {},
+    apiEqDays: {},
+    apiEqTotal: 0,
+    missCauses: {},
+  };
 }
 
 /**
- * Actual $/laboral-day so far: monthlySpent ÷ count of laboral days with day ≤ today.
+ * Brings a parsed usage.json up to the current schema, in place. v1 files (UTC day keys, no periodFrozen)
+ * keep their day keys as-is — at most one day of drift on old history, see the two-clock ADR — and
+ * periodFrozen is derived the way v1 computed "days before today". A missing/garbled lastUpdated becomes
+ * `now`, so a corrupt timestamp can never trigger a walk from 1970.
+ */
+export function upgradeUsage(usage: Partial<UsageState>, now: Date): UsageState {
+  const parsed = new Date(usage.lastUpdated ?? Number.NaN);
+  const valid = !Number.isNaN(parsed.getTime()) && parsed.getTime() <= now.getTime();
+  const lastUpdated = valid ? parsed : now;
+  usage.lastUpdated = lastUpdated.toISOString();
+  const days = (usage.days ??= {});
+  usage.sessions ??= {};
+  usage.apiEqDays ??= {};
+  usage.missCauses ??= {};
+  if (typeof usage.apiEqTotal !== "number" || !Number.isFinite(usage.apiEqTotal)) {
+    usage.apiEqTotal = 0;
+  }
+  if (typeof usage.monthlySpent !== "number" || !Number.isFinite(usage.monthlySpent)) {
+    usage.monthlySpent = 0;
+  }
+  if (typeof usage.periodFrozen !== "number") {
+    const prefix = yearMonthKey(utcPeriod(lastUpdated));
+    const before = utcDateString(lastUpdated);
+    usage.periodFrozen = Object.entries(days)
+      .filter(([day]) => day.startsWith(prefix) && day < before)
+      .reduce((total, [, amount]) => total + amount, 0);
+  }
+  usage.schemaVersion = USAGE_SCHEMA_VERSION;
+  return usage as UsageState;
+}
+
+/** Laboral days of `period` that are still ahead of (or are) local today. Local today before the period
+ * (UTC− zones in the hours after the UTC edge) → the whole month; after it (UTC+ zones in the hours
+ * before the UTC edge) → none. */
+function remainingLaboralDaysCount(config: Config, period: YearMonth, now: Date): number {
+  const days = getLaboralDays(config, period.year, period.month);
+  const relation = compareYearMonth(localYearMonth(now), period);
+  if (relation < 0) return days.length;
+  if (relation > 0) return 0;
+  const today = now.getDate();
+  return days.filter((day) => day >= today).length;
+}
+
+/** Laboral days of `period` already reached (day <= local today), mirror of the above. */
+function elapsedLaboralDaysCount(config: Config, period: YearMonth, now: Date): number {
+  const days = getLaboralDays(config, period.year, period.month);
+  const relation = compareYearMonth(localYearMonth(now), period);
+  if (relation < 0) return 0;
+  if (relation > 0) return days.length;
+  const today = now.getDate();
+  return days.filter((day) => day <= today).length;
+}
+
+/**
+ * Actual $/laboral-day so far: monthlySpent ÷ laboral days reached in the current budget period.
  * Distinct from computeAvgPerDay (remaining budget ÷ remaining laboral days).
  */
 export function computeRealAvgPerDay(
   config: Config,
   monthlySpent: number,
-  nowUtc: Date,
+  now: Date,
 ): number | null {
-  const laboralDays = getLaboralDays(config, nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1);
-  const elapsed = elapsedLaboralDaysCount(laboralDays, nowUtc.getUTCDate());
+  const elapsed = elapsedLaboralDaysCount(config, utcPeriod(now), now);
   if (elapsed === 0) return null;
   return Math.round((monthlySpent / elapsed) * 100) / 100;
 }
@@ -62,53 +133,65 @@ function splitCap(cap: number, spent: number, remaining: number): number | null 
 }
 
 /**
- * Today's max: (monthlyCap - sum of days before today) ÷ laboral days from today onward. Derived, never
- * stored: both inputs are fixed for the whole UTC day (today's own spend is excluded), so it is stable
- * through the day, follows a monthlyCap change at once, and a weekend's spend lowers the next laboral day.
- * 0 means the budget is exhausted; null means no laboral day remains.
+ * Today's max: (monthlyCap - spend frozen before today in this period) ÷ laboral days from today onward.
+ * Derived, never stored: both inputs are fixed for the whole local day (today's own spend is excluded), so it
+ * is stable through the day, follows a monthlyCap change at once, and an off-day's spend lowers the next
+ * laboral day. Removing a laboral day re-splits the same remainder over fewer days. 0 = budget exhausted;
+ * null = no laboral day remains in this period.
  */
-export function computeAvgPerDay(config: Config, usage: UsageState, nowUtc: Date): number | null {
-  const laboralDays = getLaboralDays(config, nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1);
-  const remaining = remainingLaboralDaysCount(laboralDays, nowUtc.getUTCDate());
-  return splitCap(config.monthlyCap, sumDaysBeforeInMonth(usage, utcDateString(nowUtc)), remaining);
+export function computeAvgPerDay(config: Config, usage: UsageState, now: Date): number | null {
+  const remaining = remainingLaboralDaysCount(config, utcPeriod(now), now);
+  return splitCap(config.monthlyCap, usage.periodFrozen, remaining);
+}
+
+/** Spend captured since the last freeze — the live "today" portion of this period. */
+function pendingSpend(usage: UsageState): number {
+  return Math.max(0, usage.monthlySpent - usage.periodFrozen);
+}
+
+function addToDay(usage: UsageState, day: string, amount: number): void {
+  usage.days[day] = (usage.days[day] ?? 0) + amount;
 }
 
 /**
- * Walks every UTC calendar date from usage.lastUpdated's own day up to (not including) nowUtc's date,
- * freezing each day's final derived amount into usage.days — including lastUpdated's day itself, since that
- * day's spend is fully settled by the time nowUtc rolls onto a new date (its own capture already happened
- * before this call). Every day gets frozen, laboral or not — laboral-day membership only ever affects the
- * avgPerDay pace math (getLaboralDays/remainingLaboralDaysCount above), never which days get real spend
- * recorded. Also resets monthlySpent to 0 the moment the walk crosses into a new calendar month — Claude
- * Code's own usage windows reset monthly, so ours must too; the outgoing month's last day is frozen first
- * (using its pre-reset total), so nothing is lost. At that crossing ledgerBaseline takes the last ledger
- * reading, so a ledger that did not reset still yields this month's spend (see applyLedgerReading).
- * Idempotent: calling it again the same UTC day is a no-op beyond refreshing lastUpdated's timestamp.
+ * Settles every boundary between usage.lastUpdated and now. O(1): all spend since the last freeze was
+ * captured at or before lastUpdated, so only the FIRST local midnight and the LATEST UTC month edge can
+ * carry money; the days in between got no captures and stay absent ("—" in the calendar, not a fake $0).
+ * - Local midnight: pending spend freezes into lastUpdated's local day and counts as frozen in the period.
+ * - UTC month edge (ledger reset): pending spend that the midnight did not take is booked on the local day
+ *   containing the edge, then monthlySpent/periodFrozen reset and ledgerBaseline takes the last ledger
+ *   reading (so a ledger that did not reset still yields this period's spend — see applyLedgerReading).
+ * When both fall on the same instant (a UTC machine) the day freezes first, so it belongs to the old period.
+ * Idempotent within a local day.
  */
-export function rolloverIfNeeded(usage: UsageState, nowUtc: Date): UsageState {
-  const lastDate = new Date(usage.lastUpdated);
-  const today = utcDateString(nowUtc);
+export function rolloverIfNeeded(
+  usage: UsageState,
+  now: Date,
+  lastLedgerReading: number | null,
+): UsageState {
+  const last = new Date(usage.lastUpdated);
+  const midnight = nextLocalMidnight(last);
+  const edge = nextUtcMonthStart(last);
 
-  if (utcDateString(lastDate) !== today) {
-    let cursor = lastDate;
-    while (utcDateString(cursor) < today) {
-      const isoCursor = utcDateString(cursor);
-      if (usage.days[isoCursor] === undefined) {
-        usage.days[isoCursor] = Math.max(
-          0,
-          usage.monthlySpent - sumDaysBeforeInMonth(usage, isoCursor),
-        );
-      }
-      const next = addUtcDays(cursor, 1);
-      if (next.getUTCMonth() !== cursor.getUTCMonth()) {
-        usage.monthlySpent = 0;
-        usage.ledgerBaseline = usage.extraUsageCache?.data?.usedCredits ?? 0;
-      }
-      cursor = next;
-    }
+  const crossedMidnight = midnight.getTime() <= now.getTime();
+  const crossedEdge = edge.getTime() <= now.getTime();
+  if (crossedMidnight && midnight.getTime() <= edge.getTime()) {
+    const pending = pendingSpend(usage);
+    addToDay(usage, localDateKey(last), pending);
+    usage.periodFrozen += pending;
+  }
+  if (crossedEdge) {
+    const pending = pendingSpend(usage);
+    if (pending > 0) addToDay(usage, localDateKey(new Date(edge.getTime() - 1)), pending);
+    usage.monthlySpent = 0;
+    usage.periodFrozen = 0;
+    usage.ledgerBaseline = lastLedgerReading ?? 0;
+    // A midnight after the edge (UTC− zones) has nothing left to freeze: pending is now 0.
   }
 
-  usage.lastUpdated = nowUtc.toISOString();
+  // Only a crossed boundary moves lastUpdated: within one local day and period every later call computes the
+  // same result from the older value, and leaving it alone lets saveUsage skip no-op writes.
+  if (crossedMidnight || crossedEdge) usage.lastUpdated = now.toISOString();
   return usage;
 }
 
@@ -116,37 +199,53 @@ export function rolloverIfNeeded(usage: UsageState, nowUtc: Date): UsageState {
  * Folds Anthropic's cumulative `extra_usage.used_credits` into monthlySpent. A reading below
  * ledgerBaseline means the ledger reset (new billing month), so the baseline drops to 0.
  * # ponytail: assumes the ledger resets on the UTC calendar month; if its cycle differs the budget month is
- * wrong — fix by moving the month edge to the observed reset date.
+ * wrong — fix by moving the period edge to the observed reset date.
  */
-export function applyLedgerReading(
-  usage: UsageState,
-  usedCredits: number,
-  nowUtc: Date,
-): UsageState {
+export function applyLedgerReading(usage: UsageState, usedCredits: number, now: Date): UsageState {
   const baseline = usedCredits < (usage.ledgerBaseline ?? 0) ? 0 : (usage.ledgerBaseline ?? 0);
   usage.ledgerBaseline = baseline;
   usage.monthlySpent = usedCredits - baseline;
 
   // The ledger is the truth: frozen days summing above it were over-counted (phantom session spend), and
   // would pin todayUsage at 0 until the ledger caught up. Scale them down proportionally to fit.
-  // # ponytail: proportional split is a guess at which days were inflated; exact fix needs a per-day ledger reading.
-  const today = utcDateString(nowUtc);
-  const frozenSum = sumDaysBeforeInMonth(usage, today);
-  if (frozenSum > usage.monthlySpent) {
-    const factor = usage.monthlySpent / frozenSum;
-    const monthPrefix = today.slice(0, 7);
-    usage.days = Object.fromEntries(
-      Object.entries(usage.days).map(([day, amount]) => [
-        day,
-        day.startsWith(monthPrefix) && day < today ? amount * factor : amount,
-      ]),
-    );
+  // # ponytail: proportional split is a guess at which days were inflated, and only this period's local
+  // month is rescaled (an edge day in the neighbour month keeps its amount); exact fix needs a per-day ledger.
+  if (usage.periodFrozen > usage.monthlySpent) {
+    const factor = usage.monthlySpent / usage.periodFrozen; // periodFrozen > monthlySpent ≥ 0
+    const prefix = yearMonthKey(utcPeriod(now));
+    const today = localDateKey(now);
+    for (const [day, amount] of Object.entries(usage.days)) {
+      if (day.startsWith(prefix) && day < today) usage.days[day] = amount * factor;
+    }
+    usage.periodFrozen = usage.monthlySpent;
   }
   return usage;
 }
 
 /**
- * Per-session capture (§18-19): the delta since this session id was last seen is folded into monthlySpent.
+ * Session spend seen after the ledger reading taken at `readAt`, so the month total moves between readings
+ * (and while the refresher fails). A new reading restarts the sum at 0: the ledger now holds that spend.
+ * Only a known session growing counts — a new or reset session's full cost is the phantom-spend case the
+ * ledger exists to avoid. Returns the sum to add to the reading.
+ * # ponytail: spend between the reading and the session's next render counts twice for one reading; fix
+ * with per-session cost at readAt.
+ */
+export function addSinceLedger(
+  usage: UsageState,
+  readAt: number,
+  sessionId: string,
+  currentCost: number,
+): number {
+  if (usage.sinceLedger?.readAt !== readAt) usage.sinceLedger = { readAt, usd: 0 };
+  const prior = usage.sessions[sessionId];
+  if (prior && currentCost > prior.lastSeenCost) {
+    usage.sinceLedger.usd += currentCost - prior.lastSeenCost;
+  }
+  return usage.sinceLedger.usd;
+}
+
+/**
+ * Per-session capture: the delta since this session id was last seen is folded into monthlySpent.
  * A currentCost lower than the prior lastSeenCost means the session reset (e.g. `/clear`), treated as a
  * fresh baseline rather than a negative delta. Concurrently-running sessions never corrupt each other's
  * totals because each session id has its own independent lastSeenCost.
@@ -160,16 +259,107 @@ export function captureSessionCost(
   usage: UsageState,
   sessionId: string,
   currentCost: number,
-  nowUtc: Date,
+  now: Date,
   accumulate: boolean,
 ): UsageState {
   const prior = usage.sessions[sessionId];
   const delta =
     prior && currentCost >= prior.lastSeenCost ? currentCost - prior.lastSeenCost : currentCost;
   if (accumulate) usage.monthlySpent += Math.max(0, delta);
-  usage.sessions[sessionId] = { lastSeenCost: currentCost, lastSeenAt: nowUtc.toISOString() };
-  pruneStaleSessions(usage, nowUtc);
+  if (delta > 0) addApiEquivalent(usage, delta, now);
+  // lastSeenAt only feeds the 2-day prune, so an unchanged cost refreshes it at most hourly (fewer writes).
+  const touchDue = !prior || now.getTime() - new Date(prior.lastSeenAt).getTime() >= ONE_HOUR_MS;
+  if (!prior || prior.lastSeenCost !== currentCost || touchDue) {
+    usage.sessions[sessionId] = {
+      ...prior,
+      lastSeenCost: currentCost,
+      lastSeenAt: now.toISOString(),
+    };
+  }
+  pruneStaleSessions(usage, now);
   return usage;
+}
+
+/**
+ * $ of the prompt being processed (Claude Code's `prompt_id`), all its API requests and subagents included:
+ * the session cost now minus the cost before the prompt was first seen. Call after captureSessionCost, with
+ * the session's lastSeenCost from before it. Null without a prompt id.
+ */
+export function trackPrompt(
+  usage: UsageState,
+  sessionId: string,
+  promptId: string | undefined,
+  costBefore: number,
+  currentCost: number,
+): number | null {
+  const session = usage.sessions[sessionId];
+  if (!promptId || !session) return null;
+  if (session.promptId !== promptId) {
+    usage.sessions[sessionId] = { ...session, promptId, promptStartCost: costBefore };
+  }
+  const start = usage.sessions[sessionId]?.promptStartCost ?? 0;
+  // A lower cost than at the prompt's start is a session reset: all of it is this prompt's.
+  return currentCost >= start ? currentCost - start : currentCost;
+}
+
+/** `record` without the local day keys older than DAY_HISTORY_DAYS before `now`'s local day. */
+function dropOldDays<T>(record: Record<string, T>, now: Date): Record<string, T> {
+  const cutoff = localDateKey(
+    new Date(now.getFullYear(), now.getMonth(), now.getDate() - DAY_HISTORY_DAYS),
+  );
+  return Object.fromEntries(Object.entries(record).filter(([day]) => day >= cutoff));
+}
+
+/**
+ * Books a session cost delta as API-equivalent $ on the local day, for every plan. Unlike monthlySpent this
+ * is not a bill: on Pro/Max it is what the same tokens would cost on the API. Only sessions that render this
+ * statusline are seen. Old days drop when a new day key starts, so the prune runs once a day.
+ * # ponytail: a session pruned after 2 idle days and then resumed counts its whole cost again; fix by
+ * taking the baseline from sessions-map.json.
+ */
+export function addApiEquivalent(usage: UsageState, delta: number, now: Date): UsageState {
+  const day = localDateKey(now);
+  if (usage.apiEqDays[day] === undefined) usage.apiEqDays = dropOldDays(usage.apiEqDays, now);
+  usage.apiEqDays[day] = (usage.apiEqDays[day] ?? 0) + delta;
+  usage.apiEqTotal += delta;
+  return usage;
+}
+
+/**
+ * Folds one session's cumulative `prompt_cache.miss_causes` counts into today's per-cause totals. The $ of
+ * the new misses (`missUsdDelta`, from the session's cacheMissUsd) splits over the causes by their new
+ * counts; $ with no counted cause goes to `unknown`. Counts lower than last seen mean a reset (`/clear`):
+ * the new counts are all new. Returns the counts to store as the session's next baseline.
+ */
+export function addMissCauses(
+  usage: UsageState,
+  prior: Readonly<Record<string, number>> | undefined,
+  current: Readonly<Record<string, number>>,
+  missUsdDelta: number,
+  now: Date,
+): Readonly<Record<string, number>> {
+  const reset = Object.entries(prior ?? {}).some(([cause, n]) => (current[cause] ?? 0) < n);
+  const added: Array<[string, number]> = [];
+  for (const [cause, n] of Object.entries(current)) {
+    const delta = n - (reset ? 0 : (prior?.[cause] ?? 0));
+    if (delta > 0) added.push([cause, delta]);
+  }
+  const usd = Math.max(0, missUsdDelta);
+  if (added.length === 0 && usd === 0) return current;
+  const day = localDateKey(now);
+  if (usage.missCauses[day] === undefined) usage.missCauses = dropOldDays(usage.missCauses, now);
+  const today = (usage.missCauses[day] ??= {});
+  const total = added.reduce((sum, [, n]) => sum + n, 0);
+  for (const [cause, n] of added) {
+    const entry = (today[cause] ??= { count: 0, usd: 0 });
+    entry.count += n;
+    entry.usd += (usd * n) / total;
+  }
+  if (added.length === 0) {
+    const entry = (today["unknown"] ??= { count: 0, usd: 0 });
+    entry.usd += usd;
+  }
+  return current;
 }
 
 /**
@@ -184,16 +374,12 @@ export function classifyHasSpendCap(organizationType: string | null): boolean | 
   return undefined;
 }
 
-const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
-
-/** Drops session entries untouched for 2+ UTC days — keeps usage.sessions from growing forever. */
-export function pruneStaleSessions(usage: UsageState, nowUtc: Date): UsageState {
-  const cutoffMs = nowUtc.getTime() - TWO_DAYS_MS;
-  usage.sessions = Object.fromEntries(
-    Object.entries(usage.sessions).filter(
-      ([, session]) => new Date(session.lastSeenAt).getTime() >= cutoffMs,
-    ),
-  );
+/** Drops session entries untouched for 2+ days — keeps usage.sessions from growing forever. */
+export function pruneStaleSessions(usage: UsageState, now: Date): UsageState {
+  const cutoffMs = now.getTime() - TWO_DAYS_MS;
+  const entries = Object.entries(usage.sessions);
+  const kept = entries.filter(([, session]) => new Date(session.lastSeenAt).getTime() >= cutoffMs);
+  if (kept.length !== entries.length) usage.sessions = Object.fromEntries(kept);
   return usage;
 }
 
@@ -212,16 +398,16 @@ export function paceLabel(todayUsedPct: number | null): string | null {
   return "Burn";
 }
 
-/** Direct port of Panel B2/B3/B4/B5/C5. Caller MUST run rolloverIfNeeded first — never mutates usage. */
-export function computeToday(usage: UsageState, config: Config, nowUtc: Date): ComputedUsage {
-  const today = utcDateString(nowUtc);
-  const daysBefore = sumDaysBeforeInMonth(usage, today);
-
-  const avgPerDay = computeAvgPerDay(config, usage, nowUtc);
-  const safeMonthTotal = avgPerDay === null ? null : daysBefore + avgPerDay;
-  const todayUsage = Math.max(0, usage.monthlySpent - daysBefore);
+/** Caller MUST run rolloverIfNeeded first — never mutates usage. */
+export function computeToday(usage: UsageState, config: Config, now: Date): ComputedUsage {
+  const period = utcPeriod(now);
+  const avgPerDay = computeAvgPerDay(config, usage, now);
+  const safeMonthTotal = avgPerDay === null ? null : usage.periodFrozen + avgPerDay;
+  // An edge-day booking from the previous period (UTC+ zones, first hours of the local month) is still
+  // today's spend, so it shows here; the period's own pending part is what moves monthlySpent.
+  const todayUsage = (usage.days[localDateKey(now)] ?? 0) + pendingSpend(usage);
   const todayUsedPct = avgPerDay === null || avgPerDay === 0 ? null : todayUsage / avgPerDay;
-  const laboralDays = getLaboralDays(config, nowUtc.getUTCFullYear(), nowUtc.getUTCMonth() + 1);
+  const laboralDays = getLaboralDays(config, period.year, period.month);
 
   return {
     monthlyCap: config.monthlyCap,
@@ -234,7 +420,7 @@ export function computeToday(usage: UsageState, config: Config, nowUtc: Date): C
     monthUsedPct: config.monthlyCap === 0 ? 0 : usage.monthlySpent / config.monthlyCap,
     paceLabel: paceLabel(todayUsedPct),
     monthDay0AvgPerDay: splitCap(config.monthlyCap, 0, laboralDays.length),
-    realAvgPerDay: computeRealAvgPerDay(config, usage.monthlySpent, nowUtc),
+    realAvgPerDay: computeRealAvgPerDay(config, usage.monthlySpent, now),
   };
 }
 
