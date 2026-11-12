@@ -25,7 +25,8 @@ Types live in `src/interfaces/config.interface.ts` and
 
 Before the rename to cc-spend the root was `~/.config/cc-daily-usage/`; `moveLegacyRootDir` moves it once.
 
-All writes are atomic (temp + rename, mode `0o600`). Missing files are seeded,
+All writes are atomic (temp `<file>.<pid>.tmp` + rename, mode `0o600`). A temp left by a writer killed
+before the rename is removed by the refresher once it is a minute old (`sweepStaleTemps`). Missing files are seeded,
 corrupt ones quarantined then re-seeded — nothing on this path throws.
 
 ## File versions (`src/migrate.ts`)
@@ -103,7 +104,7 @@ It keeps 35 days of switches plus the newest older one.
   `attributedUsd`, `apiErrors`, `ccRuns` (`{ <startTime>: { usd, models } }`,
   Claude Code's own cost per run) (missing → none). `index/prices.json` holds the
   `PRICES_VERSION` the index was priced at; `index/backup-prices-<version>/`
-  is the copy taken before a re-price.
+  is the copy taken before a re-price; a finished re-price removes every older one.
 - `Feed`: the shared contract with the `/cost-tracker` mod, see `docs/history-and-feed.md`.
 
 ## `ApiCache`

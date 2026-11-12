@@ -27,7 +27,7 @@ owner = account whose sessions-map.json has the session id, else "unattributed";
 
 - Offsets live in `~/.config/cc-spend/index/offsets.json` with the size,
   mtime, the last 64 dedupe keys and the last turn's context (`context`) per
-  file. An unchanged file is skipped; a
+  file. The offset of a transcript no longer listed (Claude Code deleted it) is dropped. An unchanged file is skipped; a
   file smaller than its offset was rewritten and is read from the start.
 - A pass starts no new file after 8 MB or 2 s (`PASS_BYTES`, `PASS_MS`); the
   rest is `bytesBehind` in `index/last-pass.json`. `catchUp` has no budget.

@@ -475,6 +475,20 @@ describe("runIndexPass", () => {
     expect(runIndexPass({ now: NOW })).toBeNull();
   });
 
+  it("drops the offset of a transcript Claude Code deleted", async () => {
+    const dir = projectDir();
+    writeFileSync(path.join(dir, "s1.jsonl"), line("a"));
+    writeFileSync(path.join(dir, "s2.jsonl"), line("b", { sessionId: "s2" }));
+    const { runIndexPass, INDEX_DIR } = await fresh();
+    runIndexPass({ now: NOW });
+    rmSync(path.join(dir, "s2.jsonl"));
+    runIndexPass({ now: NOW });
+    const offsets = JSON.parse(readFileSync(path.join(INDEX_DIR, "offsets.json"), "utf8")) as {
+      files: Record<string, unknown>;
+    };
+    expect(Object.keys(offsets.files)).toEqual([path.join(dir, "s1.jsonl")]);
+  });
+
   it("a price change re-prices the index from transcripts; rows of deleted transcripts are kept", async () => {
     const dir = projectDir();
     const other = path.join(fakeHome, ".claude", "projects", "-work-other");
@@ -503,6 +517,7 @@ describe("runIndexPass", () => {
     );
     rmSync(path.join(dir, "s2.jsonl"));
     rmSync(path.join(other, "s3.jsonl"));
+    mkdirSync(path.join(INDEX_DIR, "backup-prices-2025-01-01")); // an older re-price's backup
 
     expect(runIndexPass({ now: NOW })?.repriced).toEqual({
       from: "2026-01-01",
@@ -520,6 +535,11 @@ describe("runIndexPass", () => {
     expect(
       existsSync(path.join(INDEX_DIR, "backup-prices-2026-01-01", UNATTRIBUTED, "2026-10.json")),
     ).toBe(true);
+    expect(existsSync(path.join(INDEX_DIR, "backup-prices-2025-01-01"))).toBe(false); // superseded
+    const offsets = JSON.parse(readFileSync(path.join(INDEX_DIR, "offsets.json"), "utf8")) as {
+      files: Record<string, unknown>;
+    };
+    expect(Object.keys(offsets.files)).toEqual([path.join(dir, "s1.jsonl")]); // gone transcripts pruned
     expect(runIndexPass({ now: NOW })?.repriced).toBeUndefined(); // once
 
     // A newer build's prices are never re-priced down; an index with no prices file is ("none").

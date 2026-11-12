@@ -460,7 +460,17 @@ function finishReprice(from: string, snapshots: Map<string, OwnerSnapshot>): Rep
     }
     writeVersioned(file, "sessions", sessions);
   }
+  pruneRepriceBackups(from);
   return { from, rowsKept, sessionsKept, rowsShort };
+}
+
+/** Keeps only the backup this re-price took: older ones were superseded by a re-price that already succeeded. */
+function pruneRepriceBackups(kept: string): void {
+  for (const name of readdirSync(INDEX_DIR)) {
+    if (name.startsWith("backup-prices-") && name !== `backup-prices-${kept}`) {
+      rmSync(path.join(INDEX_DIR, name), { recursive: true, force: true });
+    }
+  }
 }
 
 /** Takes the global index lock; false while a live pass holds it. Wall clock: the lock's mtime is real. */
@@ -512,7 +522,9 @@ export function runIndexPass(
     let filesRead = 0;
     let turns = 0;
 
+    const listed = new Set<string>();
     for (const file of listTranscripts(options.root)) {
+      listed.add(file);
       let stat;
       try {
         stat = statSync(file);
@@ -637,7 +649,9 @@ export function runIndexPass(
 
     for (const [owner, delta] of deltas) applyDelta(owner, delta);
     const repriced = reprice === null ? undefined : finishReprice(reprice.from, reprice.snapshots);
-    writeVersioned(offsetsFile, "files", offsets);
+    // A transcript Claude Code deleted (cleanupPeriodDays) never comes back: its offset only grows the file.
+    const kept = Object.entries(offsets).filter(([file]) => listed.has(file));
+    writeVersioned(offsetsFile, "files", Object.fromEntries(kept));
     if (reprice !== null || typeof storedPrices !== "string") {
       writeVersioned(pricesFile, "prices", { version: PRICES_VERSION });
     }

@@ -6,6 +6,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -157,6 +158,24 @@ export function writeFileAtomic(file: string, content: string): void {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(temp, content, { mode: 0o600 });
   renameSync(temp, file);
+}
+
+/** A temp file this old belongs to a writer that died between write and rename (Claude Code kills a
+ * statusline run when a newer one starts). Far longer than any write takes. */
+const STALE_TEMP_MS = 60_000;
+
+/** Removes `<name>.<pid>.tmp` files older than STALE_TEMP_MS in `dir`. Best effort, never throws; called off
+ * the render path (refresher). */
+export function sweepStaleTemps(dir: string, now: number = Date.now()): void {
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!/\.\d+\.tmp$/.test(name)) continue;
+      const file = path.join(dir, name);
+      if (now - statSync(file).mtimeMs >= STALE_TEMP_MS) rmSync(file, { force: true });
+    }
+  } catch {
+    // A missing dir or a file another sweep removed: nothing to do.
+  }
 }
 
 type ReadResult =

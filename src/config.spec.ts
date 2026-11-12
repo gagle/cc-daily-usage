@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import type * as NodeOs from "node:os";
@@ -455,6 +456,26 @@ describe("config.ts", () => {
     writeFileAtomic(file, "{}");
     expect(readFileSync(file, "utf8")).toBe("{}");
     expect(readdirSync(path.dirname(file))).toEqual(["f.json"]);
+  });
+
+  it("sweepStaleTemps removes only old <name>.<pid>.tmp files and never throws", async () => {
+    const { sweepStaleTemps } = await freshConfigModule();
+    const now = Date.now();
+    for (const name of ["usage.json.123.tmp", "fresh.json.456.tmp", "notes.tmp", "usage.json"]) {
+      writeFileSync(path.join(fakeHome, name), "");
+    }
+    const old = new Date(now - 120_000);
+    utimesSync(path.join(fakeHome, "usage.json.123.tmp"), old, old);
+    utimesSync(path.join(fakeHome, "notes.tmp"), old, old);
+    sweepStaleTemps(fakeHome, now);
+    const names = readdirSync(fakeHome);
+    expect(names).not.toContain("usage.json.123.tmp");
+    expect(names).toEqual(
+      expect.arrayContaining(["fresh.json.456.tmp", "notes.tmp", "usage.json"]),
+    );
+    expect(() => {
+      sweepStaleTemps(path.join(fakeHome, "missing"), now);
+    }).not.toThrow();
   });
 
   it("lists account folders and peeks one session read-only", async () => {

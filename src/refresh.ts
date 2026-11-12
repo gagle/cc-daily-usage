@@ -13,6 +13,7 @@ import {
 } from "./anthropic-usage.js";
 import {
   accountDir,
+  CONFIG_ROOT_DIR,
   loadApiCache,
   loadConfig,
   loadLimitSamples,
@@ -20,6 +21,7 @@ import {
   loadUsage,
   saveApiCache,
   saveFeed,
+  sweepStaleTemps,
 } from "./config.js";
 
 /** A refresher that died without removing its lock stops blocking new ones after this long. */
@@ -113,8 +115,17 @@ export async function runRefresh(accountKey: string, now: Date = new Date()): Pr
     const planDue = next.plan === undefined || now.getTime() - next.plan.fetchedAt >= PLAN_TTL_MS;
     const plan = token && "usage" in outcome && planDue ? await fetchPlan(token.token, now) : null;
     saveApiCache(accountKey, plan === null ? next : { ...next, plan });
-    const { runIndexPass } = await import("./transcript-index.js");
+    const { INDEX_DIR, ownerIndexDir, runIndexPass } = await import("./transcript-index.js");
     runIndexPass({ now }); // bounded; the rest waits for the next refresh
+    // Temps of writers killed between write and rename (wall clock: mtimes are real).
+    for (const dir of [
+      CONFIG_ROOT_DIR,
+      accountDir(accountKey),
+      INDEX_DIR,
+      ownerIndexDir(accountKey),
+    ]) {
+      sweepStaleTemps(dir);
+    }
     await writeFeed(accountKey, now);
   } catch {
     // A failed refresh keeps the previous files; the next render asks again after the TTL.

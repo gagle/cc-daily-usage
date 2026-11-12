@@ -113,7 +113,7 @@ resolveOAuthAccessToken (env → macOS Keychain → ~/.claude/.credentials.json)
      failures + 1, lastError: the next try waits 60 s × 2^failures, at most 16 min,
      and never before retryAt from Retry-After, at most 1 h)
   -> GET /api/oauth/profile when the plan is a day old (after a good usage read)
-  -> accounts/<key>/api-cache.json -> index pass -> feed.json ; remove refresh.lock
+  -> accounts/<key>/api-cache.json -> index pass -> sweep stale *.tmp -> feed.json ; remove refresh.lock
 ```
 
 **`init`:** statusline install prompt → (Team/Enterprise) offer Mon–Fri for
