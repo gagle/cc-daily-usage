@@ -30,3 +30,4 @@ one's status to `Superseded by …`). That is why `scripts/doc-drift.mjs` exempt
 | [2026-11-11-claude-code-cost-state.md](./2026-11-11-claude-code-cost-state.md)                                   | Claude Code's `cost-state`: exact per-model price check, $ the transcripts do not record                 |
 | [2026-11-11-next-request-tail.md](./2026-11-11-next-request-tail.md)                                             | next request writes the last reply too; multi-request token totals summed                                |
 | [2026-11-12-rename-to-cc-spend.md](./2026-11-12-rename-to-cc-spend.md)                                           | rename to cc-spend; old config dir moved once, old shim upgraded in place                                |
+| [2026-11-12-scoped-npm-name.md](./2026-11-12-scoped-npm-name.md)                                                 | npm name `@gllamas/cc-spend`; command and config dir stay `cc-spend`                                     |

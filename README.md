@@ -20,7 +20,7 @@ Know where your Claude Code spend stands, and what your next prompt costs.
 ## Install
 
 ```sh
-npm install -g cc-spend
+npm install -g @gllamas/cc-spend
 cc-spend init
 ```
 

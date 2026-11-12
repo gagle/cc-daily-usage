@@ -7,7 +7,7 @@ that exercises all of this: `adrs/2026-10-10-manual-test-plan.md`.
 
 `init` and `statusline` refuse to run from an `npx` / `pnpm dlx` cache (the shim
 and hooks would point at files that are cleared later) and ask for
-`npm install -g cc-spend`. `-v` / `--version` prints the version.
+`npm install -g @gllamas/cc-spend`. `-v` / `--version` prints the version.
 
 1. Prints the resolved account.
 2. Asks to install the statusline (Y → full shim + prompt gate hook, n → capture-only line).
