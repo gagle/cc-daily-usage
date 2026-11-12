@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 import { accountAt } from "./account.js";
+import { localDateKey } from "./clock.js";
 import {
   ACCOUNTS_DIR,
   CONFIG_ROOT_DIR,
@@ -29,12 +30,16 @@ import {
   addTurn,
   type CcModelUsage,
   contextTokens,
+  emptyHabits,
   emptyRollup,
+  type HabitLine,
+  type Habits,
   mcpServersUsed,
   mergeRollup,
   parseActivity,
   parseApiError,
   parseCostState,
+  parseHabit,
   parseMcpLoad,
   parseTurn,
   priceTurn,
@@ -124,6 +129,7 @@ export interface RepriceResult {
 interface OwnerSnapshot {
   readonly months: Map<string, Record<string, Rollup>>;
   readonly sessions: Record<string, SessionTotals>;
+  readonly habits: Record<string, Habits>;
 }
 
 function readVersioned(file: string, key: string): Record<string, unknown> {
@@ -233,6 +239,30 @@ function sessionOwners(): (sessionId: string, at?: string) => string {
 interface OwnerDelta {
   readonly months: Map<string, Map<string, Rollup>>; // YYYY-MM → row key → delta
   readonly sessions: Map<string, SessionDelta>;
+  readonly habits: Map<string, Habits>; // local day → counts
+}
+
+function emptyOwnerDelta(): OwnerDelta {
+  return { months: new Map(), sessions: new Map(), habits: new Map() };
+}
+
+/** Adds one habit line to its local day; a line with a bad time is dropped. */
+function addHabit(delta: OwnerDelta, habit: HabitLine): void {
+  const time = new Date(habit.timestamp);
+  if (Number.isNaN(time.getTime())) return;
+  const day = localDateKey(time);
+  const counts = delta.habits.get(day) ?? emptyHabits();
+  counts[habit.kind] += 1;
+  delta.habits.set(day, counts);
+}
+
+/** Adds each day's counts of `add` into `into`, key by key. */
+function mergeHabits(into: Record<string, Habits>, add: Iterable<[string, Habits]>): void {
+  for (const [day, counts] of add) {
+    const sum = { ...emptyHabits(), ...into[day] };
+    for (const kind of Object.keys(counts) as Array<keyof Habits>) sum[kind] += counts[kind];
+    into[day] = sum;
+  }
 }
 
 interface SessionDelta {
@@ -303,6 +333,12 @@ function mcpTotals(
 
 function applyDelta(owner: string, delta: OwnerDelta): void {
   const dir = ownerIndexDir(owner);
+  if (delta.habits.size > 0) {
+    const habitsFile = path.join(dir, "habits.json");
+    const days = readVersioned(habitsFile, "days") as Record<string, Habits>;
+    mergeHabits(days, delta.habits);
+    writeVersioned(habitsFile, "days", days);
+  }
   for (const [month, rows] of delta.months) {
     const file = path.join(dir, `${month}.json`);
     const stored = readVersioned(file, "rows") as Record<string, Rollup>;
@@ -391,7 +427,8 @@ function startReprice(from: string): Map<string, OwnerSnapshot> {
       string,
       SessionTotals
     >;
-    snapshots.set(owner, { months, sessions });
+    const habits = readVersioned(path.join(saved, "habits.json"), "days") as Record<string, Habits>;
+    snapshots.set(owner, { months, sessions, habits });
     rmSync(ownerIndexDir(owner), { recursive: true, force: true });
   }
   return snapshots;
@@ -459,6 +496,14 @@ function finishReprice(from: string, snapshots: Map<string, OwnerSnapshot>): Rep
       sessionsKept += 1;
     }
     writeVersioned(file, "sessions", sessions);
+    // Days whose transcripts are all gone keep their old counts.
+    const habitsFile = path.join(dir, "habits.json");
+    const days = readVersioned(habitsFile, "days") as Record<string, Habits>;
+    const lost = Object.entries(snapshot.habits).filter(([day]) => days[day] === undefined);
+    if (lost.length > 0) {
+      mergeHabits(days, lost);
+      writeVersioned(habitsFile, "days", days);
+    }
   }
   pruneRepriceBackups(from);
   return { from, rowsKept, sessionsKept, rowsShort };
@@ -558,7 +603,7 @@ export function runIndexPass(
         return false;
       };
       const sessionDelta = (sessionId: string, owner = ownerOf(sessionId)): SessionDelta => {
-        const delta: OwnerDelta = deltas.get(owner) ?? { months: new Map(), sessions: new Map() };
+        const delta = deltas.get(owner) ?? emptyOwnerDelta();
         deltas.set(owner, delta);
         const session = delta.sessions.get(sessionId) ?? emptySessionDelta();
         delta.sessions.set(sessionId, session);
@@ -597,6 +642,14 @@ export function runIndexPass(
             session.apiErrors.set(error.kind, (session.apiErrors.get(error.kind) ?? 0) + 1);
             continue;
           }
+          const habit = scope === "main" ? parseHabit(line) : null;
+          if (habit !== null) {
+            const owner = ownerOf(habit.sessionId, habit.timestamp);
+            const delta = deltas.get(owner) ?? emptyOwnerDelta();
+            deltas.set(owner, delta);
+            addHabit(delta, habit);
+            continue;
+          }
           const activity = parseActivity(line);
           if (activity === null) continue;
           const session = sessionDelta(activity.sessionId);
@@ -608,11 +661,8 @@ export function runIndexPass(
         const key = turnRowKey(turn, scope);
         if (key === null) continue;
         const owner = ownerOf(turn.sessionId, turn.timestamp);
-        let delta = deltas.get(owner);
-        if (!delta) {
-          delta = { months: new Map(), sessions: new Map() };
-          deltas.set(owner, delta);
-        }
+        const delta = deltas.get(owner) ?? emptyOwnerDelta();
+        deltas.set(owner, delta);
         const month = key.day.slice(0, 7);
         const rows = delta.months.get(month) ?? new Map<string, Rollup>();
         delta.months.set(month, rows);
@@ -683,6 +733,17 @@ export function loadRollups(owner: string, months: ReadonlyArray<string>): Map<s
     }
   }
   return rows;
+}
+
+/** Habit counts of one owner, local day → counts; empty before the first pass that counted them. */
+export function loadHabits(owner: string): Record<string, Habits> {
+  const days = readVersioned(path.join(ownerIndexDir(owner), "habits.json"), "days");
+  return Object.fromEntries(
+    Object.entries(days).map(([day, counts]) => [
+      day,
+      { ...emptyHabits(), ...(counts as Partial<Habits>) },
+    ]),
+  );
 }
 
 export function loadSessionTotals(owner: string): Record<string, SessionTotals> {

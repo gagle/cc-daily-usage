@@ -21,6 +21,8 @@ Operations:
                     --month, --json, --rules (every rule explained), --snooze <rule> <N>d (0d clears)
   live              Real-time meters of every active session: $ by component, model and subagent, cache,
                     context, limits or budget. --once prints one frame
+  record            Your habits week by week against a baseline: is each one better or worse? Records
+                    start and end by themselves. --all (every record), --days <N> (next length), --json
 
 Flags:
   -h, --help        Print this help and exit
@@ -295,6 +297,33 @@ async function runInsightsOperation(argv: ReadonlyArray<string>): Promise<number
   return 0;
 }
 
+/** `record`: catch up the index, move the records to today, print the live one, mark a closed one seen. */
+async function runRecordOperation(argv: ReadonlyArray<string>): Promise<number> {
+  const store = await import("./record-store.js");
+  const args = store.parseRecordArgs(argv);
+  if (typeof args === "string") throw new Error(`${args}\nUse --help for help.`);
+  const now = new Date();
+  const [{ accountKey, resolveActiveAccount }, { catchUp }, { writeFeed }, record] =
+    await Promise.all([
+      import("./account.js"),
+      import("./transcript-index.js"),
+      import("./refresh.js"),
+      import("./record.js"),
+    ]);
+  const key = accountKey(await resolveActiveAccount());
+  if (!catchUp({ now })) console.error("Another index pass is running; numbers may lag.");
+  const advanced = store.advanceRecord(key, now);
+  const file = args.days === null ? advanced : { ...advanced, days: args.days };
+  const { view, seen } = store.recordView(key, file, now);
+  store.saveRecords(key, seen);
+  await writeFeed(key, now); // clears the statusline's "record done" note
+  const color = process.stdout.isTTY && process.env.NO_COLOR === undefined;
+  if (args.json) console.log(JSON.stringify(record.recordJson(view), null, 2));
+  else console.log(args.all ? record.formatAll(view, color) : record.formatRecord(view, color));
+  if (args.days !== null) console.log(`\nThe next record lasts ${String(args.days)} days.`);
+  return 0;
+}
+
 export async function runCli(argv: ReadonlyArray<string>): Promise<number> {
   const { moveLegacyRootDir } = await import("./config.js");
   moveLegacyRootDir();
@@ -357,6 +386,7 @@ async function dispatch(argv: ReadonlyArray<string>): Promise<number> {
 
   if (operationArg === "report") return runReportOperation(rest);
   if (operationArg === "insights") return runInsightsOperation(rest);
+  if (operationArg === "record") return runRecordOperation(rest);
   if (operationArg === "live") {
     const live = await import("./live-tui.js");
     const args = live.parseLiveArgs(rest);

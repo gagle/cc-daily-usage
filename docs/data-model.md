@@ -13,6 +13,7 @@ Types live in `src/interfaces/config.interface.ts` and
   accounts/<accountKey>/limits.json      { schemaVersion 1, samples: LimitSample[] } — render, on a % change
   accounts/<accountKey>/sessions-map.json { schemaVersion 1, sessions } — render, new session or hourly
   accounts/<accountKey>/feed.json        Feed for the /cost-tracker mod — written ONLY by the refresher
+  accounts/<accountKey>/records.json     { schemaVersion 1, records: RecordsFile } — refresher and `record`
   accounts/<accountKey>/refresh.lock     present while a refresher runs (stale after 30 s)
   accounts/<accountKey>/*.corrupt-<ms>   copy of a corrupt file, kept before re-seeding
   profiles.json                          token-hash → Account, for CLAUDE_CODE_OAUTH_TOKEN users
@@ -42,6 +43,7 @@ A missing version is 0 (the format before versioning).
 | `statusline.json`                               | 2 (`LAYOUT_MIGRATIONS`)    | in memory on render (2 adds `resets` to the first row's end); the next `settings` save writes it |
 | `limits.json`, `sessions-map.json`, `feed.json` | 1                          | new files, versioned from the start                                                              |
 | `account-log.json`                              | 1                          | new file, versioned from the start                                                               |
+| `records.json`                                  | 1                          | new file, versioned from the start                                                               |
 
 - Backup: `<file>.bak-<ISO with - for :>-<pid>` next to the file; the newest 3
   are kept (`backupFile`).
@@ -105,6 +107,12 @@ It keeps 35 days of switches plus the newest older one.
   Claude Code's own cost per run) (missing → none). `index/prices.json` holds the
   `PRICES_VERSION` the index was priced at; `index/backup-prices-<version>/`
   is the copy taken before a re-price; a finished re-price removes every older one.
+  `index/habits.json` (per owner): `{ schemaVersion 1, days: { <local day>: Habits } }`, the
+  counts `prompt`, `interrupt`, `clear`, `model`, `compact`, `autoCompact` (missing → 0).
+- `RecordsFile` (`src/record.ts`): `{ days, baseline: Snapshot | null, current: RecordEntry | null,
+closed: RecordEntry[] (newest 52), unseen: number | null }`; `RecordEntry` is
+  `{ n, from, to, focus, focusShare, snapshot? }` (`snapshot` once closed). Missing, garbled or
+  newer reads as empty; see `docs/record.md`.
 - `Feed`: the shared contract with the `/cost-tracker` mod, see `docs/history-and-feed.md`.
 
 ## `ApiCache`

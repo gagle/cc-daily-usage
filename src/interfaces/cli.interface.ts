@@ -8,6 +8,7 @@ export const OPERATIONS = [
   "report",
   "insights",
   "live",
+  "record",
 ] as const;
 export type Operation = (typeof OPERATIONS)[number];
 

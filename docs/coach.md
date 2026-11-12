@@ -62,6 +62,7 @@ README when `src/rules.ts` changes.
   | cache cold, the next message re-writes ≥ $0.50           | `» new task? /clear · same task? /compact first` (orange)                                   |
   | context ≥ 150k tokens (`total_input_tokens`)             | `» /compact at the next break · 520k re-read each turn, ~$0.10`                             |
   | a 5h or 7d window `at-risk`                              | `» /model sonnet for routine steps · keep Opus for the hard ones`                           |
+  | a record closed and `cc-spend record` not run since      | `» record #2 done: 4/5 habits better · cc-spend record` (`feed.json.record.notice`)         |
   | else the first non-snoozed finding except R8             | `» <rule action> · ~$X/<window>` (`RULE_INFO.action`; the title in feeds written before it) |
 
   R8 is skipped there: the `warnings` part already shows when a limit runs

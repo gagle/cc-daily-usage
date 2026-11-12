@@ -317,6 +317,77 @@ describe("runIndexPass", () => {
     expect(loadSessionTotals("acct").s1).toMatchObject({ turnMs: 40_000, turns: 1 });
   });
 
+  it("counts habits per owner and local day; subagent files and bad times are skipped; a re-price keeps lost days", async () => {
+    sessionsMap("acct", ["s1"]);
+    const dir = projectDir();
+    const user = (text: string, fields: Record<string, unknown> = {}): string =>
+      `${JSON.stringify({
+        type: "user",
+        sessionId: "s1",
+        timestamp: "2026-10-07T09:00:00.000Z",
+        message: { role: "user", content: text },
+        ...fields,
+      })}\n`;
+    writeFileSync(
+      path.join(dir, "s1.jsonl"),
+      user("fix it") +
+        user("and this", { timestamp: "2026-10-06T09:00:00.000Z" }) +
+        user("<command-name>/clear</command-name>") +
+        user("bad time", { timestamp: "nope" }) +
+        `${JSON.stringify({
+          type: "system",
+          subtype: "compact_boundary",
+          sessionId: "s1",
+          timestamp: "2026-10-07T09:30:00.000Z",
+          compactMetadata: { trigger: "auto" },
+        })}\n` +
+        line("a"),
+    );
+    const agents = path.join(dir, "s1", "subagents");
+    mkdirSync(agents, { recursive: true });
+    writeFileSync(path.join(agents, "agent-1.jsonl"), user("task for the agent"));
+    const { runIndexPass, loadHabits, INDEX_DIR, ownerIndexDir } = await fresh();
+    runIndexPass({ now: NOW });
+    expect(loadHabits("acct")).toEqual({
+      "2026-10-06": { prompt: 1, interrupt: 0, clear: 0, model: 0, compact: 0, autoCompact: 0 },
+      "2026-10-07": { prompt: 1, interrupt: 0, clear: 1, model: 0, compact: 0, autoCompact: 1 },
+    });
+    appendFileSync(path.join(dir, "s1.jsonl"), user("again"));
+    runIndexPass({ now: NOW });
+    expect(loadHabits("acct")["2026-10-07"]?.prompt).toBe(2);
+    expect(loadHabits("nobody")).toEqual({});
+
+    // A rebuild with s1's transcript gone keeps its days from the backup.
+    const habitsFile = path.join(ownerIndexDir("acct"), "habits.json");
+    writeFileSync(
+      habitsFile,
+      JSON.stringify({ schemaVersion: 1, days: { "2026-10-01": { prompt: 5 } } }),
+    );
+    writeFileSync(
+      path.join(INDEX_DIR, "prices.json"),
+      JSON.stringify({ schemaVersion: 1, prices: { version: "2026-01-01" } }),
+    );
+    rmSync(path.join(dir, "s1.jsonl"));
+    writeFileSync(path.join(dir, "s2.jsonl"), line("b", { sessionId: "s2" }));
+    expect(runIndexPass({ now: NOW })?.repriced).toBeDefined();
+    expect(loadHabits("acct")["2026-10-01"]).toMatchObject({ prompt: 5, clear: 0 });
+  });
+
+  it("a re-price with no habits in the backup writes none", async () => {
+    sessionsMap("acct", ["s1"]);
+    const dir = projectDir();
+    writeFileSync(path.join(dir, "s1.jsonl"), line("a"));
+    const { runIndexPass, ownerIndexDir, INDEX_DIR } = await fresh();
+    runIndexPass({ now: NOW });
+    writeFileSync(
+      path.join(INDEX_DIR, "prices.json"),
+      JSON.stringify({ schemaVersion: 1, prices: { version: "2026-01-01" } }),
+    );
+    appendFileSync(path.join(dir, "s1.jsonl"), line("b"));
+    runIndexPass({ now: NOW });
+    expect(existsSync(path.join(ownerIndexDir("acct"), "habits.json"))).toBe(false);
+  });
+
   it("keeps Claude Code's own cost per run: the larger reading of a run wins, across passes", async () => {
     sessionsMap("acct", ["s1"]);
     const file = path.join(projectDir(), "s1.jsonl");

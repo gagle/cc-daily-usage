@@ -153,6 +153,19 @@ describe("runRefresh", () => {
     };
     expect(feed.schemaVersion).toBe(1);
     expect(feed.limits.fiveHour?.usedPct).toBe(3);
+    // The index is complete (nothing behind): record #1 starts by itself.
+    expect(existsSync(path.join(accountDir(), "records.json"))).toBe(true);
+    expect(feed).toMatchObject({ record: { notice: null } });
+  });
+
+  it("no record starts while another index pass holds the lock", async () => {
+    tokenMock.mockReturnValue(null);
+    const lock = path.join(fakeHome, ".config", "cc-spend", "index", "index.lock");
+    mkdirSync(path.dirname(lock), { recursive: true });
+    writeFileSync(lock, "1");
+    const { runRefresh } = await fresh();
+    expect(await runRefresh("acct", NOW)).toBe(0);
+    expect(existsSync(path.join(accountDir(), "records.json"))).toBe(false);
   });
 
   it("reads the plan once a day, only after a good usage fetch", async () => {

@@ -82,6 +82,7 @@ export interface Feed {
     readonly isFloor: boolean; // true when an unpriced model was seen
   };
   readonly advice: ReadonlyArray<Finding>;
+  readonly record?: { readonly notice: string | null }; // a record that closed unseen; absent before `record`
 }
 
 export interface FeedInput {

@@ -12,8 +12,8 @@ export interface ModelRates {
  * `modelPricing` setting, or fetch a pricing file.
  */
 /** Date of the price snapshot below, plus `.N` when the index must be rebuilt for another reason (`.1`: read
- * Claude Code's `cost-state` lines). A change makes the transcript index re-build its rows (see runIndexPass). */
-export const PRICES_VERSION = "2026-11-11.1";
+ * Claude Code's `cost-state` lines; `.2`: count prompts and commands per day for `record`). A change makes the transcript index re-build its rows (see runIndexPass). */
+export const PRICES_VERSION = "2026-11-11.2";
 
 const RATES: Readonly<Record<string, ModelRates>> = {
   "claude-fable-5-2": { input: 8, output: 40, cacheRead: 0.2 },

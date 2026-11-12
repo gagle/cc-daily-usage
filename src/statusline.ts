@@ -18,7 +18,7 @@ import {
   loadAccountLog,
   loadApiCache,
   loadConfig,
-  loadFeedAdvice,
+  loadFeedCoach,
   loadLimitSamples,
   loadSessionsMap,
   loadUsage,
@@ -201,9 +201,12 @@ function trackLimits(
 /** The first non-snoozed finding of feed.json (written by the refresher), or null. R8 (a limit running out)
  * is skipped: the `warnings` part already shows it, and the next action covers what to do. */
 function coachTip(key: string): StatuslineState["coach"] {
-  const top = loadFeedAdvice(key).find(
-    (finding) => finding.snoozedUntil == null && finding.id !== "R8",
-  );
+  const { advice, recordNotice } = loadFeedCoach(key);
+  // A record that closed unseen comes first: one look at `cc-spend record` clears it.
+  if (recordNotice !== null) {
+    return { id: "record", title: recordNotice, action: recordNotice, usd: null, window: "week" };
+  }
+  const top = advice.find((finding) => finding.snoozedUntil == null && finding.id !== "R8");
   if (typeof top?.title !== "string") return null;
   return {
     id: typeof top.id === "string" ? top.id : "",

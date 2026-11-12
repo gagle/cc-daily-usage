@@ -427,13 +427,13 @@ describe("config.ts", () => {
     expect(readFileSync(limitsFile("acct"), "utf8")).toBe(newer);
   });
 
-  it("feed advice: written by saveFeed, empty when missing or not a list", async () => {
-    const { saveFeed, loadFeedAdvice, feedFile } = await freshConfigModule();
-    expect(loadFeedAdvice("acct")).toEqual([]);
-    saveFeed("acct", { schemaVersion: 1, advice: [{ id: "R1" }] });
-    expect(loadFeedAdvice("acct")).toEqual([{ id: "R1" }]);
-    writeFileSync(feedFile("acct"), JSON.stringify({ schemaVersion: 1, advice: {} }));
-    expect(loadFeedAdvice("acct")).toEqual([]);
+  it("feed coach: advice and the record note in one read, empty when missing or malformed", async () => {
+    const { saveFeed, loadFeedCoach, feedFile } = await freshConfigModule();
+    expect(loadFeedCoach("acct")).toEqual({ advice: [], recordNotice: null });
+    saveFeed("acct", { schemaVersion: 1, advice: [{ id: "R1" }], record: { notice: "done" } });
+    expect(loadFeedCoach("acct")).toEqual({ advice: [{ id: "R1" }], recordNotice: "done" });
+    writeFileSync(feedFile("acct"), JSON.stringify({ schemaVersion: 1, advice: {}, record: null }));
+    expect(loadFeedCoach("acct")).toEqual({ advice: [], recordNotice: null });
   });
 
   it("backupFile keeps the newest three and never throws", async () => {

@@ -195,6 +195,69 @@ export function parseActivity(line: string): Activity | null {
   return null;
 }
 
+/** What a person did in a main session: typed a prompt, stopped a reply, ran /clear or /model, compacted
+ * (by hand or automatically). The record (`src/record.ts`) counts them per day. */
+export type HabitKind = "prompt" | "interrupt" | "clear" | "model" | "compact" | "autoCompact";
+
+export interface HabitLine {
+  readonly sessionId: string;
+  readonly timestamp: string; // ISO
+  readonly kind: HabitKind;
+}
+
+/** Counts of each HabitKind on one local day. */
+export type Habits = Record<HabitKind, number>;
+
+export function emptyHabits(): Habits {
+  return { prompt: 0, interrupt: 0, clear: 0, model: 0, compact: 0, autoCompact: 0 };
+}
+
+/** The text a person typed: a string, or the first text block (an image may come first). */
+function userText(content: unknown): string | null {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  for (const block of content as ReadonlyArray<Record<string, unknown> | null>) {
+    if (block?.type === "text" && typeof block.text === "string") return block.text;
+  }
+  return null;
+}
+
+/**
+ * A main-session `user` line or a `compact_boundary` system line → HabitLine; anything else → null. Not in
+ * the public docs (checked on real files 2026-11-12): a prompt is a `user` line with no `isMeta`, not a
+ * sidechain or a compact summary, whose text does not start with `<` (commands, command output, task
+ * notifications) or `[Request interrupted` (an interrupt). Tool results never parse.
+ */
+export function parseHabit(line: string): HabitLine | null {
+  const compaction = parseCompaction(line);
+  if (compaction !== null) {
+    if (compaction.timestamp === "") return null;
+    return {
+      sessionId: compaction.sessionId,
+      timestamp: compaction.timestamp,
+      kind: compaction.trigger === "manual" ? "compact" : "autoCompact",
+    };
+  }
+  if (!line.includes('"type":"user"') || line.includes('"type":"tool_result"')) return null;
+  let entry: Record<string, unknown>;
+  try {
+    entry = JSON.parse(line) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  const timestamp = entry.timestamp;
+  if (typeof timestamp !== "string") return null;
+  const at = { sessionId: str(entry.sessionId, "unknown"), timestamp };
+  if (entry.type !== "user" || entry.isMeta === true || entry.isSidechain === true) return null;
+  if (entry.isCompactSummary === true) return null;
+  const text = userText((entry.message as Record<string, unknown> | undefined)?.content);
+  if (text === null) return null;
+  if (text.startsWith("[Request interrupted")) return { ...at, kind: "interrupt" };
+  const command = /^<command-name>\/(clear|model)<\/command-name>/.exec(text);
+  if (command) return { ...at, kind: command[1] as HabitKind };
+  return text.startsWith("<") || text.trim() === "" ? null : { ...at, kind: "prompt" };
+}
+
 /** Tokens and $ Claude Code kept for one model over one run (`cost-state` `modelUsage`). */
 export interface CcModelUsage {
   readonly input: number;

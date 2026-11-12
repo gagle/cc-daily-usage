@@ -9,6 +9,8 @@ import type * as AccountModule from "./account.js";
 import type * as CliModule from "./cli.js";
 import type * as InsightsModule from "./insights.js";
 import type * as LiveModule from "./live-tui.js";
+import type { RecordsFile } from "./record.js";
+import type * as RecordStoreModule from "./record-store.js";
 import type * as ReportModule from "./report.js";
 import type * as SharedModule from "./statusline-shared.js";
 
@@ -58,6 +60,18 @@ vi.mock("./insights.js", async (importOriginal) => ({
   adviceFor: () => insightsAdviceMock() as unknown,
   snoozeRule: (_key: string, _id: string, days: number) =>
     days > 0 ? "2026-10-14T00:00:00.000Z" : null,
+}));
+
+const advanceRecordMock = vi.fn();
+const saveRecordsMock = vi.fn();
+vi.mock("./record-store.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof RecordStoreModule>()),
+  advanceRecord: () => advanceRecordMock() as unknown,
+  saveRecords: (...args: Array<unknown>) => saveRecordsMock(...args) as unknown,
+  recordView: (_key: string, file: RecordsFile) => ({
+    view: { file, live: null, today: "2026-11-12", closedNow: null },
+    seen: { ...file, unseen: null },
+  }),
 }));
 
 const buildReportMock = vi.fn().mockReturnValue({ rows: [] });
@@ -407,6 +421,41 @@ describe("insights", () => {
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining("What cc-spend insights checks"));
     expect(await runCli(["insights", "--rules", "--json"])).toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining('"found": false'));
+  });
+});
+
+describe("record", () => {
+  it("catches up, moves the records, marks a closed one seen, refreshes the feed, prints", async () => {
+    catchUpMock.mockReturnValue(true);
+    writeFeedMock.mockResolvedValue(undefined);
+    accountMock.mockReturnValue({ email: "dev@example.com", organizationType: "claude_max" });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { emptyRecords } = await import("./record.js");
+    advanceRecordMock.mockReturnValue({ ...emptyRecords(), unseen: 3 });
+    const { runCli } = await fresh();
+    setTty(true);
+    expect(await runCli(["record"])).toBe(0);
+    setTty(false);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("No record yet"));
+    expect(saveRecordsMock).toHaveBeenLastCalledWith(
+      "dev_example_com",
+      expect.objectContaining({ unseen: null }),
+    );
+    expect(writeFeedMock).toHaveBeenCalledWith("dev_example_com");
+    expect(await runCli(["record", "--all"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("No record yet"));
+    expect(await runCli(["record", "--json"])).toBe(0);
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining('"current": null'));
+    catchUpMock.mockReturnValueOnce(false);
+    expect(await runCli(["record", "--days", "14"])).toBe(0);
+    expect(saveRecordsMock).toHaveBeenLastCalledWith(
+      "dev_example_com",
+      expect.objectContaining({ days: 14 }),
+    );
+    expect(log).toHaveBeenLastCalledWith("\nThe next record lasts 14 days.");
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("Another index pass"));
+    await expect(runCli(["record", "--x"])).rejects.toThrow("Unknown record argument: --x");
   });
 });
 

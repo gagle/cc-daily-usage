@@ -19,6 +19,7 @@ owner = account whose sessions-map.json has the session id, else "unattributed";
         a session several accounts know: the login at the turn's time
         (account-log.json), else the account that saw it last
         ▼
+<owner>/index/habits.json   local day → prompt, interrupt, clear, model, compact, autoCompact
 <owner>/index/YYYY-MM.json  rows: day × project × model × scope × speed → Rollup
 <owner>/index/sessions.json session → totals, first/last time, project, branch, models,
                             turnMs, thinkingMs, hookRuns, entrypoint, mcpLoaded, mcpUsed,
@@ -83,6 +84,9 @@ owner = account whose sessions-map.json has the session id, else "unattributed";
   the message, so the dedupe keeps it) adds `thinkingMs`; the first turn's
   `entrypoint` (cli, sdk-ts, …) is kept. System lines only extend a session the
   index already has. Sessions indexed before these fields read as zero.
+- Habits (`parseHabit`): in main-session files, prompts, interrupts, `/clear`,
+  `/model` and compactions add per owner and local day to `<owner>/index/habits.json`
+  (`loadHabits`); `record` reads them (`docs/record.md`).
 - Index files carry `schemaVersion` 1 and follow the downgrade guard in
   `docs/data-model.md`.
 

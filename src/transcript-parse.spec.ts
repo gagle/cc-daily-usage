@@ -4,6 +4,7 @@ import {
   addTurn,
   contextTokens,
   DEEP_CONTEXT_TOKENS,
+  emptyHabits,
   emptyRollup,
   mcpServerKey,
   mcpServersUsed,
@@ -12,6 +13,7 @@ import {
   parseApiError,
   parseCompaction,
   parseCostState,
+  parseHabit,
   parseMcpLoad,
   parseRowKey,
   parseTurn,
@@ -166,6 +168,52 @@ describe("parseTurn", () => {
     expect(parseActivity('{"subtype":"turn_duration"')).toBeNull();
     expect(parseActivity(JSON.stringify({ type: "user", subtype: "turn_duration" }))).toBeNull();
     expect(parseActivity(system({ subtype: "other", note: "turn_duration" }))).toBeNull();
+  });
+
+  it("parseHabit reads prompts, interrupts, /clear, /model and compactions; anything else is null", () => {
+    const at = { sessionId: "s1", timestamp: "2026-11-12T09:00:00.000Z" };
+    const user = (content: unknown, fields: Record<string, unknown> = {}): string =>
+      JSON.stringify({ type: "user", ...at, message: { role: "user", content }, ...fields });
+    const kind = (line: string): string | null => parseHabit(line)?.kind ?? null;
+    expect(parseHabit(user("fix the bug"))).toEqual({ ...at, kind: "prompt" });
+    expect(kind(user([{ type: "image" }, { type: "text", text: "see [Image #1]" }]))).toBe(
+      "prompt",
+    );
+    expect(kind(user([{ type: "text", text: "[Request interrupted by user]" }]))).toBe("interrupt");
+    expect(kind(user("<command-name>/clear</command-name>\n<command-message>"))).toBe("clear");
+    expect(kind(user("<command-name>/model</command-name>"))).toBe("model");
+    expect(kind(user("<command-name>/compact</command-name>"))).toBeNull(); // the boundary counts it
+    expect(kind(user("<local-command-stdout>ok</local-command-stdout>"))).toBeNull();
+    expect(kind(user("<task-notification>done</task-notification>"))).toBeNull();
+    expect(kind(user("   "))).toBeNull();
+    expect(kind(user("hi", { isMeta: true }))).toBeNull();
+    expect(kind(user("hi", { isSidechain: true }))).toBeNull();
+    expect(kind(user("summary", { isCompactSummary: true }))).toBeNull();
+    expect(kind(user([{ type: "tool_result", content: "x" }]))).toBeNull();
+    expect(kind(user([null, { type: "image" }]))).toBeNull();
+    expect(kind(user(42))).toBeNull();
+    expect(kind(JSON.stringify({ type: "user", ...at }))).toBeNull();
+    expect(
+      kind(JSON.stringify({ type: "user", sessionId: "s1", message: { content: "hi" } })),
+    ).toBe(null);
+    expect(kind(JSON.stringify({ type: "assistant", ...at, note: '"type":"user"' }))).toBeNull();
+    expect(kind('{"type":"user"')).toBeNull();
+    expect(kind(usageLine())).toBeNull();
+    const boundary = (trigger: unknown, timestamp: unknown = at.timestamp): string =>
+      JSON.stringify({
+        type: "system",
+        subtype: "compact_boundary",
+        sessionId: "s1",
+        timestamp,
+        compactMetadata: { trigger },
+      });
+    expect(parseHabit(boundary("manual"))).toEqual({ ...at, kind: "compact" });
+    expect(kind(boundary("auto"))).toBe("autoCompact");
+    expect(kind(boundary("manual", 7))).toBeNull();
+  });
+
+  it("emptyHabits is all zero", () => {
+    expect(Object.values(emptyHabits())).toEqual([0, 0, 0, 0, 0, 0]);
   });
 
   it("skips non-usage lines, garbage and synthetic messages", () => {

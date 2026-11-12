@@ -312,14 +312,18 @@ export const HISTORY_SCHEMA_VERSION = 1;
 
 /** The `key` object of a versioned history file; empty when missing or unreadable. A newer version is
  * read as empty and marked, so the save below leaves it alone. */
-function loadHistoryRecord(file: string, key: string): unknown {
+function loadHistoryObject(file: string): Record<string, unknown> | undefined {
   const result = readObjectFile(file);
   if (result.kind !== "ok") return undefined;
   if (schemaVersionOf(result.value) > HISTORY_SCHEMA_VERSION) {
     markNewerFile(file);
     return undefined;
   }
-  return result.value[key];
+  return result.value;
+}
+
+function loadHistoryRecord(file: string, key: string): unknown {
+  return loadHistoryObject(file)?.[key];
 }
 
 export function limitsFile(accountKey: string): string {
@@ -396,10 +400,19 @@ export function feedFile(accountKey: string): string {
   return path.join(accountDir(accountKey), "feed.json");
 }
 
-/** feed.json's `advice`, for the statusline's coach part; empty when missing, unreadable or newer. */
-export function loadFeedAdvice(accountKey: string): ReadonlyArray<Record<string, unknown>> {
-  const advice = loadHistoryRecord(feedFile(accountKey), "advice");
-  return Array.isArray(advice) ? (advice as ReadonlyArray<Record<string, unknown>>) : [];
+/** feed.json's `advice` and the record's note (`record.notice`), for the statusline's coach part, in one
+ * read; empty when missing, unreadable or newer. */
+export function loadFeedCoach(accountKey: string): {
+  readonly advice: ReadonlyArray<Record<string, unknown>>;
+  readonly recordNotice: string | null;
+} {
+  const feed = loadHistoryObject(feedFile(accountKey));
+  const advice = feed?.advice;
+  const notice = (feed?.record as Record<string, unknown> | null | undefined)?.notice;
+  return {
+    advice: Array.isArray(advice) ? (advice as ReadonlyArray<Record<string, unknown>>) : [],
+    recordNotice: typeof notice === "string" ? notice : null,
+  };
 }
 
 /** feed.json — written only off the render path (refresher, report, insights). */

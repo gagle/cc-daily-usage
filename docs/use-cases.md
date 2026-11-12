@@ -99,6 +99,14 @@ each second: the advisor (scorecard against a lean session, what to do now
 and why) or, with Tab, where the $ went bar by bar. `--once` prints one frame.
 Read-only. See `docs/live.md`.
 
+## `cc-spend record`
+
+Your habits per period (7 days by default) against a baseline (the 7 days
+before record #1) and the record before. Records start and end by themselves in
+the background refresher; this command only shows them. `--all` lists every
+record, `--days N` sets the next one's length, `--json` prints the data. Running
+it clears the statusline's `» record #N done …` note. See `docs/record.md`.
+
 ## `cc-spend insights`
 
 Ranked findings with $, why and the exact fix; `--rules` explains every rule;
@@ -151,8 +159,9 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
 13. `💳 pct` — Claude apps gateway spend limit, when present; `💳 63% $62.80/$100/mo`
     once Claude Code (v2.1.284+) sends the dollar amounts and period.
 14. `» <action>` — the next action: what to do now (cache about to go cold,
-    cold cache, deep context, a limit at risk) or the week's top habit with its
-    $ (`docs/coach.md`); on its own line by default.
+    cold cache, deep context, a limit at risk), a record that closed unseen
+    (`» record #2 done: 4/5 habits better · cc-spend record`), or the week's top
+    habit with its $ (`docs/coach.md`); on its own line by default.
 15. Pro/Max, when the 5h/7d windows apply to the session: `↺ 1 reset · by Nov 17`
     (or `↺ 2 resets · 1 by Nov 17`), the limit resets the account can still
     use and how many end first. Hidden with none left. Last in the first row

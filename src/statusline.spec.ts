@@ -805,6 +805,19 @@ describe("coach tip", () => {
       usd: 1,
       window: "month",
     });
+    writeJson("feed.json", {
+      schemaVersion: 1,
+      advice: [{ id: "R1", title: "T", action: "a", usd: 1, window: "month" }],
+      record: { notice: "record #1 done · cc-spend record" },
+    });
+    // A closed record nobody has looked at comes first.
+    expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toEqual({
+      id: "record",
+      title: "record #1 done · cc-spend record",
+      action: "record #1 done · cc-spend record",
+      usd: null,
+      window: "week",
+    });
     writeJson("feed.json", { schemaVersion: 1, advice: [{ title: "Old", usd: "x" }] });
     expect((await buildStatuslineState({ session_id: "s" }, NOW)).coach).toEqual({
       id: "",

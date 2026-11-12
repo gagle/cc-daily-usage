@@ -53,6 +53,7 @@ const DOC_MAP = {
     "src/report.ts",
     "src/refresh.ts",
   ],
+  "docs/record.md": ["src/record.ts", "src/record-store.ts"],
   "docs/history-and-feed.md": [
     "src/limits-history.ts",
     "src/sessions-map.ts",

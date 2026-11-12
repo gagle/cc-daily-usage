@@ -74,6 +74,7 @@ Accounts without an OAuth login get no refresher and so no feed.
 | `budget`                  | dollar-cap plans only: `{ todaySpent, todayMax, monthSpent, monthCap, paceLabel }`                                                                                                                                                                                 |
 | `spend`                   | API-equivalent `today`, `week` (rolling 7 local days), `monthToDate` (local month), `last30Days`, `isFloor`                                                                                                                                                        |
 | `advice`                  | coaching findings, ranked, each with `why` and `action` (absent in feeds written before 2026-10-18); empty until the coach runs                                                                                                                                    |
+| `record`                  | `{ notice }`: the statusline note for a record that closed since the last `cc-spend record`, else null (`docs/record.md`); absent in feeds written before it                                                                                                       |
 
 A window reading comes from the fresh API reading, else the newest sample (with
 its own time, so an old one is `stale`).

@@ -303,6 +303,20 @@ payload() { printf '%s' "$1" | HOME=$SANDBOX node /path/to/cc-spend/bin/cc-spend
 | Q32 | limits at risk and nothing urgent in the cache                        | `» /model sonnet for routine steps …`, never "Running out early" (the ⚠ part shows the time)                                                                                                                 | `src/next-action.spec.ts`, `src/statusline.spec.ts`        |
 | Q33 | quiet session, a weekly finding (e.g. R2)                             | `» /fast off · ~$X/week`                                                                                                                                                                                     | `src/next-action.spec.ts`                                  |
 
+## R. Record (2026-11-12)
+
+| ID  | Steps                                                                   | Expected                                                                                                                                         | Auto                                                           |
+| --- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| R1  | upgrade, open Claude Code, wait for one refresh; `ccs record`           | `RECORD #1` from today, day 1/7, `Too early` line, dim values; baseline column filled when the 7 days before had use                             | `src/record-store.spec.ts`, `src/refresh.spec.ts`              |
+| R2  | fresh HOME with no transcripts; refresh, then `ccs record`              | `No baseline yet` line; only the now column                                                                                                      | `src/record.spec.ts`                                           |
+| R3  | day 3 or later of a record                                              | verdict `N of 5 habits better than baseline`; ✔ / ✖ / ≈ per habit; FOCUS with `better ✔` / `worse ✖` / `same ≈`; MOVED rules                     | `src/record.spec.ts`                                           |
+| R4  | let a record end (or set the clock a week ahead), open Claude Code      | statusline `» record #1 done: N/5 habits better · cc-spend record` until `ccs record`; then `RECORD #1 CLOSED` block first, gone on the next run | `src/record.spec.ts`, `src/statusline.spec.ts`, manual         |
+| R5  | `ccs record --all` after two records                                    | rows `b`, `1`, `2 … now`; trend sparklines; `Next record: 7 days`                                                                                | `src/record.spec.ts`                                           |
+| R6  | `ccs record --days 14`, then let the record end                         | `The next record lasts 14 days.`; the next record runs 14 days, the live one keeps 7                                                             | `src/record-store.spec.ts`, `src/cli.spec.ts`                  |
+| R7  | type prompts, `/clear`, `/compact`, stop a reply with Esc; `ccs record` | VOLUME `commands` line counts each; `prompts` per day                                                                                            | `src/transcript-parse.spec.ts`, `src/transcript-index.spec.ts` |
+| R8  | `ccs record --json`                                                     | `baseline`, `closed`, `current` with `values` per habit                                                                                          | `src/record.spec.ts`                                           |
+| R9  | `ccs record` with `NO_COLOR=1` or piped                                 | no ANSI codes                                                                                                                                    | `src/record.spec.ts`                                           |
+
 ## Consequences
 
 The plan is a release gate. A new feature adds rows here in the same change;
