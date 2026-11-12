@@ -8,7 +8,7 @@ import type {
   RateLimitsCache,
 } from "./config.interface.js";
 
-/** The subset of Claude Code's statusline stdin JSON that cc-daily-usage reads. */
+/** The subset of Claude Code's statusline stdin JSON that cc-spend reads. */
 export interface HookPayload extends CachePayload {
   readonly session_id?: string;
   readonly session_name?: string;
@@ -55,7 +55,7 @@ export interface ResolvedRateLimits {
   readonly source: "hook" | "api" | "cache" | "none";
 }
 
-/** One line of `cc-daily-usage --statusline` output — also the input of renderStatusline. */
+/** One line of `cc-spend --statusline` output — also the input of renderStatusline. */
 export interface StatuslineState {
   // Dollar self-budget (enterprise/team/unknown) — absent on Pro/Max.
   readonly todayUsage?: number;

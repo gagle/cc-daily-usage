@@ -191,7 +191,7 @@ function warningsPart(state: StatuslineState, now: Date): string {
 }
 
 function todayPart(state: StatuslineState): string {
-  if (state.needsInit) return rgb("220;200;0", "⚠ run: cc-daily-usage init");
+  if (state.needsInit) return rgb("220;200;0", "⚠ run: cc-spend init");
   const today = state.todayUsage ?? 0;
   if (state.budgetExhausted) return rgb("248;105;107", `${money(today)}/$0.00 (over)`);
   if (state.avgPerDay !== undefined && state.avgPerDay !== null) {

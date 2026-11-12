@@ -42,7 +42,7 @@ function line(id: string, fields: Record<string, unknown> = {}, model = "claude-
 }
 
 function sessionsMap(sessions: Record<string, number>): void {
-  const dir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "acct");
+  const dir = path.join(fakeHome, ".config", "cc-spend", "accounts", "acct");
   mkdirSync(dir, { recursive: true });
   const at = NOW.toISOString();
   writeFileSync(
@@ -85,7 +85,7 @@ async function indexFixtures(): Promise<void> {
 
 beforeEach(() => {
   vi.resetModules();
-  fakeHome = mkdtempSync(path.join(tmpdir(), "ccdu-report-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "ccs-report-"));
   vi.stubEnv("TZ", "UTC");
 });
 
@@ -204,7 +204,7 @@ describe("--by session extras", () => {
     const file = path.join(
       fakeHome,
       ".config",
-      "cc-daily-usage",
+      "cc-spend",
       "accounts",
       "acct",
       "sessions-map.json",
@@ -404,7 +404,7 @@ describe("buildReport / formatReport", () => {
     const mapFile = path.join(
       fakeHome,
       ".config",
-      "cc-daily-usage",
+      "cc-spend",
       "accounts",
       "acct",
       "sessions-map.json",

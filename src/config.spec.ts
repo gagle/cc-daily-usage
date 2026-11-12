@@ -1,3 +1,4 @@
+import type * as NodeFs from "node:fs";
 import {
   existsSync,
   mkdirSync,
@@ -30,11 +31,51 @@ async function freshConfigModule(): Promise<typeof ConfigModule> {
 
 describe("config.ts", () => {
   beforeEach(() => {
-    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-test-"));
+    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-test-"));
   });
 
   afterEach(() => {
     rmSync(fakeHome, { recursive: true, force: true });
+  });
+
+  it("moves the pre-rename ~/.config/cc-daily-usage to ~/.config/cc-spend once", async () => {
+    const legacy = path.join(fakeHome, ".config", "cc-daily-usage");
+    mkdirSync(path.join(legacy, "accounts", "acct"), { recursive: true });
+    writeFileSync(path.join(legacy, "accounts", "acct", "config.json"), '{"monthlyCap":321}');
+    const { moveLegacyRootDir, loadConfig, CONFIG_ROOT_DIR } = await freshConfigModule();
+    moveLegacyRootDir();
+    expect(existsSync(legacy)).toBe(false);
+    expect(loadConfig("acct").monthlyCap).toBe(321);
+    // The new directory exists now: a second call (or a stray old directory) changes nothing.
+    mkdirSync(legacy);
+    moveLegacyRootDir();
+    expect(existsSync(legacy)).toBe(true);
+    expect(existsSync(CONFIG_ROOT_DIR)).toBe(true);
+  });
+
+  it("does nothing without the old directory, and keeps it when the move fails", async () => {
+    const { moveLegacyRootDir, CONFIG_ROOT_DIR } = await freshConfigModule();
+    moveLegacyRootDir();
+    expect(existsSync(CONFIG_ROOT_DIR)).toBe(false);
+
+    const legacy = path.join(fakeHome, ".config", "cc-daily-usage");
+    mkdirSync(legacy, { recursive: true });
+    vi.resetModules();
+    vi.doMock("node:fs", async (importOriginal) => ({
+      ...(await importOriginal<typeof NodeFs>()),
+      renameSync: () => {
+        throw new Error("EXDEV");
+      },
+    }));
+    try {
+      const failing = await import("./config.js");
+      expect(() => {
+        failing.moveLegacyRootDir();
+      }).not.toThrow();
+      expect(existsSync(legacy)).toBe(true);
+    } finally {
+      vi.doUnmock("node:fs");
+    }
   });
 
   it("seeds default config.json on first read and writes it 0o600", async () => {
@@ -155,7 +196,7 @@ describe("config.ts", () => {
   });
 
   it("migrates a legacy config.json alone (no usage.json) into accounts/legacy/, never guessing the active account", async () => {
-    const legacyDir = path.join(fakeHome, ".config", "cc-daily-usage");
+    const legacyDir = path.join(fakeHome, ".config", "cc-spend");
     mkdirSync(legacyDir, { recursive: true });
     writeFileSync(
       path.join(legacyDir, "config.json"),
@@ -169,7 +210,7 @@ describe("config.ts", () => {
   });
 
   it("migrates a legacy usage.json alone (no config.json) into accounts/legacy/", async () => {
-    const legacyDir = path.join(fakeHome, ".config", "cc-daily-usage");
+    const legacyDir = path.join(fakeHome, ".config", "cc-spend");
     mkdirSync(legacyDir, { recursive: true });
     writeFileSync(
       path.join(legacyDir, "usage.json"),
@@ -187,7 +228,7 @@ describe("config.ts", () => {
   });
 
   it("migrates legacy single-account config.json/usage.json into accounts/legacy/ once", async () => {
-    const legacyDir = path.join(fakeHome, ".config", "cc-daily-usage");
+    const legacyDir = path.join(fakeHome, ".config", "cc-spend");
     mkdirSync(legacyDir, { recursive: true });
     writeFileSync(
       path.join(legacyDir, "config.json"),

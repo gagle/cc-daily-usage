@@ -45,7 +45,7 @@ README when `src/rules.ts` changes.
 
 ## Surfaces
 
-- `cc-daily-usage insights [--week|--month] [--json] [--rules] [--snooze <rule> <N>d]`:
+- `cc-spend insights [--week|--month] [--json] [--rules] [--snooze <rule> <N>d]`:
   catches the index up, rewrites `feed.json`, prints each finding (a blank
   line between them) with its evidence, `why` and fix; a finding with no $
   (R8) prints no amount. `--rules` prints every rule (checks, why, $, fix) and

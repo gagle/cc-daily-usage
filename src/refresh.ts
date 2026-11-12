@@ -25,7 +25,7 @@ import {
 /** A refresher that died without removing its lock stops blocking new ones after this long. */
 const LOCK_STALE_MS = 30_000;
 
-const BIN_PATH = fileURLToPath(new URL("../bin/cc-daily-usage.js", import.meta.url));
+const BIN_PATH = fileURLToPath(new URL("../bin/cc-spend.js", import.meta.url));
 
 function lockFile(accountKey: string): string {
   return path.join(accountDir(accountKey), "refresh.lock");
@@ -51,7 +51,7 @@ function acquireLock(accountKey: string, now: Date): boolean {
 
 /**
  * Stale-while-revalidate: when api-cache.json is older than its TTL, start ONE detached
- * `cc-daily-usage --refresh <key>` and return at once. The caller renders the cached reading now; the next
+ * `cc-spend --refresh <key>` and return at once. The caller renders the cached reading now; the next
  * render (event or statusLine.refreshInterval) shows the fresh one. Network latency never reaches a render.
  * Returns true when a refresher was started.
  */

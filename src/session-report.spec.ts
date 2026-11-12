@@ -42,7 +42,7 @@ const compactLine = (minutes: number): string =>
 let root: string;
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "ccdu-session-"));
+  root = mkdtempSync(path.join(tmpdir(), "ccs-session-"));
   const project = path.join(root, "-work-app");
   mkdirSync(path.join(project, "abcd1234-0000", "subagents"), { recursive: true });
   writeFileSync(

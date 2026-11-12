@@ -2,7 +2,7 @@
 
 Read this folder before the source — it is kept current by the drift gate
 (`scripts/doc-drift.mjs`) and is cheaper than re-deriving behavior from `src/`.
-`cc-daily-usage` is a zero-dependency CLI + statusline + terminal calendar that
+`cc-spend` is a zero-dependency CLI + statusline + terminal calendar that
 keeps Claude Code spend predictable.
 
 | Doc                                                          | Read it for                                                                    | Keywords                               |

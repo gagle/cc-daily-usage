@@ -20,7 +20,7 @@ async function fresh(): Promise<typeof LayoutModule> {
 }
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(path.join(tmpdir(), "ccdu-layout-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "ccs-layout-"));
 });
 
 afterEach(() => {

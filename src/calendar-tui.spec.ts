@@ -37,7 +37,7 @@ const KEY = "dev_example_com";
 const WEEKDAYS = [1, 2, 5, 6, 7, 8, 9, 12, 13, 14, 15, 16, 19, 20, 21, 22, 23, 26, 27, 28, 29, 30];
 
 function accountDir(): string {
-  return path.join(fakeHome, ".config", "cc-daily-usage", "accounts", KEY);
+  return path.join(fakeHome, ".config", "cc-spend", "accounts", KEY);
 }
 
 function seed(config: Partial<Config>, usage: Partial<UsageState> = {}, api?: unknown): void {
@@ -140,7 +140,7 @@ async function harness(): Promise<Harness> {
 }
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-calendar-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-calendar-"));
   vi.stubEnv("TZ", "UTC");
 });
 

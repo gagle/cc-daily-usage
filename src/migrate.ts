@@ -14,7 +14,7 @@ export function schemaVersionOf(value: Record<string, unknown>): number {
 
 /**
  * Runs `migrations[from..]` in order; the current version is `migrations.length`. A file of a higher
- * version is `future`: written by a newer cc-daily-usage, so the caller must not rewrite it. Running it on
+ * version is `future`: written by a newer cc-spend, so the caller must not rewrite it. Running it on
  * its own output is a no-op (`current`).
  */
 export function migrateRecord(

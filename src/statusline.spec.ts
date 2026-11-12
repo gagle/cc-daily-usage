@@ -29,7 +29,7 @@ const NOW = new Date("2026-10-07T10:00:00.000Z"); // a Wednesday
 const KEY = "dev_example_com";
 
 function accountDir(): string {
-  return path.join(fakeHome, ".config", "cc-daily-usage", "accounts", KEY);
+  return path.join(fakeHome, ".config", "cc-spend", "accounts", KEY);
 }
 
 function writeAccount(organizationType: string | undefined): void {
@@ -53,7 +53,7 @@ const OCTOBER_WEEKDAYS = [
 ];
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-statusline-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-statusline-"));
   requestApiRefreshMock.mockReset();
   vi.stubEnv("TZ", "UTC");
   vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "");
@@ -523,7 +523,7 @@ describe("account switch", () => {
   const usageOf = (key: string): Record<string, unknown> =>
     JSON.parse(
       readFileSync(
-        path.join(fakeHome, ".config", "cc-daily-usage", "accounts", key, "usage.json"),
+        path.join(fakeHome, ".config", "cc-spend", "accounts", key, "usage.json"),
         "utf8",
       ),
     ) as Record<string, unknown>;
@@ -575,7 +575,7 @@ describe("account switch", () => {
     await buildStatuslineState({ session_id: "s1", cost: { total_cost_usd: 15 } }, at(13));
     expect(usageOf(PRO).apiEqTotal).toBe(13);
     const log = JSON.parse(
-      readFileSync(path.join(fakeHome, ".config", "cc-daily-usage", "account-log.json"), "utf8"),
+      readFileSync(path.join(fakeHome, ".config", "cc-spend", "account-log.json"), "utf8"),
     ) as { switches: Array<{ key: string }> };
     expect(log.switches.map((entry) => entry.key)).toEqual([PRO, KEY, PRO]);
   });
@@ -598,15 +598,13 @@ describe("account switch", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
     login("dev@example.com", "claude_enterprise");
     await buildStatuslineState({ session_id: "s1", cost: { total_cost_usd: 1 } }, NOW);
-    expect(existsSync(path.join(fakeHome, ".config", "cc-daily-usage", "account-log.json"))).toBe(
-      false,
-    );
+    expect(existsSync(path.join(fakeHome, ".config", "cc-spend", "account-log.json"))).toBe(false);
   });
 
   it("takeOverSession takes the newest other sighting, with its miss data", async () => {
     const { takeOverSession } = await fresh();
     const write = (key: string, sessions: Record<string, unknown>): void => {
-      const dir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", key);
+      const dir = path.join(fakeHome, ".config", "cc-spend", "accounts", key);
       mkdirSync(dir, { recursive: true });
       writeFileSync(path.join(dir, "usage.json"), JSON.stringify({ sessions }));
     };
@@ -864,7 +862,7 @@ describe("runners", () => {
     writeJson("config.json", { schemaVersion: 99, monthlyCap: 1, laboralDays: {} });
     const { runStatuslineLine } = await fresh();
     await runStatuslineLine('{"model":{"display_name":"Opus"}}');
-    expect(written.join("")).toMatch(/^⚠ update cc-daily-usage \| /);
+    expect(written.join("")).toMatch(/^⚠ update cc-spend \| /);
   });
 
   it("readStdin with no explicit raw for the JSON runner", async () => {

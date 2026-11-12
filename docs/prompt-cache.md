@@ -98,8 +98,8 @@ of misses by cause (`prompt_cache.miss_causes`, Claude Code v2.1.260+); see
 
 ## Prompt gate (`src/prompt-gate.ts`)
 
-A `UserPromptSubmit` hook (`cc-daily-usage --prompt-gate`, installed by
-`cc-daily-usage statusline`, removed by `uninstall`). When a prompt is sent
+A `UserPromptSubmit` hook (`cc-spend --prompt-gate`, installed by
+`cc-spend statusline`, removed by `uninstall`). When a prompt is sent
 while the cache is cold and the re-send would cost at least
 `promptGateMinUsd` (config, default $1, `0` turns it off), the prompt is
 blocked — a blocked prompt is never sent, so it costs $0 — with the price and
@@ -118,7 +118,7 @@ input and can still be blocked; set `promptGateMinUsd` to `0` in sessions that r
 Each model has its own cache, so a switch re-sends the whole conversation
 uncached: `context_tokens × new model input × (1.25 for 5m | 2 for 1h)`, paid
 once, plus the old model's warm cache is lost. A `PreModelSwitch` hook
-(`cc-daily-usage --model-switch`, installed and removed with the prompt gate)
+(`cc-spend --model-switch`, installed and removed with the prompt gate)
 reads Claude Code's own estimate, `estimated_cache_write_usd`; we do not
 price it. `decideModelSwitch`:
 

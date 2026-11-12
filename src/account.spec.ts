@@ -26,7 +26,7 @@ async function freshAccountModule(): Promise<typeof AccountModule> {
 
 describe("account.ts", () => {
   beforeEach(() => {
-    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-account-test-"));
+    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-account-test-"));
     fetchOauthProfileMock.mockReset();
   });
 
@@ -94,13 +94,13 @@ describe("account.ts", () => {
       const again = await resolveActiveAccount();
       expect(again?.email).toBe("o@example.com");
       expect(fetchOauthProfileMock).toHaveBeenCalledTimes(1);
-      const cacheFile = path.join(fakeHome, ".config", "cc-daily-usage", "profiles.json");
+      const cacheFile = path.join(fakeHome, ".config", "cc-spend", "profiles.json");
       expect(readFileSync(cacheFile, "utf8")).not.toContain("session-token");
     });
 
     it("an unreadable or non-object profile cache is ignored; a failed cache write is harmless", async () => {
       process.env.CLAUDE_CODE_OAUTH_TOKEN = "session-token";
-      const dir = path.join(fakeHome, ".config", "cc-daily-usage");
+      const dir = path.join(fakeHome, ".config", "cc-spend");
       mkdirSync(path.join(dir, "profiles.json"), { recursive: true }); // a directory: read and write both fail
       fetchOauthProfileMock.mockResolvedValue({ account: { email_address: "o@example.com" } });
       const { resolveActiveAccount } = await freshAccountModule();

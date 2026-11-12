@@ -25,7 +25,7 @@ const NOW_SEC = NOW.getTime() / 1000;
 const KEY = "dev_example_com";
 
 function accountDir(): string {
-  return path.join(fakeHome, ".config", "cc-daily-usage", "accounts", KEY);
+  return path.join(fakeHome, ".config", "cc-spend", "accounts", KEY);
 }
 
 function seed(
@@ -62,7 +62,7 @@ function seed(
 const COLD = { expiresAt: NOW_SEC - 10, coldUsd: 2.45, warmUsd: 0.1 };
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-gate-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-gate-"));
   vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "");
 });
 

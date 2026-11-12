@@ -117,8 +117,8 @@ export function formatInsights(advice: ReadonlyArray<Finding>, window: CoachWind
   return [
     lines.join("\n\n"),
     "",
-    "API-equivalent estimates. Every rule explained: cc-daily-usage insights --rules",
-    "Snooze one: cc-daily-usage insights --snooze R1 7d",
+    "API-equivalent estimates. Every rule explained: cc-spend insights --rules",
+    "Snooze one: cc-spend insights --snooze R1 7d",
   ].join("\n");
 }
 
@@ -144,7 +144,7 @@ export function formatRules(advice: ReadonlyArray<Finding>, window: CoachWindow)
     ].join("\n"),
   );
   return [
-    `What cc-daily-usage insights checks, over the last ${window === "week" ? "7" : "30"} days (--month for 30). ● = found now.`,
+    `What cc-spend insights checks, over the last ${window === "week" ? "7" : "30"} days (--month for 30). ● = found now.`,
     "",
     blocks.join("\n\n"),
     "",

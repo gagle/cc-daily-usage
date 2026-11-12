@@ -217,7 +217,7 @@ describe("coach rules", () => {
     expect(only(findings, "R6")).toMatchObject({
       usd: 15,
       evidence: "session- cost $10.00 vs median $1.00 (+1 more)",
-      fix: { kind: "command", value: "cc-daily-usage report week --by session" },
+      fix: { kind: "command", value: "cc-spend report week --by session" },
     });
     const even = coach(input({ sessions: sessions([1, 1, 1, 1, 1, 1, 3, 10]) }));
     expect(only(even, "R6")).toMatchObject({

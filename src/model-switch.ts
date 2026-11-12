@@ -50,7 +50,7 @@ export function decideModelSwitch(
       },
     };
   }
-  return { systemMessage: `cc-daily-usage: switching to ${target} ${cost}.` };
+  return { systemMessage: `cc-spend: switching to ${target} ${cost}.` };
 }
 
 /** Hidden `--model-switch`: the PreModelSwitch hook entry point. Never throws and always exits 0 — a broken

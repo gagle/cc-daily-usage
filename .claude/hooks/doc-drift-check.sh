@@ -11,7 +11,7 @@ root="${CLAUDE_PROJECT_DIR:-}"
 script="$root/scripts/doc-drift.mjs"
 [ -f "$script" ] || exit 0
 
-marker_dir="${TMPDIR:-/tmp}/cc-daily-usage-doc-drift"
+marker_dir="${TMPDIR:-/tmp}/cc-spend-doc-drift"
 marker="$marker_dir/${session:-nosession}"
 mkdir -p "$marker_dir" 2>/dev/null || true
 [ -e "$marker" ] && exit 0

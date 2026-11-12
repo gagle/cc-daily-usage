@@ -30,7 +30,7 @@ const PAYLOAD = {
 let written: Array<string>;
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(path.join(tmpdir(), "ccdu-switch-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "ccs-switch-"));
   written = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     written.push(String(chunk));
@@ -59,15 +59,13 @@ describe("decideModelSwitch", () => {
   it("cold cache, under the threshold, or threshold off → only show the cost", async () => {
     const { decideModelSwitch } = await fresh();
     const message = {
-      systemMessage:
-        "cc-daily-usage: switching to claude-opus-5 re-sends 182k tokens uncached: ~$1.14.",
+      systemMessage: "cc-spend: switching to claude-opus-5 re-sends 182k tokens uncached: ~$1.14.",
     };
     expect(decideModelSwitch({ ...PAYLOAD, prompt_cache_warm: false }, 1)).toEqual(message);
     expect(decideModelSwitch(PAYLOAD, 2)).toEqual(message);
     expect(decideModelSwitch(PAYLOAD, 0)).toEqual(message);
     expect(decideModelSwitch({ estimated_cache_write_usd: 0.5 }, 1)).toEqual({
-      systemMessage:
-        "cc-daily-usage: switching to the new model re-sends 0k tokens uncached: ~$0.50.",
+      systemMessage: "cc-spend: switching to the new model re-sends 0k tokens uncached: ~$0.50.",
     });
   });
 
@@ -88,7 +86,7 @@ describe("runModelSwitch", () => {
       path.join(fakeHome, ".claude.json"),
       JSON.stringify({ oauthAccount: { emailAddress: "dev@example.com" } }),
     );
-    const dir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "dev_example_com");
+    const dir = path.join(fakeHome, ".config", "cc-spend", "accounts", "dev_example_com");
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       path.join(dir, "config.json"),

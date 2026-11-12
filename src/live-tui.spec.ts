@@ -49,7 +49,7 @@ let mainFile: string;
 
 beforeEach(() => {
   vi.resetModules();
-  fakeHome = mkdtempSync(path.join(tmpdir(), "ccdu-live-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "ccs-live-"));
   root = path.join(fakeHome, ".claude", "projects");
   mkdirSync(path.join(root, "proj", "s1", "subagents"), { recursive: true });
   mainFile = path.join(root, "proj", "s1.jsonl");
@@ -155,7 +155,7 @@ describe("readFeedState", () => {
   it("missing, then ok", async () => {
     const { readFeedState } = await fresh();
     expect(readFeedState("a")).toEqual({ kind: "missing" });
-    const dir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "a");
+    const dir = path.join(fakeHome, ".config", "cc-spend", "accounts", "a");
     mkdirSync(dir, { recursive: true });
     writeFileSync(path.join(dir, "feed.json"), '{"schemaVersion":1}');
     expect(readFeedState("a").kind).toBe("ok");

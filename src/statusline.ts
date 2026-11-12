@@ -22,6 +22,7 @@ import {
   loadLimitSamples,
   loadSessionsMap,
   loadUsage,
+  moveLegacyRootDir,
   peekSessionCost,
   saveAccountLog,
   saveConfig,
@@ -511,6 +512,7 @@ export async function buildStatuslineState(
 
 /** Hidden `--statusline`: one JSON line (StatuslineState). Kept for shims installed by older versions. */
 export async function runStatuslineJson(raw?: string): Promise<number> {
+  moveLegacyRootDir();
   const payload = parsePayload(raw ?? (await readStdin()));
   process.stdout.write(`${JSON.stringify(await buildStatuslineState(payload))}\n`);
   return 0;
@@ -519,6 +521,7 @@ export async function runStatuslineJson(raw?: string): Promise<number> {
 /** Hidden `--statusline-line` and the installed shim's entry point: the finished ANSI line. A failure in
  * the budget pipeline still prints the session part of the line. */
 export async function runStatuslineLine(raw?: string): Promise<number> {
+  moveLegacyRootDir();
   const payload = parsePayload(raw ?? (await readStdin()));
   const now = new Date();
   let state: StatuslineState | null;
@@ -530,6 +533,6 @@ export async function runStatuslineLine(raw?: string): Promise<number> {
   const cwd = payload.workspace?.current_dir ?? payload.cwd ?? "";
   const line = renderStatusline(payload, state, readGitBranch(cwd), now, loadLayout());
   // A file from a newer version is left alone; say so instead of quietly showing old numbers.
-  process.stdout.write(listNewerFiles().length > 0 ? `⚠ update cc-daily-usage | ${line}` : line);
+  process.stdout.write(listNewerFiles().length > 0 ? `⚠ update cc-spend | ${line}` : line);
   return 0;
 }

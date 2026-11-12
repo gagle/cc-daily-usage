@@ -25,7 +25,7 @@ owner = account whose sessions-map.json has the session id, else "unattributed";
                             attributedUsd, apiErrors, ccRuns
 ```
 
-- Offsets live in `~/.config/cc-daily-usage/index/offsets.json` with the size,
+- Offsets live in `~/.config/cc-spend/index/offsets.json` with the size,
   mtime, the last 64 dedupe keys and the last turn's context (`context`) per
   file. An unchanged file is skipped; a
   file smaller than its offset was rewritten and is read from the start.
@@ -96,9 +96,9 @@ owner = account whose sessions-map.json has the session id, else "unattributed";
 
 ## `report` (`src/report.ts`)
 
-`cc-daily-usage report [today|week|month|30d|YYYY-MM] [--by model|project|component|subagent|session|day] [--chart] [--json] [--account <key|unattributed>]`
+`cc-spend report [today|week|month|30d|YYYY-MM] [--by model|project|component|subagent|session|day] [--chart] [--json] [--account <key|unattributed>]`
 
-`cc-daily-usage report --session <id or prefix> [--json]`
+`cc-spend report --session <id or prefix> [--json]`
 
 - Ranges are local days: `week` = rolling 7 days, `month` = local month to date.
 - Columns: input, output, cache read, cache write, total; footer with the

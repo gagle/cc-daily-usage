@@ -704,11 +704,7 @@ function renderHint(model: CalendarModel, style: RenderStyle): string {
 function renderDetail(detail: DayBreakdown, style: RenderStyle): Array<string> {
   if (detail.usd === 0 && detail.sessions.length === 0) {
     return [
-      sgr(
-        style,
-        "2",
-        `${detail.day}: no transcript spend indexed (cc-daily-usage report catches up)`,
-      ),
+      sgr(style, "2", `${detail.day}: no transcript spend indexed (cc-spend report catches up)`),
     ];
   }
   const list = (entries: ReadonlyArray<readonly [string, number]>): string =>
