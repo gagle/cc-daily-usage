@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { API_CACHE_TTL_MS } from "./anthropic-usage.js";
+import { localDateKey } from "./clock.js";
 import { ACCOUNTS_DIR } from "./config.js";
 import { schemaVersionOf } from "./migrate.js";
 import { binPath, shippedStatusline, statuslineEntryUrl } from "./statusline-install.js";
@@ -18,7 +19,8 @@ import {
   STATUSLINE_FILE,
   SUBAGENT_LINE_FLAG,
 } from "./statusline-shared.js";
-import { lastPass } from "./transcript-index.js";
+import { lastPass, loadHabits, loadRollups } from "./transcript-index.js";
+import { type Habits, parseRowKey } from "./transcript-parse.js";
 
 export interface Check {
   readonly status: "ok" | "warn" | "fail";
@@ -176,6 +178,8 @@ export function checkAccounts(now: Date): ReadonlyArray<Check> {
     checks.push(...checkRefresher(key, dir, values, now));
     const plan = checkPlan(key, values);
     if (plan !== null) checks.push(plan);
+    const prompts = checkPromptCounts(mainTurnsByDay(key, now), loadHabits(key));
+    if (prompts !== null) checks.push(prompts);
   }
   return checks;
 }
@@ -240,6 +244,52 @@ function checkRefresher(
         (now.getTime() - fetchedAt > 10 * API_CACHE_TTL_MS ? " (no session since)" : ""),
     ),
   ];
+}
+
+/** Days checked for prompt counts, today included. */
+const PROMPT_CHECK_DAYS = 7;
+/** A day needs this many main-session turns before 0 prompts is suspicious: a reply that runs past midnight
+ * puts a few turns on a day with no prompt. # ponytail: fixed guess; a day of long autonomous runs from one
+ * prompt can still pass it. */
+const PROMPT_CHECK_MIN_TURNS = 10;
+
+/** Main-session turns per local day over the last PROMPT_CHECK_DAYS days, from the account's index. */
+export function mainTurnsByDay(key: string, now: Date): Record<string, number> {
+  const days = Array.from({ length: PROMPT_CHECK_DAYS }, (_, back) =>
+    localDateKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - back)),
+  );
+  const turns: Record<string, number> = {};
+  for (const [rowKey, row] of loadRollups(key, [...new Set(days.map((day) => day.slice(0, 7)))])) {
+    const { day, scope } = parseRowKey(rowKey);
+    if (scope === "main" && days.includes(day)) turns[day] = (turns[day] ?? 0) + row.turns;
+  }
+  return turns;
+}
+
+/**
+ * Prompt counting reads transcript lines that are not in the public docs (`parseHabit`). A busy day with 0
+ * prompts means Claude Code changed the format and `record` undercounts; null with no busy day.
+ */
+export function checkPromptCounts(
+  turnsByDay: Readonly<Record<string, number>>,
+  habits: Readonly<Record<string, Habits>>,
+): Check | null {
+  const busy = Object.entries(turnsByDay)
+    .filter(([, turns]) => turns >= PROMPT_CHECK_MIN_TURNS)
+    .map(([day]) => day)
+    .sort();
+  if (busy.length === 0) return null;
+  const missing = busy.filter((day) => (habits[day]?.prompt ?? 0) === 0);
+  if (missing.length === 0) {
+    return ok(
+      "prompts",
+      `counted on ${String(busy.length)} busy day(s) of the last ${String(PROMPT_CHECK_DAYS)}`,
+    );
+  }
+  return warn(
+    "prompts",
+    `${String(missing.length)} busy day(s) with 0 prompts (${missing.join(", ")}): Claude Code's transcript format may have changed; cc-spend record undercounts prompts`,
+  );
 }
 
 /** The transcript index: when its last pass ran and how many bytes it left for the next one. */

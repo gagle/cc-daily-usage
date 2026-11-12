@@ -84,7 +84,9 @@ the subagent line, then per account each file's `schemaVersion` (garbled or
 newer files fail), a dead `refresh.lock`, the age of the last usage reading
 and `feed.json`, and the plan (tier, subscription status, trial end; a warn
 when the subscription is not active) with the Claude Code version of the
-newest session. Last: the transcript index's last pass and the bytes it left
+newest session, and the prompt counts (a warn when a day of the last 7 with
+10 or more main-session turns has 0 prompts: the transcript format changed and
+`record` undercounts). Last: the transcript index's last pass and the bytes it left
 behind (a warn when behind or never run).
 
 ## `cc-spend report`

@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as DoctorModule from "./doctor.js";
+import { emptyHabits, emptyRollup, type Habits, rowKey } from "./transcript-parse.js";
 
 let fakeHome: string;
 
@@ -241,6 +242,94 @@ describe("checkPlan", () => {
     expect(
       checkPlan("a", { "api-cache.json": { plan: { subscriptionStatus: "past_due" } } }),
     ).toMatchObject({ status: "warn", detail: "subscription past_due" });
+  });
+});
+
+describe("checkPromptCounts", () => {
+  const habits = (prompt: number): Habits => ({ ...emptyHabits(), prompt });
+
+  it("null with no busy day; ok when every busy day has prompts; warn naming the days without", async () => {
+    const { checkPromptCounts } = await fresh();
+    expect(checkPromptCounts({}, {})).toBeNull();
+    expect(checkPromptCounts({ "2026-10-14": 9 }, {})).toBeNull(); // a few turns past midnight
+    expect(
+      checkPromptCounts(
+        { "2026-10-14": 10, "2026-10-15": 40 },
+        { "2026-10-14": habits(1), "2026-10-15": habits(5) },
+      ),
+    ).toEqual({ status: "ok", name: "prompts", detail: "counted on 2 busy day(s) of the last 7" });
+    expect(
+      checkPromptCounts(
+        { "2026-10-15": 40, "2026-10-13": 12, "2026-10-14": 30 },
+        { "2026-10-14": habits(3), "2026-10-15": habits(0) },
+      ),
+    ).toEqual({
+      status: "warn",
+      name: "prompts",
+      detail:
+        "2 busy day(s) with 0 prompts (2026-10-13, 2026-10-15): Claude Code's transcript format may have changed; cc-spend record undercounts prompts",
+    });
+  });
+
+  it("mainTurnsByDay: main-session turns of the last 7 local days, across a month edge", async () => {
+    vi.stubEnv("TZ", "UTC");
+    const index = path.join(accountDir("acct"), "index");
+    mkdirSync(index, { recursive: true });
+    const key = (day: string, scope = "main"): string =>
+      rowKey({ day, project: "/w", model: "claude-opus-5-5", scope, speed: "standard" });
+    const rows = (entries: Record<string, number>): string =>
+      JSON.stringify({
+        schemaVersion: 1,
+        rows: Object.fromEntries(
+          Object.entries(entries).map(([k, turns]) => [k, { ...emptyRollup(), turns }]),
+        ),
+      });
+    writeFileSync(
+      path.join(index, "2026-09.json"),
+      rows({ [key("2026-09-30")]: 4, [key("2026-09-01")]: 99 }),
+    );
+    writeFileSync(
+      path.join(index, "2026-10.json"),
+      rows({
+        [key("2026-10-01")]: 2,
+        [key("2026-10-01", "subagent:Explore")]: 50,
+        [key("2026-10-02")]: 3,
+      }),
+    );
+    const { mainTurnsByDay } = await fresh();
+    expect(mainTurnsByDay("acct", new Date("2026-10-02T12:00:00.000Z"))).toEqual({
+      "2026-09-30": 4,
+      "2026-10-01": 2,
+      "2026-10-02": 3,
+    });
+  });
+
+  it("checkAccounts adds it for an account with a busy day", async () => {
+    vi.stubEnv("TZ", "UTC");
+    const index = path.join(accountDir("busy"), "index");
+    mkdirSync(index, { recursive: true });
+    writeFileSync(
+      path.join(index, "2026-10.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        rows: {
+          [rowKey({
+            day: "2026-10-15",
+            project: "/w",
+            model: "m",
+            scope: "main",
+            speed: "standard",
+          })]: {
+            ...emptyRollup(),
+            turns: 20,
+          },
+        },
+      }),
+    );
+    const { checkAccounts } = await fresh();
+    expect(checkAccounts(NOW)).toContainEqual(
+      expect.objectContaining({ status: "warn", name: "prompts" }),
+    );
   });
 });
 

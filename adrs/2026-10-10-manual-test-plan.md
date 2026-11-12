@@ -316,6 +316,7 @@ payload() { printf '%s' "$1" | HOME=$SANDBOX node /path/to/cc-spend/bin/cc-spend
 | R7  | type prompts, `/clear`, `/compact`, stop a reply with Esc; `ccs record` | VOLUME `commands` line counts each; `prompts` per day                                                                                            | `src/transcript-parse.spec.ts`, `src/transcript-index.spec.ts` |
 | R8  | `ccs record --json`                                                     | `baseline`, `closed`, `current` with `values` per habit                                                                                          | `src/record.spec.ts`                                           |
 | R9  | `ccs record` with `NO_COLOR=1` or piped                                 | no ANSI codes                                                                                                                                    | `src/record.spec.ts`                                           |
+| R10 | `ccs doctor` after a busy day                                           | `✔ prompts: counted on N busy day(s) of the last 7`; with habits.json emptied: `⚠ prompts: N busy day(s) with 0 prompts (…)`                     | `src/doctor.spec.ts`                                           |
 
 ## Consequences
 

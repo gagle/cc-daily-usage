@@ -81,7 +81,9 @@ public docs; checked on real files 2026-11-12:
 | `clear`, `model`         | text starting `<command-name>/clear` / `<command-name>/model`                                               |
 | `compact`, `autoCompact` | `compact_boundary` with trigger `manual` / anything else                                                    |
 
-`PRICES_VERSION` `.2` rebuilt the index once so the counts cover every
+`cc-spend doctor` warns when a day of the last 7 with 10 or more main-session
+turns counted 0 prompts (`checkPromptCounts` in `src/doctor.ts`): the sign that
+the format changed. `PRICES_VERSION` `.2` rebuilt the index once so the counts cover every
 transcript still on disk; a day whose transcripts are gone keeps its old counts.
 
 ## Surfaces
