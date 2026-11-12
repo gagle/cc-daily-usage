@@ -197,7 +197,7 @@ describe("arguments", () => {
     await runCli(["--statusline-line"]);
     expect(errors).not.toHaveBeenCalled();
     await runCli(["--help"]);
-    expect(errors).toHaveBeenCalledWith(expect.stringContaining("npm i -g cc-spend"));
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("npm i -g @gllamas/cc-spend"));
   });
 
   it("help for no args, -h or --help anywhere", async () => {
@@ -244,7 +244,7 @@ describe("statusline / uninstall", () => {
     const { runCli } = await fresh();
     isEphemeralInstallMock.mockReturnValue(true);
     try {
-      await expect(runCli(["statusline"])).rejects.toThrow(/npm install -g cc-spend/);
+      await expect(runCli(["statusline"])).rejects.toThrow("npm install -g @gllamas/cc-spend");
       await expect(runCli(["init"])).rejects.toThrow(/temporary npx\/dlx cache/);
     } finally {
       isEphemeralInstallMock.mockReturnValue(false);

@@ -43,7 +43,8 @@ function addResetsPart(value: Record<string, unknown>): Record<string, unknown> 
 }
 export const LAYOUT_MIGRATIONS: ReadonlyArray<Migration> = [addVersionOnly, addResetsPart];
 
-export const NEWER_FILE_HINT = "A file was written by a newer cc-spend. Run: npm i -g cc-spend";
+export const NEWER_FILE_HINT =
+  "A file was written by a newer cc-spend. Run: npm i -g @gllamas/cc-spend";
 
 // Files of a format newer than this code: read what is safe, never rewrite (a downgrade guard).
 const newerFiles = new Set<string>();

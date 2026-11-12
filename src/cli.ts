@@ -28,7 +28,7 @@ Flags:
 `;
 
 const EPHEMERAL_INSTALL =
-  "This copy runs from a temporary npx/dlx cache, which is cleared later and would break the statusline.\nInstall it first: npm install -g cc-spend";
+  "This copy runs from a temporary npx/dlx cache, which is cleared later and would break the statusline.\nInstall it first: npm install -g @gllamas/cc-spend";
 
 /** Installs point Claude Code at this copy's files: refuse a copy that will be deleted. */
 async function assertPersistentInstall(): Promise<void> {
