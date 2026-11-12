@@ -20,7 +20,7 @@ const FETCH_TIMEOUT_MS = 5000;
 /** The server sends the limit-reset grants (`cedar_ember`) only to a Claude Code client ("surface"): with
  * any other user agent it answers `ineligible_reason: "surface"`. The suffix names this tool.
  * # ponytail: undocumented gate, may change without notice; the part then hides (no grants). */
-const RESETS_USER_AGENT = "claude-cli/2.1.319 (external, cli) cc-daily-usage";
+const RESETS_USER_AGENT = "claude-cli/2.1.319 (external, cli) cc-spend";
 
 export interface ResolvedToken {
   readonly token: string;

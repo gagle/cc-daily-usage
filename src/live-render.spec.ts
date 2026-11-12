@@ -158,7 +158,7 @@ describe("renderLive: sessions and this session", () => {
     const old = session("bbbb2222", [[{ timestamp: iso(-10 * 60_000), cwd: "C:\\code\\other" }]]);
     const out = text(frame({ sessions: [session("aaaa1111", [[{}]]), old], selected: 1 }));
     expect(out).toMatch(
-      /^cc-daily-usage live · 2 active · \d\d:\d\d +q quit · ↑↓ session · tab advisor$/m,
+      /^cc-spend live · 2 active · \d\d:\d\d +q quit · ↑↓ session · tab advisor$/m,
     );
     expect(out).toMatch(/^SESSIONS$/m);
     expect(out).toMatch(/^ {4}aaaa app +█{16} +\$0\.04 +≈0\.0% wk +● live$/m);
@@ -344,7 +344,7 @@ describe("renderLive: feed", () => {
     expect(out).toMatch(/^ {2}7 days {8}[█░]{24} {3}40% {2}.* · comfortable$/m);
     expect(out).toMatch(/^SPEND {3}today \$18\.40 · 7 days \$96\.00 · month \$310\.00$/m);
     expect(out).toMatch(
-      /^» R1 Subagents on a premium model ~\$12\.40\/week {2}why and fix: cc-daily-usage insights$/m,
+      /^» R1 Subagents on a premium model ~\$12\.40\/week {2}why and fix: cc-spend insights$/m,
     );
     expect(out).toContain("feed 42s old");
   });
@@ -439,10 +439,10 @@ describe("renderLive: feed", () => {
   it("no advice; missing and newer feeds", () => {
     expect(text(frame({ feed: feed({ advice: [] }) }))).not.toContain("»");
     expect(text(frame({ feed: { kind: "missing" } }))).toContain(
-      "no feed.json yet: run cc-daily-usage init",
+      "no feed.json yet: run cc-spend init",
     );
     const newer = text(frame({ feed: { kind: "newer" } }));
-    expect(newer).toContain("feed.json is newer: update cc-daily-usage");
+    expect(newer).toContain("feed.json is newer: update cc-spend");
     expect(newer).not.toContain("SPEND");
   });
 });

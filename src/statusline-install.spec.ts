@@ -21,7 +21,7 @@ async function freshModule(): Promise<typeof StatuslineInstallModule> {
 
 describe("installStatusline", () => {
   beforeEach(() => {
-    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-install-test-"));
+    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-install-test-"));
     mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
   });
 
@@ -58,7 +58,7 @@ describe("installStatusline", () => {
     const result = await installStatusline(confirm);
     expect(result.installed).toBe(true);
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("replaced"));
-    expect(readFileSync(statuslinePath, "utf8")).toContain("cc-daily-usage:managed");
+    expect(readFileSync(statuslinePath, "utf8")).toContain("cc-spend:managed");
   });
 
   it("does nothing when the user declines", async () => {
@@ -85,10 +85,7 @@ describe("installStatusline", () => {
   it("upgrades silently in place when the managed script content changed but the marker is still present", async () => {
     const { installStatusline } = await freshModule();
     const statuslinePath = path.join(fakeHome, ".claude", "statusline.mjs");
-    writeFileSync(
-      statuslinePath,
-      "// cc-daily-usage:managed vdeadbeef\nconsole.log('old-version')",
-    );
+    writeFileSync(statuslinePath, "// cc-spend:managed vdeadbeef\nconsole.log('old-version')");
     const confirm = vi.fn();
     const result = await installStatusline(confirm);
     expect(result.installed).toBe(true);
@@ -122,12 +119,9 @@ describe("installStatusline", () => {
     const shim = readFileSync(statuslinePath, "utf8");
     expect(statuslineEntryUrl()).toMatch(/^file:\/\/.*statusline\.js$/);
     expect(shim).toContain(`const ENTRY = "${statuslineEntryUrl()}";`);
-    expect(shim).not.toContain("__CC_DAILY_USAGE_");
+    expect(shim).not.toContain("__CC_SPEND_");
     const previous = JSON.parse(
-      readFileSync(
-        path.join(fakeHome, ".config", "cc-daily-usage", "previous-statusline.json"),
-        "utf8",
-      ),
+      readFileSync(path.join(fakeHome, ".config", "cc-spend", "previous-statusline.json"), "utf8"),
     ) as { statusLine: unknown; scriptBackup: string };
     expect(previous.statusLine).toEqual({ type: "command", command: "x" });
     expect(readFileSync(previous.scriptBackup, "utf8")).toBe("foreign");
@@ -136,7 +130,7 @@ describe("installStatusline", () => {
   it("a moved package (new entry path) counts as a new version", async () => {
     const { shippedStatusline } = await freshModule();
     const template =
-      '// cc-daily-usage:managed v__CC_DAILY_USAGE_VERSION__\nconst ENTRY = "__CC_DAILY_USAGE_ENTRY__";';
+      '// cc-spend:managed v__CC_SPEND_VERSION__\nconst ENTRY = "__CC_SPEND_ENTRY__";';
     const a = shippedStatusline(template, "file:///a/statusline.js");
     const b = shippedStatusline(template, "file:///b/statusline.js");
     expect(a.version).not.toBe(b.version);
@@ -146,7 +140,7 @@ describe("installStatusline", () => {
 
 describe("uninstallStatusline", () => {
   beforeEach(() => {
-    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-uninstall-test-"));
+    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-uninstall-test-"));
     mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
   });
 
@@ -191,18 +185,16 @@ describe("uninstallStatusline", () => {
 
   it("a shim installed before uninstall existed (no record) still uninstalls", async () => {
     const { uninstallStatusline } = await freshModule();
-    writeFileSync(statuslinePath(), "// cc-daily-usage:managed vdeadbeef\n");
+    writeFileSync(statuslinePath(), "// cc-spend:managed vdeadbeef\n");
     writeFileSync(settingsPath(), JSON.stringify({ statusLine: { command: "node x" } }));
     expect(uninstallStatusline()).toEqual({ removed: true, restoredFrom: null });
     expect(readSettings().statusLine).toBeUndefined();
   });
   it("isEphemeralInstall spots npx and pnpm dlx caches", async () => {
     const { isEphemeralInstall } = await import("./statusline-install.js");
-    expect(isEphemeralInstall("/home/u/.npm/_npx/1a2b/node_modules/cc-daily-usage/bin/x.js")).toBe(
-      true,
-    );
+    expect(isEphemeralInstall("/home/u/.npm/_npx/1a2b/node_modules/cc-spend/bin/x.js")).toBe(true);
     expect(isEphemeralInstall("C:\\Users\\u\\AppData\\pnpm\\dlx\\abc\\x.js")).toBe(true);
-    expect(isEphemeralInstall("/usr/local/lib/node_modules/cc-daily-usage/bin/x.js")).toBe(false);
+    expect(isEphemeralInstall("/usr/local/lib/node_modules/cc-spend/bin/x.js")).toBe(false);
     expect(isEphemeralInstall()).toBe(false);
   });
 });

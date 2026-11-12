@@ -432,7 +432,7 @@ function spendBlock(feed: Feed, frame: LiveFrame): Array<string> {
   if (top !== undefined) {
     const usd = top.usd === null ? "" : ` ~${money(top.usd)}/${top.window}`;
     lines.push(
-      `${paint("255;235;132", "»", frame.color)} ${top.id} ${top.title}${usd}  ${paint("150;150;150", "why and fix: cc-daily-usage insights", frame.color)}`,
+      `${paint("255;235;132", "»", frame.color)} ${top.id} ${top.title}${usd}  ${paint("150;150;150", "why and fix: cc-spend insights", frame.color)}`,
     );
   }
   return lines;
@@ -440,8 +440,8 @@ function spendBlock(feed: Feed, frame: LiveFrame): Array<string> {
 
 function footer(frame: LiveFrame): string {
   const notes = ["API-equivalent estimate, not a bill"];
-  if (frame.feed.kind === "missing") notes.push("no feed.json yet: run cc-daily-usage init");
-  else if (frame.feed.kind === "newer") notes.push("feed.json is newer: update cc-daily-usage");
+  if (frame.feed.kind === "missing") notes.push("no feed.json yet: run cc-spend init");
+  else if (frame.feed.kind === "newer") notes.push("feed.json is newer: update cc-spend");
   else notes.push(`feed ${span(frame.nowMs - Date.parse(frame.feed.feed.writtenAt))} old`);
   return paint("120;120;120", notes.join(" · "), frame.color);
 }
@@ -467,11 +467,11 @@ export function fit(
   ];
 }
 
-/** One full frame of `cc-daily-usage live`. Narrow terminals get shorter bars and no sparkline. */
+/** One full frame of `cc-spend live`. Narrow terminals get shorter bars and no sparkline. */
 export function renderLive(frame: LiveFrame): ReadonlyArray<string> {
   const cells = barCells(frame.width);
   const time = new Date(frame.nowMs).toTimeString().slice(0, 5);
-  const title = `cc-daily-usage live · ${String(frame.sessions.length)} active · ${time}`;
+  const title = `cc-spend live · ${String(frame.sessions.length)} active · ${time}`;
   const view = frame.view ?? "advisor";
   const keys = `q quit · ↑↓ session · tab ${view === "advisor" ? "details" : "advisor"}`;
   const sections: Array<Array<Array<string>>> = [

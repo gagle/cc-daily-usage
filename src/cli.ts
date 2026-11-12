@@ -4,7 +4,7 @@ import type { StatuslineInstallResult } from "./statusline-install.js";
 // Every operation imports its modules lazily: the hot hidden modes (`--statusline-line`, `--refresh`) and
 // the calendar notice must not pay for the init server, the installers or the calendar UI at startup.
 
-const USAGE = `cc-daily-usage <operation> [flags]
+const USAGE = `cc-spend <operation> [flags]
 
 Operations:
   init              First-run setup: install the statusline, pick work days and the monthly cap
@@ -28,7 +28,7 @@ Flags:
 `;
 
 const EPHEMERAL_INSTALL =
-  "This copy runs from a temporary npx/dlx cache, which is cleared later and would break the statusline.\nInstall it first: npm install -g cc-daily-usage";
+  "This copy runs from a temporary npx/dlx cache, which is cleared later and would break the statusline.\nInstall it first: npm install -g cc-spend";
 
 /** Installs point Claude Code at this copy's files: refuse a copy that will be deleted. */
 async function assertPersistentInstall(): Promise<void> {
@@ -93,7 +93,7 @@ async function runInitOperation(): Promise<number> {
   }
   if (hasBudget === undefined) {
     console.log(
-      "Plan not detected yet. Start one Claude Code session, then run: cc-daily-usage calendar",
+      "Plan not detected yet. Start one Claude Code session, then run: cc-spend calendar",
     );
   }
 
@@ -296,6 +296,8 @@ async function runInsightsOperation(argv: ReadonlyArray<string>): Promise<number
 }
 
 export async function runCli(argv: ReadonlyArray<string>): Promise<number> {
+  const { moveLegacyRootDir } = await import("./config.js");
+  moveLegacyRootDir();
   const code = await dispatch(argv);
   // Hidden hook modes print to Claude Code, not a person; the render shows its own marker.
   if (!HOOK_MODES.has(argv[0] ?? "")) {

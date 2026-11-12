@@ -23,4 +23,4 @@ Rendering is TypeScript: `src/statusline-render.ts` (pure, 100% covered).
    Keep the fallback line working when the import fails.
 5. Never hand-edit `~/.claude/statusline.mjs`.
 6. After the build, refresh the machine install:
-   `pnpm build && cc-daily-usage statusline`.
+   `pnpm build && cc-spend statusline`.

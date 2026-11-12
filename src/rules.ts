@@ -159,8 +159,8 @@ export const RULE_INFO: ReadonlyArray<RuleInfo> = [
     checks: "A session above 3x your median cost (and $2), once you have 8 sessions.",
     why: "One runaway session (a loop, a huge file, the wrong model) can cost more than a normal day.",
     estimate: "The outliers' $ above the median.",
-    fix: "cc-daily-usage report week --by session, then report --session <id> to see what it did.",
-    action: "see why: cc-daily-usage report --by session",
+    fix: "cc-spend report week --by session, then report --session <id> to see what it did.",
+    action: "see why: cc-spend report --by session",
   },
   {
     id: "R7",
@@ -355,7 +355,7 @@ function outlierSession(input: CoachInput): Draft | null {
     evidence: `${id.slice(0, 8)} cost ${money(top.usd)} vs median ${money(middle)}${outliers.length > 1 ? ` (+${String(outliers.length - 1)} more)` : ""}`,
     fix: {
       kind: "command",
-      value: `cc-daily-usage report ${input.window} --by session`,
+      value: `cc-spend report ${input.window} --by session`,
       text: "Look at what that session did differently",
     },
   };

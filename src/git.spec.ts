@@ -9,7 +9,7 @@ import { readGitBranch } from "./git.js";
 let root: string;
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-git-"));
+  root = mkdtempSync(path.join(tmpdir(), "cc-spend-git-"));
 });
 
 afterEach(() => {

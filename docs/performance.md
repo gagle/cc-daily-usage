@@ -8,7 +8,7 @@ must not stall.
 | Path                                       | Before                                  | After              | Node `-e 0` baseline |
 | ------------------------------------------ | --------------------------------------- | ------------------ | -------------------- |
 | Statusline render (installed shim)         | ~181–232 ms                             | ~89 ms             | ~45 ms               |
-| `cc-daily-usage calendar` first frame      | ~370–400 ms (Ink import alone ~330 ms)  | ~80–90 ms          | ~45 ms               |
+| `cc-spend calendar` first frame            | ~370–400 ms (Ink import alone ~330 ms)  | ~80–90 ms          | ~45 ms               |
 | First statusline render on a fresh install | ~37 s (walk from 1970, 20k day entries) | same as any render | —                    |
 
 Re-measure with `scripts/bench.sh` when touching the hot path. The e2e suite

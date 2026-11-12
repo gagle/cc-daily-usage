@@ -57,7 +57,7 @@ function projectDir(): string {
 }
 
 function sessionsMap(key: string, ids: ReadonlyArray<string>): void {
-  const dir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", key);
+  const dir = path.join(fakeHome, ".config", "cc-spend", "accounts", key);
   mkdirSync(dir, { recursive: true });
   const entry = {
     transcriptPath: null,
@@ -78,7 +78,7 @@ function sessionsMap(key: string, ids: ReadonlyArray<string>): void {
 
 beforeEach(() => {
   vi.resetModules();
-  fakeHome = mkdtempSync(path.join(tmpdir(), "ccdu-index-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "ccs-index-"));
   vi.stubEnv("TZ", "UTC");
 });
 
@@ -253,7 +253,7 @@ describe("runIndexPass", () => {
   });
 
   it("a session a /login moved is split by the login at each turn's time", async () => {
-    const root = path.join(fakeHome, ".config", "cc-daily-usage");
+    const root = path.join(fakeHome, ".config", "cc-spend");
     const known = (key: string, lastSeenAt: string): void => {
       mkdirSync(path.join(root, "accounts", key), { recursive: true });
       writeFileSync(
@@ -537,7 +537,7 @@ describe("runIndexPass", () => {
   it("a re-price covers account indexes too, with no unattributed index", async () => {
     sessionsMap("acct", ["s1"]);
     writeFileSync(path.join(projectDir(), "s1.jsonl"), line("a"));
-    mkdirSync(path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "empty"), {
+    mkdirSync(path.join(fakeHome, ".config", "cc-spend", "accounts", "empty"), {
       recursive: true,
     });
     const { runIndexPass, INDEX_DIR, loadSessionTotals } = await fresh();

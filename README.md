@@ -1,4 +1,4 @@
-# cc-daily-usage
+# cc-spend
 
 Know where your Claude Code spend stands, and what your next prompt costs.
 
@@ -20,8 +20,8 @@ Know where your Claude Code spend stands, and what your next prompt costs.
 ## Install
 
 ```sh
-npm install -g cc-daily-usage
-cc-daily-usage init
+npm install -g cc-spend
+cc-spend init
 ```
 
 Install it globally: `init` points Claude Code at this copy's files, so a
@@ -32,28 +32,28 @@ Node 24+.
 ## Commands
 
 ```sh
-cc-daily-usage init         # first-run setup (terminal only)
-cc-daily-usage statusline   # install / update the statusline
-cc-daily-usage calendar     # work days, daily max, history (Team/Enterprise)
-cc-daily-usage settings     # arrange the statusline: parts, order, lines
-cc-daily-usage uninstall    # remove it and restore your previous statusline
-cc-daily-usage doctor       # check Node, Claude Code, the statusline, hooks, account files
-cc-daily-usage report       # API-equivalent $ by model, project, subagent, … (week by default)
-cc-daily-usage report --chart            # the same with a stacked $ bar per row
-cc-daily-usage report --session <id>     # one session: $ over time, compactions, cold caches, where it went
-cc-daily-usage insights     # what to change to spend less, with $ and the exact fix
-cc-daily-usage live         # real-time advisor and meters of every active session (Tab: details, q quits)
+cc-spend init         # first-run setup (terminal only)
+cc-spend statusline   # install / update the statusline
+cc-spend calendar     # work days, daily max, history (Team/Enterprise)
+cc-spend settings     # arrange the statusline: parts, order, lines
+cc-spend uninstall    # remove it and restore your previous statusline
+cc-spend doctor       # check Node, Claude Code, the statusline, hooks, account files
+cc-spend report       # API-equivalent $ by model, project, subagent, … (week by default)
+cc-spend report --chart            # the same with a stacked $ bar per row
+cc-spend report --session <id>     # one session: $ over time, compactions, cold caches, where it went
+cc-spend insights     # what to change to spend less, with $ and the exact fix
+cc-spend live         # real-time advisor and meters of every active session (Tab: details, q quits)
 ```
 
 Spend is captured from Claude Code's own statusline data — nothing to log by
 hand. Each Claude account gets its own tracking under
-`~/.config/cc-daily-usage/`.
+`~/.config/cc-spend/`.
 
 ## What `insights` checks
 
-`cc-daily-usage insights` ranks what to change, each finding with its $ over
+`cc-spend insights` ranks what to change, each finding with its $ over
 the last 7 days (`--month` for 30), the evidence, why it costs and the fix.
-`cc-daily-usage insights --rules` prints this list in the terminal and marks
+`cc-spend insights --rules` prints this list in the terminal and marks
 the rules found now. The top finding also shows on the statusline (`»`) and in
 `live`. Findings under $0.50 are hidden; `--snooze R1 7d` hides one for a week.
 
@@ -64,7 +64,7 @@ the rules found now. The top finding also shows on the statusline (`»`) and in
 | R3  | High effort thinking         | Thinking bills as output, the most expensive token; high effort is enough for most tasks.                     | Use high effort by default (/effort, setting effortLevel=high).                             |
 | R4  | Prompt cache re-paid         | After a miss the whole context is written again at 1.25-2x the input rate instead of read at about 0.05-0.1x. | /compact before a break; keep the MCP servers and tools stable mid-session.                 |
 | R5  | Deep context                 | Every turn, each tool call included, re-reads the whole context; the part above 200k is paid each time.       | Compact earlier or start fresh for a new task (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50).         |
-| R6  | Outlier session              | One runaway session (a loop, a huge file, the wrong model) can cost more than a normal day.                   | cc-daily-usage report week --by session, then report --session <id> to see what it did.     |
+| R6  | Outlier session              | One runaway session (a loop, a huge file, the wrong model) can cost more than a normal day.                   | cc-spend report week --by session, then report --session <id> to see what it did.           |
 | R7  | Unused MCP servers           | A server loads into every turn of every session, used or not.                                                 | Turn off servers a project does not use (/mcp) or remove them from .mcp.json.               |
 | R8  | Running out early            | At the limit work stops until the reset; the cost is time, not $.                                             | Slow down, or move routine work to a cheaper model.                                         |
 | R9  | Older model                  | The newer model is at least as good for the same or a lower price.                                            | Switch with /model, and update the default model in your settings.                          |
@@ -86,7 +86,7 @@ in `~/.claude/projects` on this machine to total tokens and $ by model, project
 and subagent. Only token counts, model, project folder, branch, session id and
 name, turn and thinking times, hook-run counts, how the session started, and
 the names of MCP servers loaded or called (with the size of their instructions)
-are kept (in `~/.config/cc-daily-usage/`); `live` keeps nothing. `insights`
+are kept (in `~/.config/cc-spend/`); `live` keeps nothing. `insights`
 reads the size of your CLAUDE.md and MEMORY.md files. No message text is
 stored, and nothing is sent anywhere.
 

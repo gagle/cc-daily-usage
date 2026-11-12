@@ -31,7 +31,7 @@ async function freshModule(): Promise<typeof AnthropicUsageModule> {
 
 describe("anthropic-usage.ts", () => {
   beforeEach(() => {
-    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-anthropic-test-"));
+    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-anthropic-test-"));
     mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
     vi.unstubAllGlobals();
   });

@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-Decisions that shape cc-daily-usage, one file each, named
+Decisions that shape cc-spend, one file each, named
 `YYYY-MM-DD-short-title.md`. Copy [`template.md`](./template.md) to start one.
 
 ADRs are **append-only**: once accepted, a record is not edited to match later
@@ -29,3 +29,4 @@ one's status to `Superseded by …`). That is why `scripts/doc-drift.mjs` exempt
 | [2026-10-23-account-switch-attribution.md](./2026-10-23-account-switch-attribution.md)                           | a `/login` moves running sessions: spend booked per login, `⇄` marker, index split by turn time          |
 | [2026-11-11-claude-code-cost-state.md](./2026-11-11-claude-code-cost-state.md)                                   | Claude Code's `cost-state`: exact per-model price check, $ the transcripts do not record                 |
 | [2026-11-11-next-request-tail.md](./2026-11-11-next-request-tail.md)                                             | next request writes the last reply too; multi-request token totals summed                                |
+| [2026-11-12-rename-to-cc-spend.md](./2026-11-12-rename-to-cc-spend.md)                                           | rename to cc-spend; old config dir moved once, old shim upgraded in place                                |

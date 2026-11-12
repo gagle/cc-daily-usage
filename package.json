@@ -1,18 +1,18 @@
 {
-  "name": "cc-daily-usage",
+  "name": "cc-spend",
   "version": "0.1.0",
   "description": "Keep Claude Code spend predictable: a fast live statusline with daily/monthly budgets, fresh 5h/7d limits, and the cost of your next prompt.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gagle/cc-daily-usage.git"
+    "url": "git+https://github.com/gagle/cc-spend.git"
   },
   "bugs": {
-    "url": "https://github.com/gagle/cc-daily-usage/issues"
+    "url": "https://github.com/gagle/cc-spend/issues"
   },
-  "homepage": "https://github.com/gagle/cc-daily-usage#readme",
+  "homepage": "https://github.com/gagle/cc-spend#readme",
   "type": "module",
   "bin": {
-    "cc-daily-usage": "bin/cc-daily-usage.js"
+    "cc-spend": "bin/cc-spend.js"
   },
   "exports": {
     ".": {

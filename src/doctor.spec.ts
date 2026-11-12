@@ -26,7 +26,7 @@ function fresh(): Promise<typeof DoctorModule> {
 const NOW = new Date("2026-10-15T10:00:00.000Z");
 
 function accountDir(key: string): string {
-  const dir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", key);
+  const dir = path.join(fakeHome, ".config", "cc-spend", "accounts", key);
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -46,7 +46,7 @@ function claudeAnswers(stdout: string | null): void {
 
 beforeEach(() => {
   vi.resetModules(); // module-level paths read homedir() at import
-  fakeHome = mkdtempSync(path.join(tmpdir(), "ccdu-doctor-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "ccs-doctor-"));
   claudeAnswers("2.1.293 (Claude Code)\n");
 });
 
@@ -99,7 +99,7 @@ describe("checkStatusline", () => {
     expect(checkStatusline().map((check) => check.status)).toEqual(["ok", "ok", "ok", "ok", "ok"]);
 
     const { STATUSLINE_FILE, SETTINGS_FILE } = await import("./statusline-shared.js");
-    writeFileSync(STATUSLINE_FILE, "// cc-daily-usage:managed v00000000\n");
+    writeFileSync(STATUSLINE_FILE, "// cc-spend:managed v00000000\n");
     writeFileSync(
       SETTINGS_FILE,
       JSON.stringify({ statusLine: { command: "other" }, hooks: { UserPromptSubmit: [{}] } }),
@@ -126,7 +126,7 @@ describe("checkStatusline", () => {
   it("a capture-only line counts as installed", async () => {
     const { STATUSLINE_FILE } = await import("./statusline-shared.js");
     mkdirSync(path.dirname(STATUSLINE_FILE), { recursive: true });
-    writeFileSync(STATUSLINE_FILE, "// cc-daily-usage:capture v1\n");
+    writeFileSync(STATUSLINE_FILE, "// cc-spend:capture v1\n");
     const { checkStatusline } = await fresh();
     expect(checkStatusline()[0]).toMatchObject({ status: "ok", name: "statusline" });
   });
@@ -186,7 +186,7 @@ describe("checkAccounts", () => {
     writeFileSync(lock, "");
     utimesSync(lock, new Date(NOW.getTime() - 60_000), new Date(NOW.getTime() - 60_000));
     accountDir("nolock");
-    writeFileSync(path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "stray.txt"), "");
+    writeFileSync(path.join(fakeHome, ".config", "cc-spend", "accounts", "stray.txt"), "");
 
     const { checkAccounts } = await fresh();
     const byName = Object.fromEntries(checkAccounts(NOW).map((check) => [check.name, check]));
@@ -199,7 +199,7 @@ describe("checkAccounts", () => {
     expect(byName["account bad"]).toMatchObject({
       status: "fail",
       detail:
-        "config.json is not valid JSON; usage.json is not valid JSON; limits.json v7 is from a newer cc-daily-usage",
+        "config.json is not valid JSON; usage.json is not valid JSON; limits.json v7 is from a newer cc-spend",
     });
     expect(byName["refresher bad"]).toMatchObject({
       status: "warn",
@@ -271,7 +271,7 @@ describe("doctorReport", () => {
     expect(packageVersion()).toMatch(/^\d+\.\d+\.\d+/);
     const report = await doctorReport(NOW);
     expect(report.code).toBe(1); // nothing installed in the temp HOME
-    expect(report.text).toContain(`✔ cc-daily-usage: ${packageVersion()}`);
+    expect(report.text).toContain(`✔ cc-spend: ${packageVersion()}`);
     expect(report.text).toContain("⚠ index: no pass yet");
   });
 

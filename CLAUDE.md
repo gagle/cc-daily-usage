@@ -6,7 +6,7 @@
 - User correct you → update skill / nested rule / reference. Not scratch lesson file.
 - Track progress. Elegant fix beat hack. CI/log bug fix alone: simple, permanent — **except `.env`** (ask first; see safety below).
 
-# cc-daily-usage
+# cc-spend
 
 Claude Code spend/usage tracker: CLI + statusline + terminal calendar. Zero runtime dependencies.
 

@@ -6,7 +6,7 @@ Types live in `src/interfaces/config.interface.ts` and
 ## On-disk layout
 
 ```
-~/.config/cc-daily-usage/
+~/.config/cc-spend/
   accounts/<accountKey>/config.json      Config — written by init, calendar, hook (plan/cap sync)
   accounts/<accountKey>/usage.json       UsageState — written by every render that changes it
   accounts/<accountKey>/api-cache.json   ApiCache — written ONLY by the --refresh process
@@ -22,6 +22,8 @@ Types live in `src/interfaces/config.interface.ts` and
 ~/.claude/statusline.mjs                 the managed shim (from assets/statusline.mjs)
 ~/.claude/settings.json                  statusLine { type, command, refreshInterval 30 }, hooks.UserPromptSubmit gate, hooks.PreModelSwitch cost, subagentStatusLine, promptCacheTtl
 ```
+
+Before the rename to cc-spend the root was `~/.config/cc-daily-usage/`; `moveLegacyRootDir` moves it once.
 
 All writes are atomic (temp + rename, mode `0o600`). Missing files are seeded,
 corrupt ones quarantined then re-seeded — nothing on this path throws.
@@ -45,7 +47,7 @@ A missing version is 0 (the format before versioning).
 - Downgrade guard: a file with a higher version than the code knows is read
   for what is safe (or not at all: `api-cache.json`, history files) and never
   written back (`writeVersionedFile`). The render prefixes the line with
-  `⚠ update cc-daily-usage`; a command prints `NEWER_FILE_HINT` to stderr.
+  `⚠ update cc-spend`; a command prints `NEWER_FILE_HINT` to stderr.
 
 ## `Config`
 
@@ -127,7 +129,7 @@ optional (shape observed 2026-10-15).
 
 ## `StatuslineState`
 
-What `cc-daily-usage --statusline` prints and `renderStatusline` consumes:
+What `cc-spend --statusline` prints and `renderStatusline` consumes:
 budget fields (absent on Pro/Max; `ledgerAgeMs` is the last good ledger
 reading's age while the refresher fails, else null), `capSource`, `extraUsage` (Pro/Max only),
 resolved `rateLimits` with their `source` and `readingAt`, `runway` per window,
@@ -138,10 +140,10 @@ when stale), `cache` (a `CacheForecast`), `hasSpendCap`, `planType`.
 
 ## Managed-file markers
 
-| Marker                               | Meaning                                                                                                       |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `// cc-daily-usage:managed v<8-hex>` | full managed shim; the hash covers the template **and** the stamped entry URL, so a moved package re-installs |
-| `// cc-daily-usage:capture v1`       | capture-only line injected into a foreign script                                                              |
+| Marker                         | Meaning                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `// cc-spend:managed v<8-hex>` | full managed shim; the hash covers the template **and** the stamped entry URL, so a moved package re-installs |
+| `// cc-spend:capture v1`       | capture-only line injected into a foreign script                                                              |
 
 Never hand-edit `~/.claude/statusline.mjs`; edit `assets/statusline.mjs` and
-re-run `cc-daily-usage statusline`.
+re-run `cc-spend statusline`.

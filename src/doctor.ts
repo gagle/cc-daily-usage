@@ -93,7 +93,7 @@ export function checkStatusline(): ReadonlyArray<Check> {
         ? ok("statusline", `shim v${installed}`)
         : warn(
             "statusline",
-            `shim v${installed}, this package ships v${shipped}; run: cc-daily-usage statusline`,
+            `shim v${installed}, this package ships v${shipped}; run: cc-spend statusline`,
           ),
     );
     const interval = (settings.statusLine as { refreshInterval?: unknown } | undefined)
@@ -102,23 +102,17 @@ export function checkStatusline(): ReadonlyArray<Check> {
       command !== `node ${JSON.stringify(STATUSLINE_FILE)}`
         ? fail(
             "settings",
-            "settings.json statusLine does not run the shim; run: cc-daily-usage statusline",
+            "settings.json statusLine does not run the shim; run: cc-spend statusline",
           )
         : interval === 1
-          ? warn(
-              "settings",
-              "refreshInterval 1 s from an older version; run: cc-daily-usage statusline",
-            )
+          ? warn("settings", "refreshInterval 1 s from an older version; run: cc-spend statusline")
           : ok("settings", "statusLine runs the shim"),
     );
   } else if (existing !== null && CAPTURE_MARKER_REGEX.test(existing)) {
     checks.push(ok("statusline", "capture-only line in your own statusline script"));
   } else {
     checks.push(
-      fail(
-        "statusline",
-        `${STATUSLINE_FILE} is missing or not ours; run: cc-daily-usage statusline`,
-      ),
+      fail("statusline", `${STATUSLINE_FILE} is missing or not ours; run: cc-spend statusline`),
     );
   }
   const hooks = (settings.hooks ?? {}) as Record<
@@ -132,7 +126,7 @@ export function checkStatusline(): ReadonlyArray<Check> {
     checks.push(
       commands.includes(hookCommand(binPath(), flag))
         ? ok(`hook ${event}`, flag)
-        : warn(`hook ${event}`, `missing or for another install; run: cc-daily-usage statusline`),
+        : warn(`hook ${event}`, `missing or for another install; run: cc-spend statusline`),
     );
   }
   const subagent = (settings.subagentStatusLine as { command?: unknown } | undefined)?.command;
@@ -140,7 +134,7 @@ export function checkStatusline(): ReadonlyArray<Check> {
     subagent === hookCommand(binPath(), SUBAGENT_LINE_FLAG)
       ? ok("subagent line", SUBAGENT_LINE_FLAG)
       : subagent === undefined
-        ? warn("subagent line", "missing; run: cc-daily-usage statusline")
+        ? warn("subagent line", "missing; run: cc-spend statusline")
         : ok("subagent line", "your own subagentStatusLine (kept)"),
   );
   return checks;
@@ -172,8 +166,7 @@ export function checkAccounts(now: Date): ReadonlyArray<Check> {
       values[name] = value as Record<string, unknown>;
       const version = schemaVersionOf(values[name]);
       versions.push(`${name.replace(".json", "")} v${String(version)}`);
-      if (version > known)
-        problems.push(`${name} v${String(version)} is from a newer cc-daily-usage`);
+      if (version > known) problems.push(`${name} v${String(version)} is from a newer cc-spend`);
     }
     checks.push(
       problems.length > 0
@@ -254,7 +247,7 @@ export function checkIndex(
   pass: { readonly at: string; readonly bytesBehind: number } | null,
   now: Date,
 ): Check {
-  if (pass === null) return warn("index", "no pass yet (run cc-daily-usage report)");
+  if (pass === null) return warn("index", "no pass yet (run cc-spend report)");
   const age = ago(now.getTime() - Date.parse(pass.at));
   if (pass.bytesBehind === 0) return ok("index", `last pass ${age}, up to date`);
   const mb = (pass.bytesBehind / (1024 * 1024)).toFixed(1);
@@ -266,13 +259,13 @@ export function formatCheck(check: Check): string {
   return `${mark} ${check.name}: ${check.detail}`;
 }
 
-/** `cc-daily-usage doctor`: one line per check; exit code 1 when any check fails. */
+/** `cc-spend doctor`: one line per check; exit code 1 when any check fails. */
 export async function doctorReport(
   now: Date = new Date(),
 ): Promise<{ readonly text: string; readonly code: number }> {
   const checks = [
     checkNode(process.versions.node),
-    ok("cc-daily-usage", packageVersion()),
+    ok("cc-spend", packageVersion()),
     checkClaude(await claudeVersion()),
     ...checkStatusline(),
     ...checkAccounts(now),

@@ -85,16 +85,16 @@ export function calendarUnavailableNotice(
           `   🎫 usage credits             ${dim("(when they are on)")}`,
           `   🔥 prompt-cache cost of your next message`,
           "",
-          `Set it up with: ${accent("cc-daily-usage statusline")}`,
+          `Set it up with: ${accent("cc-spend statusline")}`,
         ]
       : [
           `🔍 Plan not detected yet ${dim(`(${planName(planType)})`)}`,
           "",
           "📅 The calendar is for Claude Team / Enterprise dollar budgets.",
           "   Start one Claude Code session with the statusline installed",
-          "   so cc-daily-usage can detect your plan, then run this again.",
+          "   so cc-spend can detect your plan, then run this again.",
           "",
-          `Install the statusline: ${accent("cc-daily-usage statusline")}`,
+          `Install the statusline: ${accent("cc-spend statusline")}`,
         ];
-  return box(style, "cc-daily-usage calendar", lines);
+  return box(style, "cc-spend calendar", lines);
 }

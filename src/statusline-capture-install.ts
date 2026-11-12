@@ -12,13 +12,13 @@ import {
   STATUSLINE_FILE,
 } from "./statusline-shared.js";
 
-const CAPTURE_MARKER = "// cc-daily-usage:capture v1";
+const CAPTURE_MARKER = "// cc-spend:capture v1";
 // Dynamic import, not a static one: this line gets spliced into an arbitrary foreign script (see
 // injectCaptureLine below) whose own imports we can't know or control — self-contained, assumes only that
 // an `input` variable holding the raw stdin is already in scope (the same assumption the old bash version
-// made about `input=$(cat)`, which every cc-daily-usage-aware statusline script follows).
+// made about `input=$(cat)`, which every cc-spend-aware statusline script follows).
 const CAPTURE_LINE =
-  '(await import("node:child_process")).spawnSync("cc-daily-usage --statusline", { input, shell: true, stdio: ["pipe", "ignore", "ignore"] });';
+  '(await import("node:child_process")).spawnSync("cc-spend --statusline", { input, shell: true, stdio: ["pipe", "ignore", "ignore"] });';
 
 function injectCaptureLine(existingScript: string): string {
   const lines = existingScript.split("\n");

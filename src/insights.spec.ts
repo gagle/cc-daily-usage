@@ -33,7 +33,7 @@ const FINDING: Finding = {
 
 beforeEach(() => {
   vi.resetModules();
-  fakeHome = mkdtempSync(path.join(tmpdir(), "ccdu-insights-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "ccs-insights-"));
   vi.stubEnv("TZ", "UTC");
 });
 
@@ -90,7 +90,7 @@ describe("formatInsights", () => {
     expect(text).toContain("fix: Slow down\n");
     expect(text).toContain("fix: Switch → /model");
     expect(text).toContain("API-equivalent estimates");
-    expect(text).toContain("Every rule explained: cc-daily-usage insights --rules");
+    expect(text).toContain("Every rule explained: cc-spend insights --rules");
     expect(
       formatInsights([{ ...FINDING, fix: { kind: "env", key: "K", text: "t" } }], "week"),
     ).toContain("→ K=");
@@ -102,7 +102,7 @@ describe("formatRules / rulesWithFound", () => {
     const { formatRules, rulesWithFound } = await fresh();
     const { RULE_INFO } = await import("./rules.js");
     const text = formatRules([FINDING], "week");
-    expect(text).toMatch(/^What cc-daily-usage insights checks, over the last 7 days/);
+    expect(text).toMatch(/^What cc-spend insights checks, over the last 7 days/);
     expect(text).toContain(
       "● R2  Fast mode\n       checks  Turns run in fast mode.\n       why     ",
     );
@@ -142,7 +142,7 @@ describe("snoozeRule / adviceFor", () => {
       path.join(dir, "s1.jsonl"),
       line("a", "fast", NOW.toISOString()) + line("b", "fast", "2026-09-01T00:00:00.000Z"),
     );
-    const accountDir = path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "acct");
+    const accountDir = path.join(fakeHome, ".config", "cc-spend", "accounts", "acct");
     writeFileSync(
       path.join(accountDir, "sessions-map.json"),
       JSON.stringify({

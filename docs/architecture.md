@@ -1,6 +1,6 @@
 # Architecture
 
-How `cc-daily-usage` is put together: module map, data flow, multi-account
+How `cc-spend` is put together: module map, data flow, multi-account
 model, and the `hasSpendCap` branch that decides whether dollar-cap tracking
 runs at all. Runtime dependencies: none (Node built-ins only).
 
@@ -8,7 +8,7 @@ runs at all. Runtime dependencies: none (Node built-ins only).
 
 ```
                  +-----------------------------+
-   +--------+    |        cc-daily-usage       |    +-------------------+
+   +--------+    |        cc-spend       |    +-------------------+
    |  User  |<-->| CLI + statusline + terminal |<-->| Anthropic API     |
    +--------+    |          calendar           |    | /api/oauth/usage  |
                  +-----------------------------+    | /api/oauth/profile|
@@ -16,8 +16,8 @@ runs at all. Runtime dependencies: none (Node built-ins only).
                     |                    v               ^ (detached
              +-------------+     +----------------+      |  refresher only)
              | Claude Code |     |  Filesystem    |------+
-             | statusline  |     | ~/.config/cc-  |
-             | stdin JSON  |     | daily-usage/,  |
+             | statusline  |     | ~/.config/     |
+             | stdin JSON  |     | cc-spend/,     |
              +-------------+     | ~/.claude/     |
                                  +----------------+
 ```
@@ -102,10 +102,10 @@ Claude Code (stdin JSON)
   <- ANSI on stdout: row 1, prompt-cache row 2
 ```
 
-Shims installed by older versions still spawn `cc-daily-usage --statusline`
+Shims installed by older versions still spawn `cc-spend --statusline`
 and render the JSON themselves; that mode is kept.
 
-**Refresher (`cc-daily-usage --refresh <key>`, detached):**
+**Refresher (`cc-spend --refresh <key>`, detached):**
 
 ```
 resolveOAuthAccessToken (env → macOS Keychain → ~/.claude/.credentials.json)
@@ -129,13 +129,13 @@ change shows without a running session.
 ## Multi-account model
 
 Every account is scoped by `accountKey()` under
-`~/.config/cc-daily-usage/accounts/<key>/`:
+`~/.config/cc-spend/accounts/<key>/`:
 
 - `accountKey()` sanitizes the OAuth account's email into a filesystem-safe key.
 - `"default"` is used when there is no OAuth account at all.
 - A `CLAUDE_CODE_OAUTH_TOKEN` override resolves its account through
   `/api/oauth/profile` once per token; the result is cached in
-  `~/.config/cc-daily-usage/profiles.json` under a token hash.
+  `~/.config/cc-spend/profiles.json` under a token hash.
 - A one-time migration moves pre-multi-account files into `accounts/legacy/`.
 
 ### Account switch

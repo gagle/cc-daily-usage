@@ -3,11 +3,11 @@
 Operations, the calendar, and the statusline segments. The manual test plan
 that exercises all of this: `adrs/2026-10-10-manual-test-plan.md`.
 
-## `cc-daily-usage init` (first run)
+## `cc-spend init` (first run)
 
 `init` and `statusline` refuse to run from an `npx` / `pnpm dlx` cache (the shim
 and hooks would point at files that are cleared later) and ask for
-`npm install -g cc-daily-usage`. `-v` / `--version` prints the version.
+`npm install -g cc-spend`. `-v` / `--version` prints the version.
 
 1. Prints the resolved account.
 2. Asks to install the statusline (Y → full shim + prompt gate hook, n → capture-only line).
@@ -18,7 +18,7 @@ and hooks would point at files that are cleared later) and ask for
    offers Monday–Friday for both.
 7. Team/Enterprise on a TTY: opens the calendar to adjust holidays and the cap.
 
-## `cc-daily-usage statusline`
+## `cc-spend statusline`
 
 Installs or upgrades `~/.claude/statusline.mjs` and merges `statusLine` into
 `~/.claude/settings.json` with `refreshInterval: 30` (a user-set value on our
@@ -29,12 +29,12 @@ drawn orange; a user's own `subagentStatusLine` is kept). Every
 `settings.json` write goes through a temp file and a rename. Idempotent; a
 foreign script is backed up first.
 
-## `cc-daily-usage uninstall`
+## `cc-spend uninstall`
 
 Removes the shim, puts back the previous `statusLine` value and the replaced
 script, and leaves `accounts/` data alone.
 
-## `cc-daily-usage settings`
+## `cc-spend settings`
 
 A grid editor for the statusline layout (`src/settings-tui.ts`). It lists the
 parts numbered 1-13 (`PARTS` in `src/statusline-layout.ts`) and shows a dashed
@@ -44,11 +44,11 @@ part number into the cell (`1` then `2` → 12; a digit that would make no part
 starts over); Backspace deletes a digit; `x`/Space clears the cell, `c` the
 grid, `r` restores the default. A preview shows the result, or the first
 error (bad number, part placed twice, empty grid). Enter saves a valid grid to
-`~/.config/cc-daily-usage/statusline.json` and exits; Esc/`q`/Ctrl+C exit
+`~/.config/cc-spend/statusline.json` and exits; Esc/`q`/Ctrl+C exit
 without saving. A part in no cell is hidden. The next render uses the file;
 nothing to reinstall. Not a TTY → prints one frame.
 
-## `cc-daily-usage calendar`
+## `cc-spend calendar`
 
 Pro/Max/unknown plan: a boxed notice (plan name, what the statusline shows
 instead), exit 0, the UI never loads. Team/Enterprise: the terminal calendar.
@@ -74,7 +74,7 @@ Header: today vs today's max with pace label (off day → `$today (off day)`),
 month vs cap with `cap: Anthropic` or `cap: local`, Day-1 max, real average,
 "no laboral days left", and "Cache re-paid today".
 
-## `cc-daily-usage doctor`
+## `cc-spend doctor`
 
 One line per check (`src/doctor.ts`), `✔` ok, `⚠` warn, `✖` fail; exit 1 when
 any check fails. Checks: Node ≥ 24, package version, `claude --version` (a
@@ -87,19 +87,19 @@ when the subscription is not active) with the Claude Code version of the
 newest session. Last: the transcript index's last pass and the bytes it left
 behind (a warn when behind or never run).
 
-## `cc-daily-usage report`
+## `cc-spend report`
 
 API-equivalent $ from local transcripts, `--chart` bars, `--session <id>` for
 one session's $ over time; see `docs/transcript-index.md`.
 
-## `cc-daily-usage live`
+## `cc-spend live`
 
 Full-screen view of every session active in the last 30 minutes, redrawn
 each second: the advisor (scorecard against a lean session, what to do now
 and why) or, with Tab, where the $ went bar by bar. `--once` prints one frame.
 Read-only. See `docs/live.md`.
 
-## `cc-daily-usage insights`
+## `cc-spend insights`
 
 Ranked findings with $, why and the exact fix; `--rules` explains every rule;
 see `docs/coach.md`.
@@ -118,7 +118,7 @@ see `docs/coach.md`.
 
 Each is guarded on its own data; a missing field hides one part, and a line
 with nothing to show is dropped. `renderStatusline` places the parts by the
-layout from `statusline.json` (`loadLayout`, see `cc-daily-usage settings`);
+layout from `statusline.json` (`loadLayout`, see `cc-spend settings`);
 the default is every part but the next action and the limit warnings on one
 line, in this order, and those two on a second line (`DEFAULT_LAYOUT`).
 Claude Code cuts a line that does not fit with `…`; more lines is the fix.
@@ -144,7 +144,7 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
    the burn rate empties it before reset. `<when>` is a time today, weekday +
    time within a week, else a date.
 10. Pro/Max: `🎫` usage credits.
-11. Budget plans: `⚠ run: cc-daily-usage init` before any laboral day exists;
+11. Budget plans: `⚠ run: cc-spend init` before any laboral day exists;
     else `$today/$max (pct)` on laboral days (`(over)` when the max is 0),
     `$today` on off days.
 12. Budget plans: `$month/$cap (pct)`, then `Nm old` while the ledger fetch fails.

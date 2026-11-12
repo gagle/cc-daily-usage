@@ -12,13 +12,13 @@ const BIN_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
   "bin",
-  "cc-daily-usage.js",
+  "cc-spend.js",
 );
 
-describe("cc-daily-usage CLI (built)", () => {
+describe("cc-spend CLI (built)", () => {
   it("prints the usage block for --help", async () => {
     const { stdout } = await execFileAsync("node", [BIN_PATH, "--help"]);
-    expect(stdout).toContain("cc-daily-usage <operation>");
+    expect(stdout).toContain("cc-spend <operation>");
     expect(stdout).toContain("calendar");
     expect(stdout).toContain("init");
     expect(stdout).toContain("statusline");
@@ -41,7 +41,7 @@ describe("cc-daily-usage CLI (built)", () => {
   describe("first run in an empty HOME", () => {
     // The detached usage refresher may still be writing into HOME when a test ends: cleanup retries.
     function sandbox(organizationType: string): string {
-      const home = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-e2e-"));
+      const home = mkdtempSync(path.join(tmpdir(), "cc-spend-e2e-"));
       writeFileSync(
         path.join(home, ".claude.json"),
         JSON.stringify({ oauthAccount: { emailAddress: "e2e@example.com", organizationType } }),
@@ -71,12 +71,12 @@ describe("cc-daily-usage CLI (built)", () => {
       run(home, ["--statusline-line"], payload); // warm the OS file cache
       const { stdout, ms } = run(home, ["--statusline-line"], payload);
       expect(stdout).toContain("🤖 Opus");
-      expect(stdout).toContain("run: cc-daily-usage init");
+      expect(stdout).toContain("run: cc-spend init");
       // Generous bound for shared CI runners; locally it is well under 150ms.
       expect(ms).toBeLessThan(1500);
       const usage = JSON.parse(
         readFileSync(
-          path.join(home, ".config", "cc-daily-usage", "accounts", "e2e_example_com", "usage.json"),
+          path.join(home, ".config", "cc-spend", "accounts", "e2e_example_com", "usage.json"),
           "utf8",
         ),
       ) as { days: Record<string, number> };
@@ -86,7 +86,7 @@ describe("cc-daily-usage CLI (built)", () => {
 
     it("Pro: a fresh API reading with limit resets shows them at the end of a saved layout's first row", () => {
       const home = sandbox("claude_pro");
-      const root = path.join(home, ".config", "cc-daily-usage");
+      const root = path.join(home, ".config", "cc-spend");
       const dir = path.join(root, "accounts", "e2e_example_com");
       mkdirSync(dir, { recursive: true });
       const now = Date.now();

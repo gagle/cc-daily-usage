@@ -48,13 +48,13 @@ async function fresh(): Promise<typeof RefreshModule> {
 }
 
 function accountDir(): string {
-  return path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "acct");
+  return path.join(fakeHome, ".config", "cc-spend", "accounts", "acct");
 }
 
 const NOW = new Date("2026-10-10T10:00:00.000Z");
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-refresh-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-refresh-"));
   mkdirSync(accountDir(), { recursive: true });
   spawnMock.mockClear();
   unref.mockClear();
@@ -71,7 +71,7 @@ describe("requestApiRefresh", () => {
     expect(requestApiRefresh("acct", NOW)).toBe(true);
     expect(spawnMock).toHaveBeenCalledWith(
       process.execPath,
-      [expect.stringMatching(/bin[\\/]cc-daily-usage\.js$/), "--refresh", "acct"],
+      [expect.stringMatching(/bin[\\/]cc-spend\.js$/), "--refresh", "acct"],
       expect.objectContaining({ detached: true, stdio: "ignore" }),
     );
     expect(unref).toHaveBeenCalled();

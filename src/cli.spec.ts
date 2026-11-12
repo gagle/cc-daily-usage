@@ -133,7 +133,7 @@ const KEY = "dev_example_com";
 const INSTALLED = { installed: true, backupPath: null, fromVersion: null, toVersion: "abcd1234" };
 
 function configFile(): string {
-  return path.join(fakeHome, ".config", "cc-daily-usage", "accounts", KEY, "config.json");
+  return path.join(fakeHome, ".config", "cc-spend", "accounts", KEY, "config.json");
 }
 
 let logs: Array<string>;
@@ -144,7 +144,7 @@ function setTty(value: boolean): void {
 }
 
 beforeEach(() => {
-  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-cli-"));
+  fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-cli-"));
   logs = [];
   vi.spyOn(console, "log").mockImplementation((...args: Array<unknown>) => {
     logs.push(args.map(String).join(" "));
@@ -197,7 +197,7 @@ describe("arguments", () => {
     await runCli(["--statusline-line"]);
     expect(errors).not.toHaveBeenCalled();
     await runCli(["--help"]);
-    expect(errors).toHaveBeenCalledWith(expect.stringContaining("npm i -g cc-daily-usage"));
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("npm i -g cc-spend"));
   });
 
   it("help for no args, -h or --help anywhere", async () => {
@@ -244,7 +244,7 @@ describe("statusline / uninstall", () => {
     const { runCli } = await fresh();
     isEphemeralInstallMock.mockReturnValue(true);
     try {
-      await expect(runCli(["statusline"])).rejects.toThrow(/npm install -g cc-daily-usage/);
+      await expect(runCli(["statusline"])).rejects.toThrow(/npm install -g cc-spend/);
       await expect(runCli(["init"])).rejects.toThrow(/temporary npx\/dlx cache/);
     } finally {
       isEphemeralInstallMock.mockReturnValue(false);
@@ -404,9 +404,7 @@ describe("insights", () => {
     expect(errors).toHaveBeenCalledWith(expect.stringContaining("Another index pass"));
     await expect(runCli(["insights", "--x"])).rejects.toThrow("Unknown insights argument");
     expect(await runCli(["insights", "--rules"])).toBe(0);
-    expect(log).toHaveBeenLastCalledWith(
-      expect.stringContaining("What cc-daily-usage insights checks"),
-    );
+    expect(log).toHaveBeenLastCalledWith(expect.stringContaining("What cc-spend insights checks"));
     expect(await runCli(["insights", "--rules", "--json"])).toBe(0);
     expect(log).toHaveBeenLastCalledWith(expect.stringContaining('"found": false'));
   });
@@ -442,11 +440,11 @@ describe("calendar", () => {
     const { runCli } = await fresh();
     await runCli(["calendar"]);
     expect(logs.join("\n")).toContain("Plan not detected yet");
-    mkdirSync(path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "default"), {
+    mkdirSync(path.join(fakeHome, ".config", "cc-spend", "accounts", "default"), {
       recursive: true,
     });
     writeFileSync(
-      path.join(fakeHome, ".config", "cc-daily-usage", "accounts", "default", "config.json"),
+      path.join(fakeHome, ".config", "cc-spend", "accounts", "default", "config.json"),
       JSON.stringify({ monthlyCap: 1, laboralDays: {}, hasSpendCap: true, planType: "mystery" }),
     );
     await runCli(["calendar"]);

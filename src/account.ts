@@ -47,7 +47,7 @@ function readGlobalOauthAccount(): Account | null {
 
 // Profile lookups for a CLAUDE_CODE_OAUTH_TOKEN override, keyed by a token hash (never the token itself) —
 // the network call then happens once per token instead of once per statusline render.
-const PROFILE_CACHE_FILE = path.join(homedir(), ".config", "cc-daily-usage", "profiles.json");
+const PROFILE_CACHE_FILE = path.join(homedir(), ".config", "cc-spend", "profiles.json");
 
 function tokenHash(token: string): string {
   return createHash("sha256").update(token).digest("hex").slice(0, 16);

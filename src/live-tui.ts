@@ -151,7 +151,7 @@ export function parseLiveArgs(argv: ReadonlyArray<string>): LiveArgs | string {
 }
 
 /**
- * `cc-daily-usage live`: a full-screen meter of every active session, redrawn each second. Read-only: no file
+ * `cc-spend live`: a full-screen meter of every active session, redrawn each second. Read-only: no file
  * written apart from the feed refresh the statusline already does; no network on this process. Not covered by
  * unit tests (a TTY loop); the pieces above carry the logic.
  */

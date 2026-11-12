@@ -30,11 +30,11 @@ export interface StatuslineInstallResult {
   readonly toVersion: string | null; // null = declined
 }
 
-const ENTRY_PLACEHOLDER = "__CC_DAILY_USAGE_ENTRY__";
+const ENTRY_PLACEHOLDER = "__CC_SPEND_ENTRY__";
 
 /** The package's own bin — what our hooks (prompt gate, model switch) run. */
 export function binPath(): string {
-  return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "cc-daily-usage.js");
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "cc-spend.js");
 }
 
 /** A copy run through `npx` / `pnpm dlx` lives in a cache that is cleared later: a shim and hooks pointing
@@ -101,8 +101,8 @@ export async function installStatusline(
 
   const proceed = await confirm(
     existing
-      ? `An existing ${STATUSLINE_FILE} will be replaced with cc-daily-usage's managed statusline.`
-      : `Install cc-daily-usage's statusline to ${STATUSLINE_FILE}?`,
+      ? `An existing ${STATUSLINE_FILE} will be replaced with cc-spend's managed statusline.`
+      : `Install cc-spend's statusline to ${STATUSLINE_FILE}?`,
   );
   if (!proceed) return { installed: false, backupPath: null, fromVersion: null, toVersion: null };
 

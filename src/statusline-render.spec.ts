@@ -167,7 +167,7 @@ describe("renderStatusline", () => {
     );
     expect(
       plain(renderStatusline(payload, state({ needsInit: true, todayUsage: 5 }), "", NOW)),
-    ).toContain("⚠ run: cc-daily-usage init");
+    ).toContain("⚠ run: cc-spend init");
     const noPct = plain(
       renderStatusline(payload, state({ avgPerDay: 10, monthlyCap: 100 }), "", NOW),
     );

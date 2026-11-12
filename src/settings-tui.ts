@@ -136,7 +136,7 @@ export function renderSettings(model: SettingsModel, style: SettingsStyle): Read
   const result = cellsToLayout(model.cells);
   const placed = new Set(model.cells.flat().filter((cell) => cell !== ""));
 
-  const lines: Array<string> = [paint("1", "cc-daily-usage settings · statusline layout"), ""];
+  const lines: Array<string> = [paint("1", "cc-spend settings · statusline layout"), ""];
   lines.push("Parts (type a number into the grid; a part not in the grid is hidden):");
   PARTS.forEach((part, i) => {
     const n = String(i + 1);

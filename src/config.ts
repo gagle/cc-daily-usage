@@ -43,8 +43,7 @@ function addResetsPart(value: Record<string, unknown>): Record<string, unknown> 
 }
 export const LAYOUT_MIGRATIONS: ReadonlyArray<Migration> = [addVersionOnly, addResetsPart];
 
-export const NEWER_FILE_HINT =
-  "A file was written by a newer cc-daily-usage. Run: npm i -g cc-daily-usage";
+export const NEWER_FILE_HINT = "A file was written by a newer cc-spend. Run: npm i -g cc-spend";
 
 // Files of a format newer than this code: read what is safe, never rewrite (a downgrade guard).
 const newerFiles = new Set<string>();
@@ -85,8 +84,22 @@ export function backupFile(file: string, now: Date = new Date()): void {
   }
 }
 
-export const CONFIG_ROOT_DIR = path.join(homedir(), ".config", "cc-daily-usage");
+export const CONFIG_ROOT_DIR = path.join(homedir(), ".config", "cc-spend");
 export const ACCOUNTS_DIR = path.join(CONFIG_ROOT_DIR, "accounts");
+
+// The directory before the rename to cc-spend (v0.1.0): moved once, on the first run that finds it.
+const LEGACY_ROOT_DIR = path.join(homedir(), ".config", "cc-daily-usage");
+
+/** Moves `~/.config/cc-daily-usage` to `~/.config/cc-spend` when only the old one exists. Every entry point
+ * calls it first. A parallel process that moved it first is not an error. */
+export function moveLegacyRootDir(): void {
+  if (existsSync(CONFIG_ROOT_DIR) || !existsSync(LEGACY_ROOT_DIR)) return;
+  try {
+    renameSync(LEGACY_ROOT_DIR, CONFIG_ROOT_DIR);
+  } catch {
+    // Another process moved it; or the rename failed and the old data stays where it was.
+  }
+}
 
 // Pre-multi-account layout — only read for the one-time migration below.
 const LEGACY_CONFIG_FILE = path.join(CONFIG_ROOT_DIR, "config.json");

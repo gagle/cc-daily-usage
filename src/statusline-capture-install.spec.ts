@@ -21,7 +21,7 @@ async function freshModule(): Promise<typeof StatuslineCaptureInstallModule> {
 
 describe("installCaptureOnly", () => {
   beforeEach(() => {
-    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-capture-test-"));
+    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-capture-test-"));
     mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
   });
 
@@ -35,8 +35,8 @@ describe("installCaptureOnly", () => {
     expect(result.installed).toBe(true);
     expect(result.backupPath).toBeNull();
     const content = readFileSync(path.join(fakeHome, ".claude", "statusline.mjs"), "utf8");
-    expect(content).toContain("cc-daily-usage:capture");
-    expect(content).toContain('"cc-daily-usage --statusline"');
+    expect(content).toContain("cc-spend:capture");
+    expect(content).toContain('"cc-spend --statusline"');
   });
 
   it("injects the capture line into an existing foreign script and backs it up", async () => {
@@ -47,7 +47,7 @@ describe("installCaptureOnly", () => {
     expect(result.installed).toBe(true);
     expect(result.backupPath).toMatch(/statusline\.mjs\.bak_\d+$/);
     const content = readFileSync(statuslinePath, "utf8");
-    expect(content).toContain("cc-daily-usage:capture");
+    expect(content).toContain("cc-spend:capture");
     expect(content).toContain('echo "hi"');
   });
 
@@ -57,7 +57,7 @@ describe("installCaptureOnly", () => {
     writeFileSync(statuslinePath, 'input=$(cat)\necho "hi"');
     await installCaptureOnly(vi.fn().mockResolvedValue(true));
     const content = readFileSync(statuslinePath, "utf8");
-    expect(content.split("\n")[0]).toBe("// cc-daily-usage:capture v1");
+    expect(content.split("\n")[0]).toBe("// cc-spend:capture v1");
   });
 
   it("does nothing on decline", async () => {
@@ -70,7 +70,7 @@ describe("installCaptureOnly", () => {
   it("is a silent no-op when the capture marker is already present", async () => {
     const { installCaptureOnly } = await freshModule();
     const statuslinePath = path.join(fakeHome, ".claude", "statusline.mjs");
-    writeFileSync(statuslinePath, "// cc-daily-usage:capture v1\necho hi");
+    writeFileSync(statuslinePath, "// cc-spend:capture v1\necho hi");
     const confirm = vi.fn();
     const result = await installCaptureOnly(confirm);
     expect(result.installed).toBe(true);
@@ -80,7 +80,7 @@ describe("installCaptureOnly", () => {
   it("is a silent no-op when the full managed marker is already present", async () => {
     const { installCaptureOnly } = await freshModule();
     const statuslinePath = path.join(fakeHome, ".claude", "statusline.mjs");
-    writeFileSync(statuslinePath, "// cc-daily-usage:managed vdeadbeef\necho hi");
+    writeFileSync(statuslinePath, "// cc-spend:managed vdeadbeef\necho hi");
     const confirm = vi.fn();
     const result = await installCaptureOnly(confirm);
     expect(result.installed).toBe(true);

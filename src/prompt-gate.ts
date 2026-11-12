@@ -76,11 +76,11 @@ export async function decidePromptGate(
   return {
     kind: "block",
     reason: [
-      `❄ cc-daily-usage: the prompt cache is cold. This message re-sends the whole conversation:`,
+      `❄ cc-spend: the prompt cache is cold. This message re-sends the whole conversation:`,
       `   ~${money(gate.coldUsd)} instead of ~${money(gate.warmUsd)}.`,
       `   • Send it again within 2 min to go ahead.`,
       `   • Or /clear (free) and continue from a short summary. (/compact now would pay the re-send too.)`,
-      `   Turn off: set "promptGateMinUsd": 0 in ~/.config/cc-daily-usage/accounts/${key}/config.json`,
+      `   Turn off: set "promptGateMinUsd": 0 in ~/.config/cc-spend/accounts/${key}/config.json`,
     ].join("\n"),
   };
 }

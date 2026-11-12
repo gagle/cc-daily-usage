@@ -30,7 +30,7 @@ async function freshModule(): Promise<typeof StatuslineSharedModule> {
 
 describe("statusline-shared", () => {
   beforeEach(() => {
-    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-daily-usage-shared-test-"));
+    fakeHome = mkdtempSync(path.join(tmpdir(), "cc-spend-shared-test-"));
     mkdirSync(path.join(fakeHome, ".claude"), { recursive: true });
   });
 
@@ -47,29 +47,29 @@ describe("statusline-shared", () => {
 
   it("hasMarker matches the managed and capture markers independently", async () => {
     const { hasMarker, MANAGED_MARKER_REGEX, CAPTURE_MARKER_REGEX } = await freshModule();
-    expect(hasMarker("// cc-daily-usage:managed vdeadbeef", MANAGED_MARKER_REGEX)).toBe(true);
-    expect(hasMarker("// cc-daily-usage:capture v1", CAPTURE_MARKER_REGEX)).toBe(true);
+    expect(hasMarker("// cc-spend:managed vdeadbeef", MANAGED_MARKER_REGEX)).toBe(true);
+    expect(hasMarker("// cc-spend:capture v1", CAPTURE_MARKER_REGEX)).toBe(true);
     expect(hasMarker("plain script", MANAGED_MARKER_REGEX)).toBe(false);
   });
 
   it("computeShippedVersion is a stable 8-hex-char hash of the template", async () => {
     const { computeShippedVersion } = await freshModule();
-    const version = computeShippedVersion("echo hi __CC_DAILY_USAGE_VERSION__");
+    const version = computeShippedVersion("echo hi __CC_SPEND_VERSION__");
     expect(version).toMatch(/^[0-9a-f]{8}$/);
-    expect(computeShippedVersion("echo hi __CC_DAILY_USAGE_VERSION__")).toBe(version);
-    expect(computeShippedVersion("echo bye __CC_DAILY_USAGE_VERSION__")).not.toBe(version);
+    expect(computeShippedVersion("echo hi __CC_SPEND_VERSION__")).toBe(version);
+    expect(computeShippedVersion("echo bye __CC_SPEND_VERSION__")).not.toBe(version);
   });
 
   it("stampVersion substitutes every placeholder occurrence", async () => {
     const { stampVersion } = await freshModule();
-    expect(
-      stampVersion("v=__CC_DAILY_USAGE_VERSION__ (__CC_DAILY_USAGE_VERSION__)", "abc12345"),
-    ).toBe("v=abc12345 (abc12345)");
+    expect(stampVersion("v=__CC_SPEND_VERSION__ (__CC_SPEND_VERSION__)", "abc12345")).toBe(
+      "v=abc12345 (abc12345)",
+    );
   });
 
   it("extractVersion reads the version out of a managed marker, or null when absent", async () => {
     const { extractVersion } = await freshModule();
-    expect(extractVersion("// cc-daily-usage:managed vabc12345\necho hi")).toBe("abc12345");
+    expect(extractVersion("// cc-spend:managed vabc12345\necho hi")).toBe("abc12345");
     expect(extractVersion("echo hi")).toBeNull();
   });
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # PreToolUse guard: never let Edit/Write touch the *installed* statusline
 # script (~/.claude/statusline.mjs) — it's silently overwritten on the next
-# managed install (marker: `// cc-daily-usage:managed v<hash>`). Edit
+# managed install (marker: `// cc-spend:managed v<hash>`). Edit
 # assets/statusline.mjs (the template) instead. See docs/data-model.md.
 set -euo pipefail
 

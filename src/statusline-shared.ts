@@ -16,13 +16,14 @@ export const CLAUDE_DIR = path.join(homedir(), ".claude");
 export const STATUSLINE_FILE = path.join(CLAUDE_DIR, "statusline.mjs");
 export const SETTINGS_FILE = path.join(CLAUDE_DIR, "settings.json");
 
+// The old name (cc-daily-usage) still matches, so a shim installed before the rename upgrades in place.
 // Captures the version so installStatusline can tell "same version, no-op" apart from "different
 // version, upgrade" — see computeShippedVersion/stampVersion/extractVersion below. `//`, not `#`: the
 // managed file is JS (ESM), where `#` is only valid on a line-1 shebang.
-export const MANAGED_MARKER_REGEX = /\/\/ cc-daily-usage:managed v([0-9a-f]{8})/;
-export const CAPTURE_MARKER_REGEX = /\/\/ cc-daily-usage:capture v\d+/;
+export const MANAGED_MARKER_REGEX = /\/\/ cc-(?:spend|daily-usage):managed v([0-9a-f]{8})/;
+export const CAPTURE_MARKER_REGEX = /\/\/ cc-(?:spend|daily-usage):capture v\d+/;
 
-const VERSION_PLACEHOLDER = "__CC_DAILY_USAGE_VERSION__";
+const VERSION_PLACEHOLDER = "__CC_SPEND_VERSION__";
 
 /**
  * The shipped script's "version" is a short hash of its own template — computed from the raw template
@@ -109,7 +110,7 @@ export function writeSettings(settings: Record<string, unknown>): void {
 
 /** Merges (never overwrites other keys) a `statusLine` block pointing at our managed script. An explicit
  * `node` prefix, not a bare path relying on a shebang + exec bit: Windows resolves neither. `node` itself
- * is guaranteed on PATH — it's what runs Claude Code / cc-daily-usage in the first place. A user-set
+ * is guaranteed on PATH — it's what runs Claude Code / cc-spend in the first place. A user-set
  * refreshInterval/padding on our own block is kept (the legacy live 1 s value goes back to 30). Skips the
  * write when nothing changes. */
 export function ensureSettingsStatusLine(): void {
