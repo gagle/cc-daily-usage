@@ -358,7 +358,9 @@ export function nextApiCache(
   now: Date,
 ): ApiCache {
   const plan = previous?.plan === undefined ? {} : { plan: previous.plan };
-  if ("usage" in outcome) return { fetchedAt: now.getTime(), ...plan, ...outcome.usage };
+  const latest =
+    previous?.claudeCodeLatest === undefined ? {} : { claudeCodeLatest: previous.claudeCodeLatest };
+  if ("usage" in outcome) return { fetchedAt: now.getTime(), ...plan, ...latest, ...outcome.usage };
   return {
     extraUsage: null,
     fiveHour: null,

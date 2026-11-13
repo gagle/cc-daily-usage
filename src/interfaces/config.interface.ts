@@ -101,6 +101,7 @@ export interface ApiCache {
   readonly claudeCodeShare?: number | null; // 0-1: Claude Code's part of the 7d window (`seven_day_breakdown`)
   readonly plan?: ApiPlan;
   readonly resets?: ReadonlyArray<ApiResetGrant>; // unused, unpaused reset grants; absent before this field
+  readonly claudeCodeLatest?: { readonly version: string; readonly fetchedAt: number }; // npm `latest`, 6 h TTL
 }
 
 export interface UsageState {

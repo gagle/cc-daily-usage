@@ -164,6 +164,8 @@ Claude Code cuts a line that does not fit with `…`; more lines is the fix.
     cold cache, deep context, a limit at risk), a record that closed unseen
     (`» record #2 done: 4/5 habits better · cc-spend record`), or the week's top
     habit with its $ (`docs/coach.md`); on its own line by default.
+    `⬆ claude 2.1.320` shows left of it when npm has a newer Claude Code than the
+    running one (the hook payload `version`); the refresher reads npm, never the render.
 15. Pro/Max, when the 5h/7d windows apply to the session: `↺ 1 reset · by Nov 17`
     (or `↺ 2 resets · 1 by Nov 17`), the limit resets the account can still
     use and how many end first. Hidden with none left. Last in the first row

@@ -150,7 +150,7 @@ export const RULE_INFO: ReadonlyArray<RuleInfo> = [
     checks: "Turns with more than 200k tokens of context.",
     why: "Every turn, each tool call included, re-reads the whole context; the part above 200k is paid each time.",
     estimate: "Cache-read $ for the part above 200k.",
-    fix: "Compact earlier or start fresh for a new task (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50).",
+    fix: "Auto-compact before 200k (/autocompact 200k), or start fresh for a new task.",
     action: "/compact earlier",
   },
   {
@@ -323,11 +323,13 @@ function deepContext(input: CoachInput): Draft | null {
     id: "R5",
     usd,
     evidence: `re-reading context above 200k tokens (deepest ${String(Math.round(deepest / 1000))}k)`,
+    // Only 1M windows pass 200k (200k ones auto-compact at 167k). This window caps them at 167k too; a
+    // CLAUDE_AUTOCOMPACT_PCT_OVERRIDE of 50 would still let a 1M window grow to 490k.
     fix: {
-      kind: "env",
-      key: "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
-      value: "50",
-      text: "Compact earlier, or start fresh for a new task",
+      kind: "setting",
+      key: "autoCompactWindow",
+      value: "200000",
+      text: "Auto-compact before 200k (/autocompact 200k)",
     },
   };
 }

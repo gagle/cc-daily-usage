@@ -21,7 +21,8 @@ bound and writes no history.
    package in-process. The old shim spawned a shell, the package-manager shim,
    then a second Node.
 2. **No network on the render path.** `/api/oauth/usage` moved to a detached
-   refresher (`src/refresh.ts`); the macOS Keychain read moved with it.
+   refresher (`src/refresh.ts`); the macOS Keychain read moved with it. The npm
+   check for a newer Claude Code (`src/claude-code-version.ts`, every 6 h) runs there too.
 3. **No `git` spawn.** `src/git.ts` reads `.git/HEAD` (worktrees included).
 4. **No UI framework.** The calendar is plain ANSI with a pure renderer; React
    and Ink were removed (zero runtime dependencies).

@@ -510,6 +510,7 @@ export async function buildStatuslineState(
       switchedAt !== undefined && now.getTime() - switchedAt < SWITCH_NOTICE_MS
         ? (account?.email ?? key)
         : null,
+    claudeCodeLatest: api?.claudeCodeLatest?.version ?? null,
   };
 }
 

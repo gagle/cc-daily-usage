@@ -587,4 +587,27 @@ describe("next action part", () => {
     expect(line({ coach: null })).toBe("");
     expect(plain(renderStatusline(payload, null, "", NOW, [["coach"]]))).toBe("");
   });
+
+  it("an update of Claude Code on npm shows left of the action", () => {
+    const line = (version: string | undefined, latest: string | null, action = true): string =>
+      plain(
+        renderStatusline(
+          { ...payload, ...(version === undefined ? {} : { version }) },
+          state({
+            claudeCodeLatest: latest,
+            coach: action
+              ? { title: "Fast mode", action: "/fast off", usd: 1, window: "week" }
+              : null,
+          }),
+          "",
+          NOW,
+          [["coach"]],
+        ),
+      );
+    expect(line("2.1.319", "2.1.320")).toBe("⬆ claude 2.1.320 » /fast off · ~$1.00/week");
+    expect(line("2.1.319", "2.1.320", false)).toBe("⬆ claude 2.1.320");
+    expect(line("2.1.320", "2.1.320")).toBe("» /fast off · ~$1.00/week");
+    expect(line(undefined, "2.1.320")).toBe("» /fast off · ~$1.00/week");
+    expect(line("2.1.319", null)).toBe("» /fast off · ~$1.00/week");
+  });
 });

@@ -81,6 +81,7 @@ const DOC_MAP = {
     "src/statusline-layout.ts",
     "src/notice.ts",
     "src/statusline-render.ts",
+    "src/claude-code-version.ts",
   ],
   "docs/performance.md": [
     "src/statusline.ts",

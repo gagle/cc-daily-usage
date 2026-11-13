@@ -14,6 +14,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type * as UsageModule from "./anthropic-usage.js";
+import type * as VersionModule from "./claude-code-version.js";
 import type * as RefreshModule from "./refresh.js";
 
 let fakeHome: string;
@@ -40,6 +41,12 @@ vi.mock("./anthropic-usage.js", async (importOriginal) => {
     fetchPlan: (token: string, now: Date) => fetchPlanMock(token, now) as unknown,
     resolveOAuthAccessToken: () => tokenMock() as unknown,
   };
+});
+
+const latestMock = vi.fn().mockResolvedValue(null);
+vi.mock("./claude-code-version.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof VersionModule>();
+  return { ...actual, fetchClaudeCodeLatest: (now: Date) => latestMock(now) as unknown };
 });
 
 async function fresh(): Promise<typeof RefreshModule> {
@@ -130,6 +137,26 @@ describe("requestApiRefresh", () => {
 });
 
 describe("runRefresh", () => {
+  it("reads npm's latest Claude Code every 6 h, keeping it across refreshes", async () => {
+    tokenMock.mockReturnValue(null);
+    latestMock.mockReset();
+    latestMock.mockResolvedValue(null);
+    latestMock.mockResolvedValueOnce({ version: "2.1.320", fetchedAt: NOW.getTime() });
+    const refresh = await fresh();
+    const { loadApiCache } = await import("./config.js");
+    await refresh.runRefresh("acct", NOW);
+    expect(loadApiCache("acct")?.claudeCodeLatest).toEqual({
+      version: "2.1.320",
+      fetchedAt: NOW.getTime(),
+    });
+    await refresh.runRefresh("acct", new Date(NOW.getTime() + 60_000)); // not due: no fetch
+    expect(latestMock).toHaveBeenCalledTimes(1);
+    expect(loadApiCache("acct")?.claudeCodeLatest?.version).toBe("2.1.320");
+    await refresh.runRefresh("acct", new Date(NOW.getTime() + 6 * 3_600_000)); // due; fails
+    expect(latestMock).toHaveBeenCalledTimes(2);
+    expect(loadApiCache("acct")?.claudeCodeLatest?.version).toBe("2.1.320");
+  });
+
   it("fetches with the resolved token, writes api-cache.json, removes the lock", async () => {
     tokenMock.mockReturnValue({ token: "tok", expiresAt: null });
     fetchUsageMock.mockResolvedValue({

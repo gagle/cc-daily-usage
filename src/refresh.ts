@@ -116,7 +116,13 @@ export async function runRefresh(accountKey: string, now: Date = new Date()): Pr
     const next = nextApiCache(previous, outcome, now);
     const planDue = next.plan === undefined || now.getTime() - next.plan.fetchedAt >= PLAN_TTL_MS;
     const plan = token && "usage" in outcome && planDue ? await fetchPlan(token.token, now) : null;
-    saveApiCache(accountKey, plan === null ? next : { ...next, plan });
+    const { fetchClaudeCodeLatest, isLatestDue } = await import("./claude-code-version.js");
+    const latest = isLatestDue(next, now) ? await fetchClaudeCodeLatest(now) : null;
+    saveApiCache(accountKey, {
+      ...next,
+      ...(plan === null ? {} : { plan }),
+      ...(latest === null ? {} : { claudeCodeLatest: latest }),
+    });
     const { INDEX_DIR, ownerIndexDir, runIndexPass } = await import("./transcript-index.js");
     const pass = runIndexPass({ now }); // bounded; the rest waits for the next refresh
     // Temps of writers killed between write and rename (wall clock: mtimes are real).

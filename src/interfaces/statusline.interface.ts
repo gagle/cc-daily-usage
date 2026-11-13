@@ -33,6 +33,7 @@ export interface HookPayload extends CachePayload {
   readonly context_window?: {
     readonly total_input_tokens?: number;
     readonly used_percentage?: number | null;
+    readonly context_window_size?: number; // the model's full window (200000, 1000000)
   };
   readonly rate_limits?: {
     readonly five_hour?: { readonly used_percentage?: number; readonly resets_at?: number };
@@ -98,4 +99,5 @@ export interface StatuslineState {
   readonly hasSpendCap: boolean;
   readonly planType: string | null;
   readonly accountSwitch?: string | null; // the new login, for a few minutes after a `/login` moved this session
+  readonly claudeCodeLatest?: string | null; // npm `latest` of Claude Code, read by the refresher
 }

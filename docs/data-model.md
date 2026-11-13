@@ -117,7 +117,7 @@ closed: RecordEntry[] (newest 52), unseen: number | null }`; `RecordEntry` is
 
 ## `ApiCache`
 
-`{ fetchedAt, extraUsage, fiveHour, sevenDay, stale?, readAt?, failures?, lastError?, retryAt?, extraWindows?, claudeCodeShare?, plan?, resets? }`.
+`{ fetchedAt, extraUsage, fiveHour, sevenDay, stale?, readAt?, failures?, lastError?, retryAt?, extraWindows?, claudeCodeShare?, plan?, resets?, claudeCodeLatest? }`.
 `extraUsage` holds the usage-credits ledger in dollars (`decimal_places`
 applied); windows are `{ pct 0-100, resetsAt epoch s, usedDollars?, limitDollars?, severity? }`
 (`severity` from the response's `limits[]`: `session` → 5h, `weekly_all` →
@@ -127,7 +127,8 @@ applied); windows are `{ pct 0-100, resetsAt epoch s, usedDollars?, limitDollars
 left and not paused (`{ left, endsAt epoch ms | null }`), read from the
 undocumented `cedar_ember` block that the fetch asks for with
 `?cedar_ember=1`; empty when the account is not eligible. `plan` is `{ fetchedAt, rateLimitTier, subscriptionStatus, billingType, trialEndsAt }`
-from `/api/oauth/profile`, re-read daily. A failed fetch keeps the previous
+from `/api/oauth/profile`, re-read daily. `claudeCodeLatest` is `{ version, fetchedAt }`, npm's `latest` of
+`@anthropic-ai/claude-code`, re-read every 6 h (`src/claude-code-version.ts`); a failed read keeps the old one. A failed fetch keeps the previous
 reading with `stale: true`, its time in `readAt` (so the runway survives the
 failure), counts `failures`, and keeps why in `lastError` (`HTTP 429`,
 `network`, `bad response`, `no token`; `doctor` shows it); a good one clears

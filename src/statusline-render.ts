@@ -1,3 +1,4 @@
+import { isNewer } from "./claude-code-version.js";
 import type { ApiResetGrant, ApiWindow } from "./interfaces/config.interface.js";
 import type { HookPayload, StatuslineState } from "./interfaces/statusline.interface.js";
 import type { Runway } from "./limits-history.js";
@@ -379,7 +380,11 @@ export function renderStatusline(
         return budget ? monthPart(state) : "";
       case "coach": {
         const action = nextAction(payload, state);
-        return action ? actionPart(action) : "";
+        const latest = state?.claudeCodeLatest ?? undefined;
+        const update = isNewer(latest, payload.version)
+          ? rgb("0;200;200", `⬆ claude ${String(latest)}`)
+          : "";
+        return [update, action ? actionPart(action) : ""].filter(Boolean).join(" ");
       }
       case "spend":
         return state?.spendLimitPct == null

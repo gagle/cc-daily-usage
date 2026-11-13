@@ -199,7 +199,7 @@ describe("coach rules", () => {
     const findings = coach(input({ rows: [row({ cacheRead: 10_000_000 })] }));
     expect(only(findings, "R5")).toMatchObject({
       evidence: "re-reading context above 200k tokens (deepest 10000k)",
-      fix: { key: "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" },
+      fix: { kind: "setting", key: "autoCompactWindow", value: "200000" },
     });
     expect(only(findings, "R5")?.usd).toBeCloseTo(2 * 0.98);
   });

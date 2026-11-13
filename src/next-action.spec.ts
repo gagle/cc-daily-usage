@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { CacheForecast } from "./cache-forecast.js";
 import type { HookPayload, StatuslineState } from "./interfaces/statusline.interface.js";
 import type { Runway } from "./limits-history.js";
-import { nextAction } from "./next-action.js";
+import { autoCompactAt, nextAction } from "./next-action.js";
 
 function forecast(overrides: Partial<CacheForecast> = {}): CacheForecast {
   return {
@@ -99,6 +99,34 @@ describe("nextAction", () => {
     expect(
       nextAction(payload(520_000), state({ cache: forecast({ nextWarmUsd: 0.001 }) })),
     ).toBeNull();
+  });
+
+  it("auto-compact near: Claude Code's trigger, from its own countdown point on", () => {
+    expect(autoCompactAt(200_000)).toBe(167_000);
+    expect(autoCompactAt(1_000_000)).toBe(967_000);
+    const near = (tokens: number, size: number): HookPayload => ({
+      context_window: { total_input_tokens: tokens, context_window_size: size },
+    });
+    const s = state({ cache: forecast({ nextWarmUsd: 0.1 }) });
+    expect(nextAction(near(150_000, 200_000), s)).toEqual({
+      kind: "auto-compact",
+      text: "/compact now, with a focus · auto-compact in 17k (at 167k)",
+    });
+    expect(text(near(170_000, 200_000), state())).toBe(
+      "/compact now, with a focus · auto-compact next turn (at 167k)",
+    );
+    expect(nextAction(near(146_999, 200_000), state())).toBeNull(); // before the countdown
+    expect(text(near(520_000, 1_000_000), s)).toMatch(/^\/compact at the next break/); // 1M: deep
+    expect(text(near(950_000, 1_000_000), s)).toBe(
+      "/compact now, with a focus · auto-compact in 17k (at 967k)",
+    );
+    // cold cache stays first: what the next prompt costs matters more
+    expect(
+      nextAction(
+        near(160_000, 200_000),
+        state({ cache: forecast({ warm: false, nextColdUsd: 2 }) }),
+      )?.kind,
+    ).toBe("cold");
   });
 
   it("a limit at risk: switch routine steps to Sonnet", () => {
